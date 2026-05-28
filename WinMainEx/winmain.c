@@ -116,7 +116,6 @@ __declspec(dllimport) BOOL    WINAPI SystemParametersInfoW(UINT uiAction, UINT u
 #pragma comment(linker, "/NODEFAULTLIB")
 #pragma comment(linker, "/ENTRY:mainCRTStartup")
 #pragma comment(linker, "/MERGE:.pdata=.rdata")
-#pragma comment(linker, "/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 
 /* CRT-free build: provide memset so {0} struct inits resolve under /NODEFAULTLIB. */
