@@ -1,11 +1,13 @@
 /*
  * WinMainEx / ConsoleApplication1-mt-win32.exe  (x64 Release /MT)
  *
- * Reconstructed from the disassembly of the original binary. The Win32 APIs are
- * hand-declared (no <windows.h>) with 32-bit `int` handle return types, exactly
- * as the original did -- this reproduces the binary's `movsxd` sign-extension of
- * handle returns and the 32-bit (`dword`) stores of int-typed window args, which
- * <windows.h>'s 64-bit pointer prototypes do not generate.
+ * Win32 APIs are hand-declared (no <windows.h>) using the correct 64-bit handle
+ * types (HWND/HMENU/HCURSOR/...). An earlier revision declared handle returns and
+ * the CreateWindowExW hWndParent/hMenu/lpParam args as 32-bit `int`; passing 0 then
+ * emitted a 32-bit store into a 64-bit stack slot, leaving the high 32 bits as
+ * uninitialized stack garbage -> CreateWindowExW intermittently failed with
+ * ERROR_INVALID_MENU_HANDLE/ERROR_INVALID_WINDOW_HANDLE (Debug always, Release by
+ * luck). Correct handle types make those args full 64-bit NULLs.
  */
 
 #include <stddef.h>   /* wchar_t (no <windows.h>) */
@@ -26,6 +28,8 @@ typedef HANDLE         HINSTANCE;
 typedef HANDLE         HICON;
 typedef HANDLE         HCURSOR;
 typedef HANDLE         HBRUSH;
+typedef HANDLE         HMENU;
+typedef void*          LPVOID;
 typedef const wchar_t* LPCWSTR;
 
 #define WM_DESTROY          0x0002
@@ -66,19 +70,19 @@ typedef struct tagMSG {
     DWORD  lPrivate;
 } MSG;
 
-/* Hand-declared imports. Handle returns are `int` (32-bit) on purpose. */
-__declspec(dllimport) int     WINAPI FreeConsole(void);
+/* Hand-declared imports using correct 64-bit handle types. */
+__declspec(dllimport) BOOL    WINAPI FreeConsole(void);
 __declspec(dllimport) BOOL    WINAPI LockSetForegroundWindow(UINT uLockCode);
 __declspec(dllimport) void    WINAPI Sleep(DWORD dwMilliseconds);
-__declspec(dllimport) int     WINAPI LoadCursorW(HINSTANCE hInstance, int lpCursorName);
+__declspec(dllimport) HCURSOR WINAPI LoadCursorW(HINSTANCE hInstance, int lpCursorName);
 __declspec(dllimport) int     WINAPI RegisterClassW(const WNDCLASSW* lpWndClass);
-__declspec(dllimport) int     WINAPI CreateWindowExW(DWORD dwExStyle, LPCWSTR lpClassName,
+__declspec(dllimport) HWND    WINAPI CreateWindowExW(DWORD dwExStyle, LPCWSTR lpClassName,
     LPCWSTR lpWindowName, DWORD dwStyle, int X, int Y, int nWidth, int nHeight,
-    int hWndParent, int hMenu, HINSTANCE hInstance, int lpParam);
-__declspec(dllimport) int     WINAPI ShowWindow(HWND hWnd, int nCmdShow);
-__declspec(dllimport) int     WINAPI UpdateWindow(HWND hWnd);
-__declspec(dllimport) int     WINAPI SetForegroundWindow(HWND hWnd);
-__declspec(dllimport) int     WINAPI GetForegroundWindow(void);
+    HWND hWndParent, HMENU hMenu, HINSTANCE hInstance, LPVOID lpParam);
+__declspec(dllimport) BOOL    WINAPI ShowWindow(HWND hWnd, int nCmdShow);
+__declspec(dllimport) BOOL    WINAPI UpdateWindow(HWND hWnd);
+__declspec(dllimport) BOOL    WINAPI SetForegroundWindow(HWND hWnd);
+__declspec(dllimport) HWND    WINAPI GetForegroundWindow(void);
 __declspec(dllimport) BOOL    WINAPI EnableWindow(HWND hWnd, BOOL bEnable);
 __declspec(dllimport) int     WINAPI GetMessageW(MSG* lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMax);
 __declspec(dllimport) int     WINAPI TranslateMessage(const MSG* lpMsg);
@@ -136,10 +140,10 @@ int main(void)
     WNDCLASSW wc = { 0 };
     wc.lpfnWndProc = WndProcW;
     wc.lpszClassName = L"DummyWindowClass";
-    wc.hCursor = (HCURSOR)(LONG_PTR)LoadCursorW(0, IDC_ARROW);
+    wc.hCursor = LoadCursorW(0, IDC_ARROW);
     RegisterClassW(&wc);
 
-    HWND hwnd = (HWND)(LONG_PTR)CreateWindowExW(0, wc.lpszClassName, L"DummyWindow",
+    HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"DummyWindow",
         WS_OVERLAPPEDWINDOW | WS_DISABLED,
         CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
         0, 0, wc.hInstance, 0);
@@ -154,10 +158,10 @@ int main(void)
     MSG msg;
     while (GetMessageW(&msg, 0, 0, 0) > 0)
     {
-        if (hwnd != (HWND)(LONG_PTR)GetForegroundWindow() && first)
+        if (hwnd != GetForegroundWindow() && first)
         {
             SetForegroundWindow(hwnd);
-            if (hwnd == (HWND)(LONG_PTR)GetForegroundWindow())
+            if (hwnd == GetForegroundWindow())
             {
                 first = FALSE;
                 EnableWindow(hwnd, TRUE);
