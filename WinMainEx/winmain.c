@@ -10,7 +10,11 @@
  * luck). Correct handle types make those args full 64-bit NULLs.
  */
 
-#include <stddef.h>   /* wchar_t (no <windows.h>) */
+#pragma check_stack(off)
+#pragma strict_gs_check(off)
+#pragma runtime_checks("", off)
+
+#include <stddef.h>   /* wchar_t (no <windows.h>); size_t for memset */
 
 #define WINAPI  __stdcall
 #define CALLBACK __stdcall
@@ -80,6 +84,7 @@ typedef struct tagMSG {
 } MSG;
 
 /* Hand-declared imports using correct 64-bit handle types. */
+__declspec(dllimport) void    WINAPI ExitProcess(UINT uExitCode);
 __declspec(dllimport) BOOL    WINAPI FreeConsole(void);
 __declspec(dllimport) BOOL    WINAPI LockSetForegroundWindow(UINT uLockCode);
 __declspec(dllimport) void    WINAPI Sleep(DWORD dwMilliseconds);
@@ -106,40 +111,24 @@ __declspec(dllimport) HWND    WINAPI SetActiveWindow(HWND hWnd);
 __declspec(dllimport) HWND    WINAPI SetFocus(HWND hWnd);
 __declspec(dllimport) BOOL    WINAPI SystemParametersInfoW(UINT uiAction, UINT uiParam, LPVOID pvParam, UINT fWinIni);
 
+#pragma comment(lib, "kernel32.lib")
 #pragma comment(lib, "user32.lib")
-#pragma comment(lib, "dwmapi.lib")
+#pragma comment(linker, "/NODEFAULTLIB")
+#pragma comment(linker, "/ENTRY:mainCRTStartup")
 #pragma comment(linker, "/MERGE:.pdata=.rdata")
 #pragma comment(linker, "/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
-/* Forced dead-import thunks to mirror the original x64 reference binary's IAT.
-   x64 only: undecorated names don't match x86 __stdcall decoration. */
-#ifdef _WIN64
-#pragma comment(linker, "/INCLUDE:CreateProcessW")
-#pragma comment(linker, "/INCLUDE:ExitProcess")
-#pragma comment(linker, "/INCLUDE:FreeConsole")
-#pragma comment(linker, "/INCLUDE:GetModuleHandleW")
-#pragma comment(linker, "/INCLUDE:Sleep")
-#pragma comment(linker, "/INCLUDE:MessageBoxW")
-#pragma comment(linker, "/INCLUDE:PostQuitMessage")
-#pragma comment(linker, "/INCLUDE:DefWindowProcW")
-#pragma comment(linker, "/INCLUDE:RegisterClassW")
-#pragma comment(linker, "/INCLUDE:CreateWindowExW")
-#pragma comment(linker, "/INCLUDE:LoadCursorW")
-#pragma comment(linker, "/INCLUDE:GetMessageW")
-#pragma comment(linker, "/INCLUDE:TranslateMessage")
-#pragma comment(linker, "/INCLUDE:DispatchMessageW")
-#pragma comment(linker, "/INCLUDE:ShowWindow")
-#pragma comment(linker, "/INCLUDE:UpdateWindow")
-#pragma comment(linker, "/INCLUDE:SetActiveWindow")
-#pragma comment(linker, "/INCLUDE:LockSetForegroundWindow")
-#pragma comment(linker, "/INCLUDE:SetForegroundWindow")
-#pragma comment(linker, "/INCLUDE:GetForegroundWindow")
-#pragma comment(linker, "/INCLUDE:FlashWindow")
-#pragma comment(linker, "/INCLUDE:EnableWindow")
-#pragma comment(linker, "/INCLUDE:DwmSetWindowAttribute")
-#endif
 
-LRESULT CALLBACK WndProcW(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
+/* CRT-free build: provide memset so {0} struct inits resolve under /NODEFAULTLIB. */
+#pragma function(memset)
+void* __cdecl memset(void* dst, int val, size_t count)
+{
+    unsigned char* p = (unsigned char*)dst;
+    while (count--) *p++ = (unsigned char)val;
+    return dst;
+}
+
+__declspec(safebuffers) LRESULT CALLBACK WndProcW(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
 {
     if (Msg == WM_DESTROY)
     {
@@ -153,7 +142,7 @@ LRESULT CALLBACK WndProcW(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
    the anti-focus-steal policy; sharing input state with the current foreground
    thread (AttachThreadInput) plus clearing the foreground-lock timeout satisfies
    the documented conditions so the activation actually lands. */
-static void ForceForeground(HWND hwnd)
+static __declspec(safebuffers) void ForceForeground(HWND hwnd)
 {
     DWORD fgThread  = GetWindowThreadProcessId(GetForegroundWindow(), 0);
     DWORD myThread  = GetCurrentThreadId();
@@ -173,7 +162,7 @@ static void ForceForeground(HWND hwnd)
     SystemParametersInfoW(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, (LPVOID)(UINT_PTR)oldTimeout, SPIF_SENDCHANGE);
 }
 
-int main(void)
+__declspec(safebuffers) void mainCRTStartup(void)
 {
     FreeConsole();
     LockSetForegroundWindow(LSFW_LOCK);
@@ -200,5 +189,5 @@ int main(void)
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
-    return 0;
+    ExitProcess(0);
 }
