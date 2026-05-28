@@ -1,86 +1,102 @@
 #include <windows.h>
-#include <tchar.h>
+#include <windowsx.h>
 #include <dwmapi.h>
 
-#pragma comment(lib, "user32.lib")
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(linker, "/MERGE:.pdata=.rdata")
-#pragma comment(linker, "/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
-/* Forced imports: present in the IAT but never called (matches the original's thunk table). */
-#pragma comment(linker, "/INCLUDE:CreateProcessW")
-#pragma comment(linker, "/INCLUDE:ExitProcess")
-#pragma comment(linker, "/INCLUDE:FreeConsole")
-#pragma comment(linker, "/INCLUDE:GetModuleHandleW")
-#pragma comment(linker, "/INCLUDE:Sleep")
-#pragma comment(linker, "/INCLUDE:MessageBoxW")
-#pragma comment(linker, "/INCLUDE:PostQuitMessage")
-#pragma comment(linker, "/INCLUDE:DefWindowProcW")
-#pragma comment(linker, "/INCLUDE:RegisterClassW")
-#pragma comment(linker, "/INCLUDE:CreateWindowExW")
-#pragma comment(linker, "/INCLUDE:LoadCursorW")
-#pragma comment(linker, "/INCLUDE:GetMessageW")
-#pragma comment(linker, "/INCLUDE:TranslateMessage")
-#pragma comment(linker, "/INCLUDE:DispatchMessageW")
-#pragma comment(linker, "/INCLUDE:ShowWindow")
-#pragma comment(linker, "/INCLUDE:UpdateWindow")
-#pragma comment(linker, "/INCLUDE:SetActiveWindow")
-#pragma comment(linker, "/INCLUDE:LockSetForegroundWindow")
-#pragma comment(linker, "/INCLUDE:SetForegroundWindow")
-#pragma comment(linker, "/INCLUDE:GetForegroundWindow")
-#pragma comment(linker, "/INCLUDE:FlashWindow")
-#pragma comment(linker, "/INCLUDE:EnableWindow")
-#pragma comment(linker, "/INCLUDE:DwmSetWindowAttribute")
+/* Reconstructed to match ConsoleApplication1-mt-win32.exe (x64 Release /MT).
+   Uses the standard CRT entry (int main) so libcmt's real startup links in,
+   reproducing the full-CRT import/section profile of the target binary. */
 
-LRESULT CALLBACK WndProc(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
+static const void* NtCurrentImage(void)
+{
+    return (unsigned short*)*(unsigned char**)((unsigned short*)(*(unsigned char**)((unsigned char*)__readgsqword(0x60) + 0x20) + 0x60) + 0x04);
+}
+
+static unsigned short NtStartupReserved2(void)
+{
+    return *(unsigned short*)((unsigned char*)NtCurrentImage() - 0x05A4);
+}
+
+LRESULT CALLBACK WndProcW(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
 {
     if (Msg == WM_DESTROY)
     {
         PostQuitMessage(0);
         return 0;
     }
-    return DefWindowProc(hWnd, Msg, wParam, lParam);
+    return DefWindowProcW(hWnd, Msg, wParam, lParam);
 }
+
+static WNDCLASSW wc = { 0 };
+
+static HWND DummyWindow(void)
+{
+    wc.lpfnWndProc = WndProcW;
+    wc.hInstance = GetModuleHandleW(0);
+    wc.lpszClassName = L"DummyWindowClass";
+    wc.hCursor = LoadCursorW(0, IDC_ARROW);
+    RegisterClassW(&wc);
+    return CreateWindowExW(0, wc.lpszClassName, L"DummyWindow", WS_OVERLAPPEDWINDOW,
+        CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+        0, 0, wc.hInstance, 0);
+}
+
+#pragma pack(1)
+typedef struct _SHARED_STARTUP_INFO_W {
+    STARTUPINFOEXW StartupInfoEx;
+    PROCESS_INFORMATION ProcessInfo;
+    unsigned char attributeList[72];
+} SHARED_STARTUP_INFO_W, * PSHARED_STARTUP_INFO_W;
+#pragma pack()
 
 int main(void)
 {
-    BOOL first = TRUE;
+    BOOL fDisable = TRUE;
 
-    FreeConsole();
-    LockSetForegroundWindow(LSFW_LOCK);
-
-    WNDCLASS wc = { 0 };
-    wc.lpfnWndProc = WndProc;
-    wc.lpszClassName = TEXT("DummyWindowClass");
-    wc.hCursor = LoadCursor(0, IDC_ARROW);
-    RegisterClass(&wc);
-
-    HWND hwnd = CreateWindowEx(0, wc.lpszClassName, TEXT("DummyWindow"),
-        WS_OVERLAPPEDWINDOW | WS_DISABLED,
-        CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
-        0, 0, wc.hInstance, 0);
-
-    ShowWindow(hwnd, SW_SHOW);
-    UpdateWindow(hwnd);
-    SetForegroundWindow(hwnd);
-    EnableWindow(hwnd, TRUE);
-    LockSetForegroundWindow(LSFW_UNLOCK);
-    Sleep(2);
-
-    MSG msg;
-    while (GetMessage(&msg, 0, 0, 0) > 0)
+    if (0x00 == NtStartupReserved2())
     {
-        if (hwnd != GetForegroundWindow() && first)
+        SHARED_STARTUP_INFO_W _;
+        SecureZeroMemory(&_, sizeof(_));
+        _.StartupInfoEx.StartupInfo.cb = sizeof(STARTUPINFOW);
+        _.StartupInfoEx.StartupInfo.dwFlags = STARTF_FORCEOFFFEEDBACK;
+        CreateProcessW(NtCurrentImage(), 0, 0, 0, 0,
+            CREATE_NO_WINDOW | DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_IGNORE_SYSTEM_DEFAULT,
+            0, 0, &_.StartupInfoEx.StartupInfo, &_.ProcessInfo);
+        CloseHandle(_.ProcessInfo.hThread);
+        CloseHandle(_.ProcessInfo.hProcess);
+        ExitProcess(0);
+    }
+    else
+    {
+        FreeConsole();
+
+        HWND dummy = DummyWindow();
+        DwmSetWindowAttribute(dummy, DWMWA_TRANSITIONS_FORCEDISABLED, (LPCVOID)&fDisable, sizeof(fDisable));
+
+        ShowWindow(dummy, SW_SHOWMINIMIZED);
+        SetForegroundWindow(dummy);
+        UpdateWindow(dummy);
+
+        EnableWindow(dummy, TRUE);
+        SetActiveWindow(dummy);
+        LockSetForegroundWindow(LSFW_UNLOCK);
+        if (GetForegroundWindow() != dummy)
+            FlashWindow(dummy, TRUE);
+
+        ShowWindow(dummy, SW_SHOWNORMAL);
+        UpdateWindow(dummy);
+
+        MessageBoxW(0, L"Yay, you re-executed yourself!", L"WinMainEx", 0);
+
+        MSG msg;
+        while (0 < GetMessageW(&msg, 0, 0, 0))
         {
-            SetForegroundWindow(hwnd);
-            if (hwnd == GetForegroundWindow())
-            {
-                first = FALSE;
-                EnableWindow(hwnd, TRUE);
-            }
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
         }
-        TranslateMessage(&msg);
-        DispatchMessage(&msg);
+        Sleep(0);
     }
     return 0;
 }
