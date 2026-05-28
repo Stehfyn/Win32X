@@ -18,10 +18,16 @@
 typedef unsigned int   UINT;
 typedef unsigned long  DWORD;          /* 32-bit on Windows */
 typedef int            BOOL;
-typedef __int64        LONG_PTR;
-typedef __int64        LRESULT;
-typedef __int64        LPARAM;
-typedef unsigned __int64 WPARAM;
+#ifdef _WIN64
+typedef __int64          LONG_PTR;
+typedef unsigned __int64 UINT_PTR;
+#else
+typedef long             LONG_PTR;
+typedef unsigned int     UINT_PTR;
+#endif
+typedef LONG_PTR         LRESULT;
+typedef LONG_PTR         LPARAM;
+typedef UINT_PTR         WPARAM;
 typedef void*          HANDLE;
 typedef HANDLE         HWND;
 typedef HANDLE         HINSTANCE;
@@ -38,6 +44,9 @@ typedef const wchar_t* LPCWSTR;
 #define WS_DISABLED         0x08000000
 #define CW_USEDEFAULT       ((int)0x80000000)
 #define SW_SHOW             5
+#define SPI_GETFOREGROUNDLOCKTIMEOUT 0x2000
+#define SPI_SETFOREGROUNDLOCKTIMEOUT 0x2001
+#define SPIF_SENDCHANGE             0x0002
 #define LSFW_LOCK           1
 #define LSFW_UNLOCK         2
 #define TRUE                1
@@ -89,13 +98,22 @@ __declspec(dllimport) int     WINAPI TranslateMessage(const MSG* lpMsg);
 __declspec(dllimport) int     WINAPI DispatchMessageW(const MSG* lpMsg);
 __declspec(dllimport) int     WINAPI DefWindowProcW(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam);
 __declspec(dllimport) void    WINAPI PostQuitMessage(int nExitCode);
+__declspec(dllimport) DWORD   WINAPI GetWindowThreadProcessId(HWND hWnd, DWORD* lpdwProcessId);
+__declspec(dllimport) DWORD   WINAPI GetCurrentThreadId(void);
+__declspec(dllimport) BOOL    WINAPI AttachThreadInput(DWORD idAttach, DWORD idAttachTo, BOOL fAttach);
+__declspec(dllimport) BOOL    WINAPI BringWindowToTop(HWND hWnd);
+__declspec(dllimport) HWND    WINAPI SetActiveWindow(HWND hWnd);
+__declspec(dllimport) HWND    WINAPI SetFocus(HWND hWnd);
+__declspec(dllimport) BOOL    WINAPI SystemParametersInfoW(UINT uiAction, UINT uiParam, LPVOID pvParam, UINT fWinIni);
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(linker, "/MERGE:.pdata=.rdata")
 #pragma comment(linker, "/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
-/* Forced imports: present in the IAT but never called (matches the original's thunk table). */
+/* Forced dead-import thunks to mirror the original x64 reference binary's IAT.
+   x64 only: undecorated names don't match x86 __stdcall decoration. */
+#ifdef _WIN64
 #pragma comment(linker, "/INCLUDE:CreateProcessW")
 #pragma comment(linker, "/INCLUDE:ExitProcess")
 #pragma comment(linker, "/INCLUDE:FreeConsole")
@@ -119,6 +137,7 @@ __declspec(dllimport) void    WINAPI PostQuitMessage(int nExitCode);
 #pragma comment(linker, "/INCLUDE:FlashWindow")
 #pragma comment(linker, "/INCLUDE:EnableWindow")
 #pragma comment(linker, "/INCLUDE:DwmSetWindowAttribute")
+#endif
 
 LRESULT CALLBACK WndProcW(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
 {
@@ -130,10 +149,32 @@ LRESULT CALLBACK WndProcW(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
     return DefWindowProcW(hWnd, Msg, wParam, lParam);
 }
 
+/* Deterministically take the foreground. SetForegroundWindow alone is subject to
+   the anti-focus-steal policy; sharing input state with the current foreground
+   thread (AttachThreadInput) plus clearing the foreground-lock timeout satisfies
+   the documented conditions so the activation actually lands. */
+static void ForceForeground(HWND hwnd)
+{
+    DWORD fgThread  = GetWindowThreadProcessId(GetForegroundWindow(), 0);
+    DWORD myThread  = GetCurrentThreadId();
+    DWORD oldTimeout = 0;
+
+    SystemParametersInfoW(SPI_GETFOREGROUNDLOCKTIMEOUT, 0, &oldTimeout, 0);
+    SystemParametersInfoW(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, (LPVOID)0, SPIF_SENDCHANGE);
+
+    AttachThreadInput(myThread, fgThread, TRUE);
+    BringWindowToTop(hwnd);
+    ShowWindow(hwnd, SW_SHOW);
+    SetForegroundWindow(hwnd);
+    SetActiveWindow(hwnd);
+    SetFocus(hwnd);
+    AttachThreadInput(myThread, fgThread, FALSE);
+
+    SystemParametersInfoW(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, (LPVOID)(UINT_PTR)oldTimeout, SPIF_SENDCHANGE);
+}
+
 int main(void)
 {
-    BOOL first = TRUE;
-
     FreeConsole();
     LockSetForegroundWindow(LSFW_LOCK);
 
@@ -148,25 +189,14 @@ int main(void)
         CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
         0, 0, wc.hInstance, 0);
 
-    ShowWindow(hwnd, SW_SHOW);
+    EnableWindow(hwnd, TRUE);              /* created WS_DISABLED; enable before activating */
+    LockSetForegroundWindow(LSFW_UNLOCK);  /* release the startup lock so we can foreground */
+    ForceForeground(hwnd);                 /* show + deterministically take the foreground */
     UpdateWindow(hwnd);
-    SetForegroundWindow(hwnd);
-    EnableWindow(hwnd, TRUE);
-    LockSetForegroundWindow(LSFW_UNLOCK);
-    Sleep(2);
 
     MSG msg;
     while (GetMessageW(&msg, 0, 0, 0) > 0)
     {
-        if (hwnd != GetForegroundWindow() && first)
-        {
-            SetForegroundWindow(hwnd);
-            if (hwnd == GetForegroundWindow())
-            {
-                first = FALSE;
-                EnableWindow(hwnd, TRUE);
-            }
-        }
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
