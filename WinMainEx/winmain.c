@@ -18,6 +18,7 @@
 
 #define WINAPI  __stdcall
 #define CALLBACK __stdcall
+#define NTAPI    __stdcall
 #define CFORCEINLINE __forceinline
 
 typedef unsigned int   UINT;
@@ -49,6 +50,8 @@ typedef long           LONG;
 typedef HANDLE         HMONITOR;
 
 #define WM_DESTROY          0x0002
+#define WM_QUIT             0x0012
+#define PM_REMOVE           0x0001
 #define IDC_ARROW           0x7F00
 #define WS_OVERLAPPEDWINDOW 0x00CF0000
 #define WIN_W               960
@@ -61,6 +64,8 @@ typedef HANDLE         HMONITOR;
 #define SWP_NOSIZE          0x0001
 #define SWP_NOZORDER        0x0004
 #define SWP_NOACTIVATE      0x0010
+#define DWMWA_TRANSITIONS_FORCEDISABLED 3
+#define DWMWA_CLOAK         13
 #define SPI_GETFOREGROUNDLOCKTIMEOUT 0x2000
 #define SPI_SETFOREGROUNDLOCKTIMEOUT 0x2001
 #define LSFW_LOCK           1
@@ -147,7 +152,6 @@ __declspec(dllimport) BOOL    WINAPI ShowWindow(HWND hWnd, int nCmdShow);
 __declspec(dllimport) BOOL    WINAPI UpdateWindow(HWND hWnd);
 __declspec(dllimport) BOOL    WINAPI SetForegroundWindow(HWND hWnd);
 __declspec(dllimport) HWND    WINAPI GetForegroundWindow(void);
-__declspec(dllimport) int     WINAPI GetMessageW(MSG* lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMax);
 __declspec(dllimport) int     WINAPI TranslateMessage(const MSG* lpMsg);
 __declspec(dllimport) int     WINAPI DispatchMessageW(const MSG* lpMsg);
 __declspec(dllimport) int     WINAPI DefWindowProcW(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam);
@@ -163,6 +167,11 @@ __declspec(dllimport) HMONITOR WINAPI MonitorFromPoint(POINT pt, DWORD dwFlags);
 __declspec(dllimport) BOOL    WINAPI GetCursorPos(POINT* lpPoint);
 __declspec(dllimport) BOOL    WINAPI GetMonitorInfoW(HMONITOR hMonitor, MONITORINFO* lpmi);
 __declspec(dllimport) BOOL    WINAPI SetWindowPos(HWND hWnd, HWND hWndInsertAfter, int X, int Y, int cx, int cy, UINT uFlags);
+__declspec(dllimport) long    WINAPI DwmSetWindowAttribute(HWND hwnd, DWORD dwAttribute, const void* pvAttribute, DWORD cbAttribute);
+__declspec(dllimport) long    NTAPI  NtQueryTimerResolution(DWORD* Min, DWORD* Max, DWORD* Cur);
+__declspec(dllimport) long    NTAPI  NtSetTimerResolution(DWORD Desired, int Set, DWORD* Cur);
+__declspec(dllimport) int     WINAPI PeekMessageW(MSG* lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMax, UINT wRemoveMsg);
+__declspec(dllimport) BOOL    WINAPI WaitMessage(void);
 
 #pragma comment(lib, "kernel32.lib")
 #pragma comment(lib, "user32.lib")
@@ -205,13 +214,26 @@ __declspec(safebuffers) void mainCRTStartup(void)
     STARTUPINFOW si;
     int nCmdShow, x, y;
     POINT pt;
+    DWORD tMin, tMax, tCur;
 
-    /* First thing: shove the console offscreen. SWP_NOACTIVATE keeps it the
-       foreground/active window (so foreground does NOT hand off to Explorer) --
-       it's just no longer visible. SW_HIDE would deactivate it and cause the
-       handoff; moving offscreen does not. Only the pre-main conhost frame remains. */
-    SetWindowPos(GetConsoleWindow(), 0, WHERE_NOONE_CAN_SEE_ME, WHERE_NOONE_CAN_SEE_ME,
-        0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    /* Raise the system timer resolution to the finest available for startup. Under
+       input load (e.g. many pending mouse messages) finer scheduling lets us reach
+       the window show/foreground sooner, shrinking the conhost-visible window.
+       Released again from WM_TIMER a few seconds in. */
+    NtQueryTimerResolution(&tMin, &tMax, &tCur);
+    NtSetTimerResolution(tMax, TRUE, &tCur);
+
+    /* Hide the console without deactivating it (so it stays foreground
+       and there's NO Explorer handoff). Disable transitions FIRST so the cloak and
+       the offscreen move are instant (no fade/slide animation), then cloak
+       (compositor hide) and shove it offscreen. The transition-disable synergizes
+       with the SetWindowPos: the move doesn't animate. Only the pre-main conhost
+       frame (painted by the OS before main runs) can still appear. */
+    HWND con = GetConsoleWindow();
+    BOOL dwmTrue = TRUE;
+    DwmSetWindowAttribute(con, DWMWA_TRANSITIONS_FORCEDISABLED, &dwmTrue, sizeof(dwmTrue));
+    DwmSetWindowAttribute(con, DWMWA_CLOAK, &dwmTrue, sizeof(dwmTrue));
+    SetWindowPos(con, 0, WHERE_NOONE_CAN_SEE_ME, WHERE_NOONE_CAN_SEE_ME, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 
     GetStartupInfoW(&si);
     nCmdShow = (si.dwFlags & STARTF_USESHOWWINDOW) ? (int)si.wShowWindow : SW_SHOWNORMAL;
@@ -257,12 +279,22 @@ __declspec(safebuffers) void mainCRTStartup(void)
     ForceForeground(hwnd, nCmdShow);       /* show (per STARTUPINFO) + take foreground */
     FreeConsole();                         /* free only after our window owns foreground:
                                               the (now background) console can't hand off to Explorer */
-
     MSG msg;
-    while (GetMessageW(&msg, 0, 0, 0) > 0)
+    BOOL boosted = TRUE;
+    for (;;)
     {
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
+        while (PeekMessageW(&msg, 0, 0, 0, PM_REMOVE))
+        {
+            if (msg.message == WM_QUIT)
+                ExitProcess(0);
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        if (boosted)                       /* queue drained == loop idle: startup has settled */
+        {
+            NtSetTimerResolution(0, FALSE, &tCur);   /* drop the finer-timer boost here, not in WndProc */
+            boosted = FALSE;
+        }
+        WaitMessage();                     /* block until the next message (no busy-spin) */
     }
-    ExitProcess(0);
 }
