@@ -45,6 +45,8 @@ typedef const wchar_t* LPCWSTR;
 typedef unsigned short WORD;
 typedef wchar_t*       LPWSTR;
 typedef unsigned char* LPBYTE;
+typedef long           LONG;
+typedef HANDLE         HMONITOR;
 
 #define WM_DESTROY          0x0002
 #define IDC_ARROW           0x7F00
@@ -54,6 +56,10 @@ typedef unsigned char* LPBYTE;
 #define SW_SHOW             5
 #define SW_SHOWDEFAULT      10
 #define STARTF_USESHOWWINDOW 0x00000001
+#define MONITOR_DEFAULTTONEAREST 0x00000002
+#define SWP_NOSIZE          0x0001
+#define SWP_NOZORDER        0x0004
+#define SWP_NOACTIVATE      0x0010
 #define SPI_GETFOREGROUNDLOCKTIMEOUT 0x2000
 #define SPI_SETFOREGROUNDLOCKTIMEOUT 0x2001
 #define SPIF_SENDCHANGE             0x0002
@@ -81,6 +87,8 @@ typedef struct tagWNDCLASSW {
 } WNDCLASSW;
 
 typedef struct tagPOINT { long x, y; } POINT;
+typedef struct tagRECT { LONG left, top, right, bottom; } RECT;            /* 4x LONG: no padding */
+typedef struct tagMONITORINFO { DWORD cbSize; RECT rcMonitor; RECT rcWork; DWORD dwFlags; } MONITORINFO;
 
 typedef struct tagMSG {
     HWND   hwnd;
@@ -150,6 +158,10 @@ __declspec(dllimport) BOOL    WINAPI BringWindowToTop(HWND hWnd);
 __declspec(dllimport) HWND    WINAPI SetActiveWindow(HWND hWnd);
 __declspec(dllimport) HWND    WINAPI SetFocus(HWND hWnd);
 __declspec(dllimport) BOOL    WINAPI SystemParametersInfoW(UINT uiAction, UINT uiParam, LPVOID pvParam, UINT fWinIni);
+__declspec(dllimport) HMONITOR WINAPI MonitorFromWindow(HWND hWnd, DWORD dwFlags);
+__declspec(dllimport) BOOL    WINAPI GetMonitorInfoW(HMONITOR hMonitor, MONITORINFO* lpmi);
+__declspec(dllimport) BOOL    WINAPI GetWindowRect(HWND hWnd, RECT* lpRect);
+__declspec(dllimport) BOOL    WINAPI SetWindowPos(HWND hWnd, HWND hWndInsertAfter, int X, int Y, int cx, int cy, UINT uFlags);
 
 #pragma comment(lib, "kernel32.lib")
 #pragma comment(lib, "user32.lib")
@@ -166,6 +178,27 @@ __declspec(safebuffers) LRESULT CALLBACK WndProcW(HWND hWnd, UINT Msg, WPARAM wP
         return 0;
     }
     return DefWindowProcW(hWnd, Msg, wParam, lParam);
+}
+
+/* Center hwnd in the work area of the monitor it currently sits on. After a
+   CW_USEDEFAULT create that monitor is the shell-hinted launch monitor, so this
+   honors "open on the monitor I launched from" without parsing HASSHELLDATA. */
+static CFORCEINLINE void CenterOnMonitor(HWND hwnd)
+{
+    MONITORINFO mi;
+    RECT wr;
+    int w, h, x, y;
+
+    mi.cbSize = (DWORD)sizeof(mi);
+    GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi);
+    GetWindowRect(hwnd, &wr);
+
+    w = (int)(wr.right - wr.left);
+    h = (int)(wr.bottom - wr.top);
+    x = (int)(mi.rcWork.left + (mi.rcWork.right - mi.rcWork.left - w) / 2);
+    y = (int)(mi.rcWork.top  + (mi.rcWork.bottom - mi.rcWork.top - h) / 2);
+
+    SetWindowPos(hwnd, 0, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
 /* Deterministically take the foreground. SetForegroundWindow alone is subject to
@@ -222,6 +255,7 @@ __declspec(safebuffers) void mainCRTStartup(void)
         0, 0, wc.hInstance, 0);
 
     EnableWindow(hwnd, TRUE);              /* created WS_DISABLED; enable before activating */
+    CenterOnMonitor(hwnd);                 /* center in work rect of the launch monitor */
     LockSetForegroundWindow(LSFW_UNLOCK);  /* release the startup lock so we can foreground */
     ForceForeground(hwnd, nCmdShow);       /* show (per STARTUPINFO) + take foreground */
     UpdateWindow(hwnd);
