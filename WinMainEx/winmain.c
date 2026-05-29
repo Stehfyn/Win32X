@@ -56,6 +56,8 @@ typedef HANDLE         HMONITOR;
 #define SW_SHOW             5
 #define SW_SHOWDEFAULT      10
 #define STARTF_USESHOWWINDOW 0x00000001
+#define STARTF_USEPOSITION   0x00000004
+#define STARTF_HASSHELLDATA  0x00000400
 #define MONITOR_DEFAULTTONEAREST 0x00000002
 #define SWP_NOSIZE          0x0001
 #define SWP_NOZORDER        0x0004
@@ -180,17 +182,15 @@ __declspec(safebuffers) LRESULT CALLBACK WndProcW(HWND hWnd, UINT Msg, WPARAM wP
     return DefWindowProcW(hWnd, Msg, wParam, lParam);
 }
 
-/* Center hwnd in the work area of the monitor it currently sits on. After a
-   CW_USEDEFAULT create that monitor is the shell-hinted launch monitor, so this
-   honors "open on the monitor I launched from" without parsing HASSHELLDATA. */
-static CFORCEINLINE void CenterOnMonitor(HWND hwnd)
+/* Center hwnd in the work area of the given monitor. */
+static CFORCEINLINE void CenterOnMonitor(HWND hwnd, HMONITOR mon)
 {
     MONITORINFO mi;
     RECT wr;
     int w, h, x, y;
 
     mi.cbSize = (DWORD)sizeof(mi);
-    GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi);
+    GetMonitorInfoW(mon, &mi);
     GetWindowRect(hwnd, &wr);
 
     w = (int)(wr.right - wr.left);
@@ -255,7 +255,17 @@ __declspec(safebuffers) void mainCRTStartup(void)
         0, 0, wc.hInstance, 0);
 
     EnableWindow(hwnd, TRUE);              /* created WS_DISABLED; enable before activating */
-    CenterOnMonitor(hwnd);                 /* center in work rect of the launch monitor */
+    /* Placement priority:
+       1. STARTF_USEPOSITION  -> CW_USEDEFAULT already placed us at dwX/dwY; leave it.
+       2. STARTF_HASSHELLDATA -> hStdOutput is the shell's HMONITOR (taskbar/jump list).
+       3. otherwise           -> the monitor CW_USEDEFAULT landed on. */
+    if (!(si.dwFlags & STARTF_USEPOSITION))
+    {
+        HMONITOR mon = (si.dwFlags & STARTF_HASSHELLDATA)
+            ? si.hStdOutput
+            : MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        CenterOnMonitor(hwnd, mon);
+    }
     LockSetForegroundWindow(LSFW_UNLOCK);  /* release the startup lock so we can foreground */
     ForceForeground(hwnd, nCmdShow);       /* show (per STARTUPINFO) + take foreground */
     UpdateWindow(hwnd);
