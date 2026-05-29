@@ -51,12 +51,19 @@ typedef HANDLE         HMONITOR;
 
 #define WM_DESTROY          0x0002
 #define WM_QUIT             0x0012
+#define WM_TIMER            0x0113
 #define PM_REMOVE           0x0001
 #define IDC_ARROW           0x7F00
 #define WS_OVERLAPPEDWINDOW 0x00CF0000
 #define WIN_W               960
 #define WIN_H               600
+#define SW_HIDE             0
 #define SW_SHOWNORMAL       1
+#define SW_SHOWNOACTIVATE   4
+#define WS_EX_APPWINDOW     0x00040000
+#define WS_EX_TOOLWINDOW    0x00000080
+#define GWL_EXSTYLE         (-20)
+#define SWP_FRAMECHANGED    0x0020
 #define STARTF_USESHOWWINDOW 0x00000001
 #define STARTF_USEPOSITION   0x00000004
 #define STARTF_HASSHELLDATA  0x00000400
@@ -70,6 +77,9 @@ typedef HANDLE         HMONITOR;
 #define SPI_SETFOREGROUNDLOCKTIMEOUT 0x2001
 #define LSFW_LOCK           1
 #define LSFW_UNLOCK         2
+#define VK_SHIFT            0x10
+#define KEYEVENTF_KEYUP     0x0002
+#define MOUSEEVENTF_MOVE    0x0001
 #define TRUE                1
 #define FALSE               0
 #define WHERE_NOONE_CAN_SEE_ME ((int)-32000)
@@ -151,11 +161,16 @@ __declspec(dllimport) HWND    WINAPI CreateWindowExW(DWORD dwExStyle, LPCWSTR lp
 __declspec(dllimport) BOOL    WINAPI ShowWindow(HWND hWnd, int nCmdShow);
 __declspec(dllimport) BOOL    WINAPI UpdateWindow(HWND hWnd);
 __declspec(dllimport) BOOL    WINAPI SetForegroundWindow(HWND hWnd);
+__declspec(dllimport) void    WINAPI keybd_event(unsigned char bVk, unsigned char bScan, DWORD dwFlags, UINT_PTR dwExtraInfo);
+__declspec(dllimport) void    WINAPI mouse_event(DWORD dwFlags, DWORD dx, DWORD dy, DWORD dwData, UINT_PTR dwExtraInfo);
 __declspec(dllimport) HWND    WINAPI GetForegroundWindow(void);
 __declspec(dllimport) int     WINAPI TranslateMessage(const MSG* lpMsg);
 __declspec(dllimport) int     WINAPI DispatchMessageW(const MSG* lpMsg);
 __declspec(dllimport) int     WINAPI DefWindowProcW(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam);
 __declspec(dllimport) void    WINAPI PostQuitMessage(int nExitCode);
+__declspec(dllimport) UINT    WINAPI RegisterWindowMessageW(LPCWSTR lpString);
+__declspec(dllimport) UINT_PTR WINAPI SetTimer(HWND hWnd, UINT_PTR nIDEvent, UINT uElapse, void* lpTimerFunc);
+__declspec(dllimport) BOOL    WINAPI SetWindowTextW(HWND hWnd, LPCWSTR lpString);
 __declspec(dllimport) DWORD   WINAPI GetWindowThreadProcessId(HWND hWnd, DWORD* lpdwProcessId);
 __declspec(dllimport) DWORD   WINAPI GetCurrentThreadId(void);
 __declspec(dllimport) BOOL    WINAPI AttachThreadInput(DWORD idAttach, DWORD idAttachTo, BOOL fAttach);
@@ -167,6 +182,7 @@ __declspec(dllimport) HMONITOR WINAPI MonitorFromPoint(POINT pt, DWORD dwFlags);
 __declspec(dllimport) BOOL    WINAPI GetCursorPos(POINT* lpPoint);
 __declspec(dllimport) BOOL    WINAPI GetMonitorInfoW(HMONITOR hMonitor, MONITORINFO* lpmi);
 __declspec(dllimport) BOOL    WINAPI SetWindowPos(HWND hWnd, HWND hWndInsertAfter, int X, int Y, int cx, int cy, UINT uFlags);
+__declspec(dllimport) LONG    WINAPI SetWindowLongW(HWND hWnd, int nIndex, LONG dwNewLong);
 __declspec(dllimport) long    WINAPI DwmSetWindowAttribute(HWND hwnd, DWORD dwAttribute, const void* pvAttribute, DWORD cbAttribute);
 __declspec(dllimport) long    NTAPI  NtQueryTimerResolution(DWORD* Min, DWORD* Max, DWORD* Cur);
 __declspec(dllimport) long    NTAPI  NtSetTimerResolution(DWORD Desired, int Set, DWORD* Cur);
@@ -179,9 +195,60 @@ __declspec(dllimport) BOOL    WINAPI WaitMessage(void);
 #pragma comment(linker, "/ENTRY:mainCRTStartup")
 #pragma comment(linker, "/MERGE:.pdata=.rdata")
 
+/* ITaskbarList (COM, hand-declared -- no <shobjidl.h>): DeleteTab removes a window's
+   taskbar button cleanly (no SW_HIDE bounce, no FreeConsole churn); ActivateTab marks a
+   button active. Co* live in ole32.lib (already on the link line). */
+typedef struct _GUID { unsigned long Data1; unsigned short Data2; unsigned short Data3; unsigned char Data4[8]; } GUID;
+typedef struct ITaskbarList ITaskbarList;
+typedef struct ITaskbarListVtbl {
+    long          (WINAPI* QueryInterface)(ITaskbarList*, const GUID*, void**);
+    unsigned long (WINAPI* AddRef)(ITaskbarList*);
+    unsigned long (WINAPI* Release)(ITaskbarList*);
+    long          (WINAPI* HrInit)(ITaskbarList*);
+    long          (WINAPI* AddTab)(ITaskbarList*, HWND);
+    long          (WINAPI* DeleteTab)(ITaskbarList*, HWND);
+    long          (WINAPI* ActivateTab)(ITaskbarList*, HWND);
+    long          (WINAPI* SetActiveAlt)(ITaskbarList*, HWND);
+} ITaskbarListVtbl;
+struct ITaskbarList { ITaskbarListVtbl* lpVtbl; };
+__declspec(dllimport) long WINAPI CoInitialize(void* pvReserved);
+__declspec(dllimport) long WINAPI CoCreateInstance(const GUID* rclsid, void* pUnkOuter, unsigned long dwClsContext, const GUID* riid, void** ppv);
+static const GUID CLSID_TaskbarList = {0x56FDF344,0xFD6D,0x11D0,{0x95,0x8A,0x00,0x60,0x97,0xC9,0xA0,0x90}};
+static const GUID IID_ITaskbarList  = {0x56FDF342,0xFD6D,0x11D0,{0x95,0x8A,0x00,0x60,0x97,0xC9,0xA0,0x90}};
+#define CLSCTX_INPROC_SERVER 1
+
+/* RegisterWindowMessageW(L"TaskbarButtonCreated"): the shell SENDs this to a top-level
+   window the moment it creates that window's taskbar button. */
+static UINT g_wmTaskbarButtonCreated;
+static int  g_nCmdShow;                 /* requested show-state (STARTUPINFO), applied at activation */
 
 __declspec(safebuffers) LRESULT CALLBACK WndProcW(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
 {
+    if (g_wmTaskbarButtonCreated && Msg == g_wmTaskbarButtonCreated)
+    {
+        MSG dm;
+        {
+            ITaskbarList* tb;
+            CoInitialize(0);
+            if (CoCreateInstance(&CLSID_TaskbarList, 0, CLSCTX_INPROC_SERVER, &IID_ITaskbarList, (void**)&tb) >= 0)
+            {
+                tb->lpVtbl->HrInit(tb);
+                tb->lpVtbl->ActivateTab(tb, hWnd);
+                tb->lpVtbl->DeleteTab(tb, GetConsoleWindow());  /* remove the console's stray button */
+        while (PeekMessageW(&dm, 0, 0, 0, PM_REMOVE))
+        {
+            TranslateMessage(&dm);
+            DispatchMessageW(&dm);
+        }
+                Sleep(5);
+                tb->lpVtbl->ActivateTab(tb, hWnd);
+                //Sleep(500);
+                //tb->lpVtbl->SetActiveAlt(tb, hWnd);
+                tb->lpVtbl->Release(tb);
+            }
+        }
+        return 0;
+    }
     if (Msg == WM_DESTROY)
     {
         PostQuitMessage(0);
@@ -200,26 +267,14 @@ static CFORCEINLINE void CenteredPos(HMONITOR mon, int* px, int* py)
     *py = (int)(mi.rcWork.top  + (mi.rcWork.bottom - mi.rcWork.top - WIN_H) / 2);
 }
 
-/* Documented path only: we were started by the foreground process (Explorer),
-   which per the SetForegroundWindow rules allows us to set the foreground --
-   no AttachThreadInput / lock-timeout workarounds. */
-static CFORCEINLINE __declspec(safebuffers) void ForceForeground(HWND hwnd, int nCmdShow)
-{
-    ShowWindow(hwnd, nCmdShow);
-    SetForegroundWindow(hwnd);
-}
-
 __declspec(safebuffers) void mainCRTStartup(void)
 {
     STARTUPINFOW si;
-    int nCmdShow, x, y;
+    int x, y;
     POINT pt;
     DWORD tMin, tMax, tCur;
+    MSG msg;
 
-    /* Raise the system timer resolution to the finest available for startup. Under
-       input load (e.g. many pending mouse messages) finer scheduling lets us reach
-       the window show/foreground sooner, shrinking the conhost-visible window.
-       Released again from WM_TIMER a few seconds in. */
     NtQueryTimerResolution(&tMin, &tMax, &tCur);
     NtSetTimerResolution(tMax, TRUE, &tCur);
 
@@ -231,12 +286,15 @@ __declspec(safebuffers) void mainCRTStartup(void)
        frame (painted by the OS before main runs) can still appear. */
     HWND con = GetConsoleWindow();
     BOOL dwmTrue = TRUE;
+    SetWindowLongW(con, GWL_EXSTYLE, WS_EX_TOOLWINDOW);   /* off the taskbar, no button -- WITHOUT hiding
+                                                            it (SW_HIDE bounced foreground to the shell
+                                                            and back, desyncing our active state) */
     DwmSetWindowAttribute(con, DWMWA_TRANSITIONS_FORCEDISABLED, &dwmTrue, sizeof(dwmTrue));
     DwmSetWindowAttribute(con, DWMWA_CLOAK, &dwmTrue, sizeof(dwmTrue));
-    SetWindowPos(con, 0, WHERE_NOONE_CAN_SEE_ME, WHERE_NOONE_CAN_SEE_ME, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    SetWindowPos(con, 0, WHERE_NOONE_CAN_SEE_ME, WHERE_NOONE_CAN_SEE_ME, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
 
     GetStartupInfoW(&si);
-    nCmdShow = (si.dwFlags & STARTF_USESHOWWINDOW) ? (int)si.wShowWindow : SW_SHOWNORMAL;
+    g_nCmdShow = (si.dwFlags & STARTF_USESHOWWINDOW) ? (int)si.wShowWindow : SW_SHOWNORMAL;
 
     /* Resolve the final top-left up front -- no CW_USEDEFAULT, no create-then-move:
        1. STARTF_USEPOSITION  -> launcher's dwX/dwY.
@@ -257,6 +315,8 @@ __declspec(safebuffers) void mainCRTStartup(void)
         CenteredPos(MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST), &x, &y);
     }
 
+    g_wmTaskbarButtonCreated = RegisterWindowMessageW(L"TaskbarButtonCreated");
+
     WNDCLASSW wc;                       /* every field set explicitly: no memset emitted */
     wc.style = 0;
     wc.lpfnWndProc = WndProcW;
@@ -270,17 +330,18 @@ __declspec(safebuffers) void mainCRTStartup(void)
     wc.lpszClassName = L"DummyWindowClass";
     RegisterClassW(&wc);
 
-    HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"DummyWindow",
+    HWND hwnd = CreateWindowExW(WS_EX_APPWINDOW, wc.lpszClassName, L"DummyWindow",
         WS_OVERLAPPEDWINDOW,
         x, y, WIN_W, WIN_H,
         0, 0, wc.hInstance, 0);
 
+    ShowWindow(hwnd, SW_SHOWNOACTIVATE);   /* show but DON'T activate: creates our taskbar button while
+                                              the (invisible) console stays foreground. The activation is
+                                              deferred to the TaskbarButtonCreated handler so it happens
+                                              AFTER the button exists and as a real foreground change. */
     UpdateWindow(hwnd);
-    ForceForeground(hwnd, nCmdShow);       /* show (per STARTUPINFO) + take foreground */
-    FreeConsole();                         /* free only after our window owns foreground:
-                                              the (now background) console can't hand off to Explorer */
-    MSG msg;
     BOOL boosted = TRUE;
+
     for (;;)
     {
         while (PeekMessageW(&msg, 0, 0, 0, PM_REMOVE))
