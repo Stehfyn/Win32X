@@ -18,6 +18,7 @@
 
 #define WINAPI  __stdcall
 #define CALLBACK __stdcall
+#define CFORCEINLINE __forceinline
 
 typedef unsigned int   UINT;
 typedef unsigned long  DWORD;          /* 32-bit on Windows */
@@ -60,6 +61,9 @@ typedef LRESULT(CALLBACK* WNDPROC)(HWND, UINT, WPARAM, LPARAM);
 
 typedef struct tagWNDCLASSW {
     UINT      style;
+#ifdef _WIN64
+    int       reserved0;   /* explicit ABI padding (x64): UINT before 8-byte ptr */
+#endif
     WNDPROC   lpfnWndProc;
     int       cbClsExtra;
     int       cbWndExtra;
@@ -76,6 +80,9 @@ typedef struct tagPOINT { long x, y; } POINT;
 typedef struct tagMSG {
     HWND   hwnd;
     UINT   message;
+#ifdef _WIN64
+    int    reserved0;      /* explicit ABI padding (x64): UINT before 8-byte WPARAM */
+#endif
     WPARAM wParam;
     LPARAM lParam;
     DWORD  time;
@@ -118,15 +125,6 @@ __declspec(dllimport) BOOL    WINAPI SystemParametersInfoW(UINT uiAction, UINT u
 #pragma comment(linker, "/MERGE:.pdata=.rdata")
 
 
-/* CRT-free build: provide memset so {0} struct inits resolve under /NODEFAULTLIB. */
-#pragma function(memset)
-void* __cdecl memset(void* dst, int val, size_t count)
-{
-    unsigned char* p = (unsigned char*)dst;
-    while (count--) *p++ = (unsigned char)val;
-    return dst;
-}
-
 __declspec(safebuffers) LRESULT CALLBACK WndProcW(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
 {
     if (Msg == WM_DESTROY)
@@ -141,7 +139,7 @@ __declspec(safebuffers) LRESULT CALLBACK WndProcW(HWND hWnd, UINT Msg, WPARAM wP
    the anti-focus-steal policy; sharing input state with the current foreground
    thread (AttachThreadInput) plus clearing the foreground-lock timeout satisfies
    the documented conditions so the activation actually lands. */
-static __declspec(safebuffers) void ForceForeground(HWND hwnd)
+static CFORCEINLINE __declspec(safebuffers) void ForceForeground(HWND hwnd)
 {
     DWORD fgThread  = GetWindowThreadProcessId(GetForegroundWindow(), 0);
     DWORD myThread  = GetCurrentThreadId();
@@ -166,10 +164,17 @@ __declspec(safebuffers) void mainCRTStartup(void)
     FreeConsole();
     LockSetForegroundWindow(LSFW_LOCK);
 
-    WNDCLASSW wc = { 0 };
+    WNDCLASSW wc;                       /* every field set explicitly: no memset emitted */
+    wc.style = 0;
     wc.lpfnWndProc = WndProcW;
-    wc.lpszClassName = L"DummyWindowClass";
+    wc.cbClsExtra = 0;
+    wc.cbWndExtra = 0;
+    wc.hInstance = 0;
+    wc.hIcon = 0;
     wc.hCursor = LoadCursorW(0, IDC_ARROW);
+    wc.hbrBackground = 0;
+    wc.lpszMenuName = 0;
+    wc.lpszClassName = L"DummyWindowClass";
     RegisterClassW(&wc);
 
     HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"DummyWindow",
