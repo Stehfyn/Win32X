@@ -42,6 +42,9 @@ typedef HANDLE         HBRUSH;
 typedef HANDLE         HMENU;
 typedef void*          LPVOID;
 typedef const wchar_t* LPCWSTR;
+typedef unsigned short WORD;
+typedef wchar_t*       LPWSTR;
+typedef unsigned char* LPBYTE;
 
 #define WM_DESTROY          0x0002
 #define IDC_ARROW           0x7F00
@@ -49,6 +52,8 @@ typedef const wchar_t* LPCWSTR;
 #define WS_DISABLED         0x08000000
 #define CW_USEDEFAULT       ((int)0x80000000)
 #define SW_SHOW             5
+#define SW_SHOWDEFAULT      10
+#define STARTF_USESHOWWINDOW 0x00000001
 #define SPI_GETFOREGROUNDLOCKTIMEOUT 0x2000
 #define SPI_SETFOREGROUNDLOCKTIMEOUT 0x2001
 #define SPIF_SENDCHANGE             0x0002
@@ -90,8 +95,36 @@ typedef struct tagMSG {
     DWORD  lPrivate;
 } MSG;
 
+typedef struct _STARTUPINFOW {
+    DWORD  cb;
+#ifdef _WIN64
+    int    reserved0;      /* explicit ABI padding (x64): DWORD before 8-byte ptr */
+#endif
+    LPWSTR lpReserved;
+    LPWSTR lpDesktop;
+    LPWSTR lpTitle;
+    DWORD  dwX;
+    DWORD  dwY;
+    DWORD  dwXSize;
+    DWORD  dwYSize;
+    DWORD  dwXCountChars;
+    DWORD  dwYCountChars;
+    DWORD  dwFillAttribute;
+    DWORD  dwFlags;
+    WORD   wShowWindow;
+    WORD   cbReserved2;
+#ifdef _WIN64
+    int    reserved1;      /* explicit ABI padding (x64): WORDs before 8-byte ptr */
+#endif
+    LPBYTE lpReserved2;
+    HANDLE hStdInput;
+    HANDLE hStdOutput;
+    HANDLE hStdError;
+} STARTUPINFOW;
+
 /* Hand-declared imports using correct 64-bit handle types. */
 __declspec(dllimport) void    WINAPI ExitProcess(UINT uExitCode);
+__declspec(dllimport) void    WINAPI GetStartupInfoW(STARTUPINFOW* lpStartupInfo);
 __declspec(dllimport) BOOL    WINAPI FreeConsole(void);
 __declspec(dllimport) BOOL    WINAPI LockSetForegroundWindow(UINT uLockCode);
 __declspec(dllimport) void    WINAPI Sleep(DWORD dwMilliseconds);
@@ -139,7 +172,7 @@ __declspec(safebuffers) LRESULT CALLBACK WndProcW(HWND hWnd, UINT Msg, WPARAM wP
    the anti-focus-steal policy; sharing input state with the current foreground
    thread (AttachThreadInput) plus clearing the foreground-lock timeout satisfies
    the documented conditions so the activation actually lands. */
-static CFORCEINLINE __declspec(safebuffers) void ForceForeground(HWND hwnd)
+static CFORCEINLINE __declspec(safebuffers) void ForceForeground(HWND hwnd, int nCmdShow)
 {
     DWORD fgThread  = GetWindowThreadProcessId(GetForegroundWindow(), 0);
     DWORD myThread  = GetCurrentThreadId();
@@ -150,7 +183,7 @@ static CFORCEINLINE __declspec(safebuffers) void ForceForeground(HWND hwnd)
 
     AttachThreadInput(myThread, fgThread, TRUE);
     BringWindowToTop(hwnd);
-    ShowWindow(hwnd, SW_SHOW);
+    ShowWindow(hwnd, nCmdShow);
     SetForegroundWindow(hwnd);
     SetActiveWindow(hwnd);
     SetFocus(hwnd);
@@ -161,6 +194,12 @@ static CFORCEINLINE __declspec(safebuffers) void ForceForeground(HWND hwnd)
 
 __declspec(safebuffers) void mainCRTStartup(void)
 {
+    STARTUPINFOW si;
+    int nCmdShow;
+
+    GetStartupInfoW(&si);
+    nCmdShow = (si.dwFlags & STARTF_USESHOWWINDOW) ? (int)si.wShowWindow : SW_SHOWDEFAULT;
+
     FreeConsole();
     LockSetForegroundWindow(LSFW_LOCK);
 
@@ -184,7 +223,7 @@ __declspec(safebuffers) void mainCRTStartup(void)
 
     EnableWindow(hwnd, TRUE);              /* created WS_DISABLED; enable before activating */
     LockSetForegroundWindow(LSFW_UNLOCK);  /* release the startup lock so we can foreground */
-    ForceForeground(hwnd);                 /* show + deterministically take the foreground */
+    ForceForeground(hwnd, nCmdShow);       /* show (per STARTUPINFO) + take foreground */
     UpdateWindow(hwnd);
 
     MSG msg;
