@@ -1,17 +1,20 @@
 /*
- * WinMainEx -- the window payload of a FULL-TRUST packaged (MSIX) app, hand-declared (no
- * <windows.h>), no CRT, correct 64-bit handle types.
+ * WinMainEx -- self-re-executing fork so the window-shower has NO console and NO wait cursor.
  *
- * Clean launch model (matches how mspaint launches with no wait cursor):
- *   x64\Release\WinMainEx.exe is an IO_REPARSE_TAG_APPEXECLINK stub with AppType=0 (FullTrust),
- *   carrying this package's AUMID and pointing its Executable straight at this payload. Double-
- *   clicking it -> CreateProcess routes through packaged-app activation: the shell shows the
- *   manifest SplashScreen (which replaces Explorer's app-starting/wait cursor) and launches this
- *   exe with package identity. Because it is /SUBSYSTEM:WINDOWS there is no console, and because
- *   activation (not a raw CreateProcess+WaitForInputIdle) brings it up, there is NO wait cursor.
+ * The exe is /SUBSYSTEM:CONSOLE. Explorer's WaitForInputIdle returns IMMEDIATELY for a console
+ * process, so a double-click elicits NO app-starting/wait cursor (a GUI launch always does). The
+ * only cost of a console subsystem is the conhost frame -- so the process Explorer launches (the
+ * "parent") never shows a window: it spawns a DETACHED_PROCESS copy of itself (the "child", which
+ * has no console at all, ever), hands it the foreground baton, hides+frees its own console, and
+ * exits before the conhost can paint. The child -- launched by the parent, not by Explorer -- gets
+ * no wait cursor either, and being detached it has no conhost. It shows the window.
  *
- * This process is a normal Win32 GUI app: create the window, pump messages. No fork, no console
- * tricks, no WinRT -- the splash + activation host do the cursor suppression.
+ * Parent vs child is detected with a STARTUPINFO sentinel: the parent stamps SENTINEL_MAGIC into
+ * the inert dwXCountChars field (copied to the child unconditionally by the OS, and never set for a
+ * GUI double-click) and forwards its own (shell) STARTUPINFO, so the child inherits the placement
+ * hints (HASSHELLDATA monitor / USEPOSITION / show state) unchanged.
+ *
+ * Win32 is hand-declared (no <windows.h>), no CRT, correct 64-bit handle types.
  */
 
 #pragma check_stack(off)
@@ -63,11 +66,18 @@ typedef HANDLE         HMONITOR;
 #define WIN_W               960
 #define WIN_H               600
 #define SW_SHOWNORMAL       1
+#define SW_HIDE             0
 #define STARTF_USESHOWWINDOW 0x00000001
 #define STARTF_USEPOSITION   0x00000004
+#define STARTF_USESTDHANDLES 0x00000100
 #define STARTF_HASSHELLDATA  0x00000400
 #define MONITOR_DEFAULTTONEAREST 0x00000002
 #define CLSCTX_INPROC_SERVER 1
+
+/* fork control */
+#define CREATE_SUSPENDED     0x00000004
+#define DETACHED_PROCESS     0x00000008
+#define SENTINEL_MAGIC       0x574D4558u   /* 'WMEX' -- inert in dwXCountChars; marks the child */
 
 typedef LRESULT(CALLBACK* WNDPROC)(HWND, UINT, WPARAM, LPARAM);
 
@@ -121,7 +131,16 @@ typedef struct _STARTUPINFOW {
     HANDLE hStdInput, hStdOutput, hStdError;
 } STARTUPINFOW;
 
+typedef struct _PROCESS_INFORMATION {
+    HANDLE hProcess;
+    HANDLE hThread;
+    DWORD  dwProcessId;
+    DWORD  dwThreadId;
+} PROCESS_INFORMATION;
+
 __declspec(dllimport) void    WINAPI ExitProcess(UINT uExitCode);
+__declspec(dllimport) BOOL    WINAPI FreeConsole(void);
+__declspec(dllimport) HWND    WINAPI GetConsoleWindow(void);
 __declspec(dllimport) void    WINAPI GetStartupInfoW(STARTUPINFOW* lpStartupInfo);
 __declspec(dllimport) HCURSOR WINAPI LoadCursorW(HINSTANCE hInstance, int lpCursorName);
 __declspec(dllimport) int     WINAPI RegisterClassW(const WNDCLASSW* lpWndClass);
@@ -133,6 +152,7 @@ __declspec(dllimport) BOOL    WINAPI UpdateWindow(HWND hWnd);
 __declspec(dllimport) UINT_PTR WINAPI SetTimer(HWND hWnd, UINT_PTR nIDEvent, UINT uElapse, void* lpTimerFunc);
 __declspec(dllimport) BOOL    WINAPI KillTimer(HWND hWnd, UINT_PTR uIDEvent);
 __declspec(dllimport) BOOL    WINAPI SetForegroundWindow(HWND hWnd);
+__declspec(dllimport) BOOL    WINAPI AllowSetForegroundWindow(DWORD dwProcessId);
 __declspec(dllimport) int     WINAPI TranslateMessage(const MSG* lpMsg);
 __declspec(dllimport) int     WINAPI DispatchMessageW(const MSG* lpMsg);
 __declspec(dllimport) int     WINAPI DefWindowProcW(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam);
@@ -142,7 +162,14 @@ __declspec(dllimport) HMONITOR WINAPI MonitorFromPoint(POINT pt, DWORD dwFlags);
 __declspec(dllimport) BOOL    WINAPI GetCursorPos(POINT* lpPoint);
 __declspec(dllimport) BOOL    WINAPI GetMonitorInfoW(HMONITOR hMonitor, MONITORINFO* lpmi);
 __declspec(dllimport) int     WINAPI PeekMessageW(MSG* lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMax, UINT wRemoveMsg);
+__declspec(dllimport) int     WINAPI GetMessageW(MSG* lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMax);
 __declspec(dllimport) BOOL    WINAPI WaitMessage(void);
+__declspec(dllimport) DWORD   WINAPI GetModuleFileNameW(HANDLE hModule, LPWSTR lpFilename, DWORD nSize);
+__declspec(dllimport) BOOL    WINAPI CloseHandle(HANDLE hObject);
+__declspec(dllimport) DWORD   WINAPI ResumeThread(HANDLE hThread);
+__declspec(dllimport) BOOL    WINAPI CreateProcessW(LPCWSTR lpApplicationName, LPWSTR lpCommandLine,
+    void* lpProcessAttributes, void* lpThreadAttributes, BOOL bInheritHandles, DWORD dwCreationFlags,
+    void* lpEnvironment, LPCWSTR lpCurrentDirectory, STARTUPINFOW* lpStartupInfo, PROCESS_INFORMATION* lpProcessInformation);
 
 #pragma comment(lib, "kernel32.lib")
 #pragma comment(lib, "shell32.lib")
@@ -170,6 +197,7 @@ __declspec(dllimport) HANDLE  WINAPI LoadLibraryW(LPCWSTR lpLibFileName);
 __declspec(dllimport) GENPROC WINAPI GetProcAddress(HANDLE hModule, const char* lpProcName);
 static const GUID CLSID_TaskbarList = {0x56FDF344,0xFD6D,0x11D0,{0x95,0x8A,0x00,0x60,0x97,0xC9,0xA0,0x90}};
 static const GUID IID_ITaskbarList  = {0x56FDF342,0xFD6D,0x11D0,{0x95,0x8A,0x00,0x60,0x97,0xC9,0xA0,0x90}};
+#define CLSCTX_LOCAL_SERVER 4
 
 static UINT g_wmTaskbarButtonCreated;   /* "TaskbarButtonCreated": shell SENDs it when our button exists */
 
@@ -177,7 +205,8 @@ __declspec(safebuffers) LRESULT CALLBACK WndProcW(HWND hWnd, UINT Msg, WPARAM wP
 {
     if (g_wmTaskbarButtonCreated && Msg == g_wmTaskbarButtonCreated)
     {
-        SetTimer(hWnd, 1, 50, 0);   /* defer the taskbar COM off the startup path */
+        SetTimer(hWnd, 1, 50, 0);   /* defer the taskbar COM off the startup path: we hit the message
+                                       loop (input-idle) immediately -> no startup stall */
         return 0;
     }
     if (Msg == WM_TIMER)
@@ -220,26 +249,26 @@ static CFORCEINLINE void CenteredPos(HMONITOR mon, int* px, int* py)
     *py = (int)(mi.rcWork.top  + (mi.rcWork.bottom - mi.rcWork.top - WIN_H) / 2);
 }
 
-__declspec(safebuffers) void mainCRTStartup(void)
+/* The child: no console (DETACHED_PROCESS), no wait cursor (launched by the parent). Shows the
+   window using the placement hints forwarded in si. */
+__declspec(safebuffers) static void RunChild(const STARTUPINFOW* si)
 {
-    STARTUPINFOW si;
     int nCmdShow, x, y;
     POINT pt;
     MSG msg;
 
-    GetStartupInfoW(&si);
-    nCmdShow = (si.dwFlags & STARTF_USESHOWWINDOW) ? (int)si.wShowWindow : SW_SHOWNORMAL;
+    nCmdShow = (si->dwFlags & STARTF_USESHOWWINDOW) ? (int)si->wShowWindow : SW_SHOWNORMAL;
 
-    /* Resolve the top-left: USEPOSITION -> launcher's dwX/dwY; HASSHELLDATA -> center on the
-       shell's HMONITOR; otherwise center on the monitor under the cursor. */
-    if (si.dwFlags & STARTF_USEPOSITION)
+    /* Resolve the top-left: USEPOSITION -> shell's dwX/dwY; HASSHELLDATA -> center on the shell's
+       HMONITOR; otherwise center on the monitor under the cursor. */
+    if (si->dwFlags & STARTF_USEPOSITION)
     {
-        x = (int)si.dwX;
-        y = (int)si.dwY;
+        x = (int)si->dwX;
+        y = (int)si->dwY;
     }
-    else if (si.dwFlags & STARTF_HASSHELLDATA)
+    else if (si->dwFlags & STARTF_HASSHELLDATA)
     {
-        CenteredPos(si.hStdOutput, &x, &y);
+        CenteredPos(si->hStdOutput, &x, &y);
     }
     else
     {
@@ -262,14 +291,14 @@ __declspec(safebuffers) void mainCRTStartup(void)
     wc.lpszClassName = L"DummyWindowClass";
     RegisterClassW(&wc);
 
-    HWND hWnd = CreateWindowExW(WS_EX_APPWINDOW, wc.lpszClassName, L"WinMainEx",
+    HWND hWnd = CreateWindowExW(WS_EX_APPWINDOW, wc.lpszClassName, L"DummyWindow",
         WS_OVERLAPPEDWINDOW | WS_VISIBLE,
         x, y, WIN_W, WIN_H,
         0, 0, wc.hInstance, 0);
 
     ShowWindow(hWnd, nCmdShow);
     UpdateWindow(hWnd);
-    SetForegroundWindow(hWnd);
+    SetForegroundWindow(hWnd);   /* granted by the parent's AllowSetForegroundWindow before resume */
 
     for (;;)
     {
@@ -282,4 +311,14 @@ __declspec(safebuffers) void mainCRTStartup(void)
         }
         WaitMessage();
     }
+}
+
+__declspec(safebuffers) void mainCRTStartup(void)
+{
+    STARTUPINFOW si;
+    /* /SUBSYSTEM:WINDOWS -> no console is ever allocated (no conhost). Get the window up as fast as
+       possible: Explorer shows the app-starting cursor a short grace period after the double-click and
+       clears it the instant our top-level window appears, so the only lever is time-to-window. */
+    GetStartupInfoW(&si);
+    RunChild(&si);   /* never returns (creates the window, runs the PeekMessage idle loop) */
 }
