@@ -1,28 +1,26 @@
 /*
- * WinMainEx / ConsoleApplication1-mt-win32.exe  (x64 Release /MT)
+ * WinMainEx -- the window app (/SUBSYSTEM:WINDOWS, no console).
  *
- * Win32 APIs are hand-declared (no <windows.h>) using the correct 64-bit handle
- * types (HWND/HMENU/HCURSOR/...). An earlier revision declared handle returns and
- * the CreateWindowExW hWndParent/hMenu/lpParam args as 32-bit `int`; passing 0 then
- * emitted a 32-bit store into a 64-bit stack slot, leaving the high 32 bits as
- * uninitialized stack garbage -> CreateWindowExW intermittently failed with
- * ERROR_INVALID_MENU_HANDLE/ERROR_INVALID_WINDOW_HANDLE (Debug always, Release by
- * luck). Correct handle types make those args full 64-bit NULLs.
+ * Launched by the native launcher (launcher.exe) via RtlCreateUserProcess. Being a GUI
+ * subsystem process, it is never given a console -> no conhost, no flash, nothing to hide.
+ * Win32 is hand-declared (no <windows.h>), correct 64-bit handle types.
+ *
+ * Taskbar active state: ITaskbarList::ActivateTab, applied once, then again after draining
+ * the dispatcher queue (so it lands on the fully-registered button) -- the reliable path.
  */
 
 #pragma check_stack(off)
 #pragma strict_gs_check(off)
 #pragma runtime_checks("", off)
 
-#include <stddef.h>   /* wchar_t (no <windows.h>); size_t for memset */
+#include <stddef.h>   /* wchar_t */
 
-#define WINAPI  __stdcall
+#define WINAPI   __stdcall
 #define CALLBACK __stdcall
-#define NTAPI    __stdcall
 #define CFORCEINLINE __forceinline
 
 typedef unsigned int   UINT;
-typedef unsigned long  DWORD;          /* 32-bit on Windows */
+typedef unsigned long  DWORD;
 typedef int            BOOL;
 #ifdef _WIN64
 typedef __int64          LONG_PTR;
@@ -55,41 +53,27 @@ typedef HANDLE         HMONITOR;
 #define PM_REMOVE           0x0001
 #define IDC_ARROW           0x7F00
 #define WS_OVERLAPPEDWINDOW 0x00CF0000
+#define WS_VISIBLE          0x10000000
+#define WS_EX_APPWINDOW     0x00040000
 #define WIN_W               960
 #define WIN_H               600
-#define SW_HIDE             0
 #define SW_SHOWNORMAL       1
-#define SW_SHOWNOACTIVATE   4
-#define WS_EX_APPWINDOW     0x00040000
-#define WS_EX_TOOLWINDOW    0x00000080
-#define GWL_EXSTYLE         (-20)
-#define SWP_FRAMECHANGED    0x0020
+#define SW_HIDE             0
 #define STARTF_USESHOWWINDOW 0x00000001
 #define STARTF_USEPOSITION   0x00000004
 #define STARTF_HASSHELLDATA  0x00000400
 #define MONITOR_DEFAULTTONEAREST 0x00000002
-#define SWP_NOSIZE          0x0001
-#define SWP_NOZORDER        0x0004
-#define SWP_NOACTIVATE      0x0010
-#define DWMWA_TRANSITIONS_FORCEDISABLED 3
-#define DWMWA_CLOAK         13
-#define SPI_GETFOREGROUNDLOCKTIMEOUT 0x2000
-#define SPI_SETFOREGROUNDLOCKTIMEOUT 0x2001
-#define LSFW_LOCK           1
-#define LSFW_UNLOCK         2
-#define VK_SHIFT            0x10
-#define KEYEVENTF_KEYUP     0x0002
-#define MOUSEEVENTF_MOVE    0x0001
-#define TRUE                1
-#define FALSE               0
-#define WHERE_NOONE_CAN_SEE_ME ((int)-32000)
+#define CLSCTX_INPROC_SERVER 1
+#define STARTF_FORCEOFFFEEDBACK 0x00000080
+#define REGCLS_MULTIPLEUSE      1
+#define COINIT_APARTMENTTHREADED 2
 
 typedef LRESULT(CALLBACK* WNDPROC)(HWND, UINT, WPARAM, LPARAM);
 
 typedef struct tagWNDCLASSW {
     UINT      style;
 #ifdef _WIN64
-    int       reserved0;   /* explicit ABI padding (x64): UINT before 8-byte ptr */
+    int       reserved0;   /* ABI padding (x64): UINT before 8-byte ptr */
 #endif
     WNDPROC   lpfnWndProc;
     int       cbClsExtra;
@@ -103,14 +87,14 @@ typedef struct tagWNDCLASSW {
 } WNDCLASSW;
 
 typedef struct tagPOINT { long x, y; } POINT;
-typedef struct tagRECT { LONG left, top, right, bottom; } RECT;            /* 4x LONG: no padding */
+typedef struct tagRECT { LONG left, top, right, bottom; } RECT;
 typedef struct tagMONITORINFO { DWORD cbSize; RECT rcMonitor; RECT rcWork; DWORD dwFlags; } MONITORINFO;
 
 typedef struct tagMSG {
     HWND   hwnd;
     UINT   message;
 #ifdef _WIN64
-    int    reserved0;      /* explicit ABI padding (x64): UINT before 8-byte WPARAM */
+    int    reserved0;
 #endif
     WPARAM wParam;
     LPARAM lParam;
@@ -122,36 +106,32 @@ typedef struct tagMSG {
 typedef struct _STARTUPINFOW {
     DWORD  cb;
 #ifdef _WIN64
-    int    reserved0;      /* explicit ABI padding (x64): DWORD before 8-byte ptr */
+    int    reserved0;
 #endif
     LPWSTR lpReserved;
     LPWSTR lpDesktop;
     LPWSTR lpTitle;
-    DWORD  dwX;
-    DWORD  dwY;
-    DWORD  dwXSize;
-    DWORD  dwYSize;
-    DWORD  dwXCountChars;
-    DWORD  dwYCountChars;
-    DWORD  dwFillAttribute;
-    DWORD  dwFlags;
-    WORD   wShowWindow;
-    WORD   cbReserved2;
+    DWORD  dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags;
+    WORD   wShowWindow, cbReserved2;
 #ifdef _WIN64
-    int    reserved1;      /* explicit ABI padding (x64): WORDs before 8-byte ptr */
+    int    reserved1;
 #endif
     LPBYTE lpReserved2;
-    HANDLE hStdInput;
-    HANDLE hStdOutput;
-    HANDLE hStdError;
+    HANDLE hStdInput, hStdOutput, hStdError;
 } STARTUPINFOW;
 
-/* Hand-declared imports using correct 64-bit handle types. */
+typedef struct _PROCESS_INFORMATION {
+    HANDLE hProcess;
+    HANDLE hThread;
+    DWORD  dwProcessId;
+    DWORD  dwThreadId;
+} PROCESS_INFORMATION;
+
 __declspec(dllimport) void    WINAPI ExitProcess(UINT uExitCode);
-__declspec(dllimport) void    WINAPI GetStartupInfoW(STARTUPINFOW* lpStartupInfo);
-__declspec(dllimport) HWND    WINAPI GetConsoleWindow(void);
 __declspec(dllimport) BOOL    WINAPI FreeConsole(void);
-__declspec(dllimport) BOOL    WINAPI LockSetForegroundWindow(UINT uLockCode);
+__declspec(dllimport) HWND    WINAPI GetConsoleWindow(void);
+__declspec(dllimport) void    WINAPI GetStartupInfoW(STARTUPINFOW* lpStartupInfo);
+__declspec(dllimport) long    WINAPI GetCurrentPackageFullName(unsigned int* packageFullNameLength, wchar_t* packageFullName);
 __declspec(dllimport) void    WINAPI Sleep(DWORD dwMilliseconds);
 __declspec(dllimport) HCURSOR WINAPI LoadCursorW(HINSTANCE hInstance, int lpCursorName);
 __declspec(dllimport) int     WINAPI RegisterClassW(const WNDCLASSW* lpWndClass);
@@ -160,44 +140,40 @@ __declspec(dllimport) HWND    WINAPI CreateWindowExW(DWORD dwExStyle, LPCWSTR lp
     HWND hWndParent, HMENU hMenu, HINSTANCE hInstance, LPVOID lpParam);
 __declspec(dllimport) BOOL    WINAPI ShowWindow(HWND hWnd, int nCmdShow);
 __declspec(dllimport) BOOL    WINAPI UpdateWindow(HWND hWnd);
+__declspec(dllimport) UINT_PTR WINAPI SetTimer(HWND hWnd, UINT_PTR nIDEvent, UINT uElapse, void* lpTimerFunc);
+__declspec(dllimport) BOOL    WINAPI KillTimer(HWND hWnd, UINT_PTR uIDEvent);
 __declspec(dllimport) BOOL    WINAPI SetForegroundWindow(HWND hWnd);
-__declspec(dllimport) void    WINAPI keybd_event(unsigned char bVk, unsigned char bScan, DWORD dwFlags, UINT_PTR dwExtraInfo);
-__declspec(dllimport) void    WINAPI mouse_event(DWORD dwFlags, DWORD dx, DWORD dy, DWORD dwData, UINT_PTR dwExtraInfo);
-__declspec(dllimport) HWND    WINAPI GetForegroundWindow(void);
 __declspec(dllimport) int     WINAPI TranslateMessage(const MSG* lpMsg);
 __declspec(dllimport) int     WINAPI DispatchMessageW(const MSG* lpMsg);
 __declspec(dllimport) int     WINAPI DefWindowProcW(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam);
 __declspec(dllimport) void    WINAPI PostQuitMessage(int nExitCode);
 __declspec(dllimport) UINT    WINAPI RegisterWindowMessageW(LPCWSTR lpString);
-__declspec(dllimport) UINT_PTR WINAPI SetTimer(HWND hWnd, UINT_PTR nIDEvent, UINT uElapse, void* lpTimerFunc);
-__declspec(dllimport) BOOL    WINAPI SetWindowTextW(HWND hWnd, LPCWSTR lpString);
-__declspec(dllimport) DWORD   WINAPI GetWindowThreadProcessId(HWND hWnd, DWORD* lpdwProcessId);
-__declspec(dllimport) DWORD   WINAPI GetCurrentThreadId(void);
-__declspec(dllimport) BOOL    WINAPI AttachThreadInput(DWORD idAttach, DWORD idAttachTo, BOOL fAttach);
-__declspec(dllimport) BOOL    WINAPI BringWindowToTop(HWND hWnd);
-__declspec(dllimport) HWND    WINAPI SetActiveWindow(HWND hWnd);
-__declspec(dllimport) HWND    WINAPI SetFocus(HWND hWnd);
-__declspec(dllimport) BOOL    WINAPI SystemParametersInfoW(UINT uiAction, UINT uiParam, LPVOID pvParam, UINT fWinIni);
 __declspec(dllimport) HMONITOR WINAPI MonitorFromPoint(POINT pt, DWORD dwFlags);
 __declspec(dllimport) BOOL    WINAPI GetCursorPos(POINT* lpPoint);
 __declspec(dllimport) BOOL    WINAPI GetMonitorInfoW(HMONITOR hMonitor, MONITORINFO* lpmi);
-__declspec(dllimport) BOOL    WINAPI SetWindowPos(HWND hWnd, HWND hWndInsertAfter, int X, int Y, int cx, int cy, UINT uFlags);
-__declspec(dllimport) LONG    WINAPI SetWindowLongW(HWND hWnd, int nIndex, LONG dwNewLong);
-__declspec(dllimport) long    WINAPI DwmSetWindowAttribute(HWND hwnd, DWORD dwAttribute, const void* pvAttribute, DWORD cbAttribute);
-__declspec(dllimport) long    NTAPI  NtQueryTimerResolution(DWORD* Min, DWORD* Max, DWORD* Cur);
-__declspec(dllimport) long    NTAPI  NtSetTimerResolution(DWORD Desired, int Set, DWORD* Cur);
 __declspec(dllimport) int     WINAPI PeekMessageW(MSG* lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMax, UINT wRemoveMsg);
 __declspec(dllimport) BOOL    WINAPI WaitMessage(void);
+__declspec(dllimport) int     WINAPI GetMessageW(MSG* lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMax);
+__declspec(dllimport) wchar_t* WINAPI GetCommandLineW(void);
+__declspec(dllimport) DWORD   WINAPI GetModuleFileNameW(HANDLE hModule, LPWSTR lpFilename, DWORD nSize);
+__declspec(dllimport) BOOL    WINAPI CloseHandle(HANDLE hObject);
+__declspec(dllimport) BOOL    WINAPI CreateProcessW(LPCWSTR lpApplicationName, LPWSTR lpCommandLine,
+    void* lpProcessAttributes, void* lpThreadAttributes, BOOL bInheritHandles, DWORD dwCreationFlags,
+    void* lpEnvironment, LPCWSTR lpCurrentDirectory, STARTUPINFOW* lpStartupInfo, PROCESS_INFORMATION* lpProcessInformation);
+__declspec(dllimport) HANDLE  WINAPI ShellExecuteW(HWND hwnd, LPCWSTR lpOperation, LPCWSTR lpFile,
+    LPCWSTR lpParameters, LPCWSTR lpDirectory, int nShowCmd);
+typedef DWORD (WINAPI* LPTHREAD_START_ROUTINE)(void*);
+__declspec(dllimport) HANDLE  WINAPI CreateThread(void* sa, UINT_PTR stack,
+    LPTHREAD_START_ROUTINE start, void* param, DWORD flags, DWORD* tid);
 
 #pragma comment(lib, "kernel32.lib")
+#pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "user32.lib")
 #pragma comment(linker, "/NODEFAULTLIB")
 #pragma comment(linker, "/ENTRY:mainCRTStartup")
 #pragma comment(linker, "/MERGE:.pdata=.rdata")
 
-/* ITaskbarList (COM, hand-declared -- no <shobjidl.h>): DeleteTab removes a window's
-   taskbar button cleanly (no SW_HIDE bounce, no FreeConsole churn); ActivateTab marks a
-   button active. Co* live in ole32.lib (already on the link line). */
+/* ITaskbarList (COM, hand-declared). Co* live in ole32.lib (on the default link line). */
 typedef struct _GUID { unsigned long Data1; unsigned short Data2; unsigned short Data3; unsigned char Data4[8]; } GUID;
 typedef struct ITaskbarList ITaskbarList;
 typedef struct ITaskbarListVtbl {
@@ -211,39 +187,55 @@ typedef struct ITaskbarListVtbl {
     long          (WINAPI* SetActiveAlt)(ITaskbarList*, HWND);
 } ITaskbarListVtbl;
 struct ITaskbarList { ITaskbarListVtbl* lpVtbl; };
-__declspec(dllimport) long WINAPI CoInitialize(void* pvReserved);
-__declspec(dllimport) long WINAPI CoCreateInstance(const GUID* rclsid, void* pUnkOuter, unsigned long dwClsContext, const GUID* riid, void** ppv);
+typedef LONG_PTR (WINAPI* GENPROC)(void);
+__declspec(dllimport) HANDLE  WINAPI LoadLibraryW(LPCWSTR lpLibFileName);
+__declspec(dllimport) GENPROC WINAPI GetProcAddress(HANDLE hModule, const char* lpProcName);
 static const GUID CLSID_TaskbarList = {0x56FDF344,0xFD6D,0x11D0,{0x95,0x8A,0x00,0x60,0x97,0xC9,0xA0,0x90}};
 static const GUID IID_ITaskbarList  = {0x56FDF342,0xFD6D,0x11D0,{0x95,0x8A,0x00,0x60,0x97,0xC9,0xA0,0x90}};
-#define CLSCTX_INPROC_SERVER 1
 
-/* RegisterWindowMessageW(L"TaskbarButtonCreated"): the shell SENDs this to a top-level
-   window the moment it creates that window's taskbar button. */
-static UINT g_wmTaskbarButtonCreated;
-static int  g_nCmdShow;                 /* requested show-state (STARTUPINFO), applied at activation */
+/* IApplicationActivationManager -- self-activate through the AppX activation manager so the
+   window-showing instance is launched by the activation host (no app-starting cursor). */
+typedef struct IApplicationActivationManager IApplicationActivationManager;
+typedef struct {
+    long          (WINAPI* QueryInterface)(IApplicationActivationManager*, const GUID*, void**);
+    unsigned long (WINAPI* AddRef)(IApplicationActivationManager*);
+    unsigned long (WINAPI* Release)(IApplicationActivationManager*);
+    long          (WINAPI* ActivateApplication)(IApplicationActivationManager*, const wchar_t*, const wchar_t*, int, DWORD*);
+    long          (WINAPI* ActivateForFile)(IApplicationActivationManager*, const wchar_t*, void*, const wchar_t*, DWORD*);
+    long          (WINAPI* ActivateForProtocol)(IApplicationActivationManager*, const wchar_t*, void*, DWORD*);
+} IApplicationActivationManagerVtbl;
+struct IApplicationActivationManager { IApplicationActivationManagerVtbl* lpVtbl; };
+static const GUID CLSID_ApplicationActivationManager = {0x45BA127D,0x10A8,0x46EA,{0x8A,0xB7,0x56,0xEA,0x90,0x78,0x94,0x3C}};
+static const GUID IID_IApplicationActivationManager  = {0x2E941141,0x7F97,0x4756,{0xBA,0x1D,0x9D,0xEC,0xDE,0x89,0x4A,0x3D}};
+#define CLSCTX_LOCAL_SERVER 4
+
+static UINT g_wmTaskbarButtonCreated;   /* "TaskbarButtonCreated": shell SENDs it when our button exists */
 
 __declspec(safebuffers) LRESULT CALLBACK WndProcW(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
 {
     if (g_wmTaskbarButtonCreated && Msg == g_wmTaskbarButtonCreated)
     {
-        MSG dm;
+        SetTimer(hWnd, 1, 50, 0);   /* defer the taskbar COM off the startup path: we hit the message
+                                       loop (input-idle) immediately -> Explorer drops the cursor at once */
+        return 0;
+    }
+    if (Msg == WM_TIMER)
+    {
+        union { GENPROC g; long (WINAPI* fn)(void*); } ci;
+        union { GENPROC g; long (WINAPI* fn)(const GUID*, void*, unsigned long, const GUID*, void**); } cc;
+        HANDLE ole;
+        ITaskbarList* tb;
+        KillTimer(hWnd, 1);
+        ole = LoadLibraryW(L"ole32.dll");        /* ole32 loaded lazily here, NOT at process startup */
+        if (ole)
         {
-            ITaskbarList* tb;
-            CoInitialize(0);
-            if (CoCreateInstance(&CLSID_TaskbarList, 0, CLSCTX_INPROC_SERVER, &IID_ITaskbarList, (void**)&tb) >= 0)
+            ci.g = GetProcAddress(ole, "CoInitialize");
+            cc.g = GetProcAddress(ole, "CoCreateInstance");
+            ci.fn(0);
+            if (cc.fn(&CLSID_TaskbarList, 0, CLSCTX_INPROC_SERVER, &IID_ITaskbarList, (void**)&tb) >= 0)
             {
                 tb->lpVtbl->HrInit(tb);
                 tb->lpVtbl->ActivateTab(tb, hWnd);
-                tb->lpVtbl->DeleteTab(tb, GetConsoleWindow());  /* remove the console's stray button */
-        while (PeekMessageW(&dm, 0, 0, 0, PM_REMOVE))
-        {
-            TranslateMessage(&dm);
-            DispatchMessageW(&dm);
-        }
-                Sleep(5);
-                tb->lpVtbl->ActivateTab(tb, hWnd);
-                //Sleep(500);
-                //tb->lpVtbl->SetActiveAlt(tb, hWnd);
                 tb->lpVtbl->Release(tb);
             }
         }
@@ -257,7 +249,7 @@ __declspec(safebuffers) LRESULT CALLBACK WndProcW(HWND hWnd, UINT Msg, WPARAM wP
     return DefWindowProcW(hWnd, Msg, wParam, lParam);
 }
 
-/* Compute the top-left that centers a WIN_W x WIN_H window in mon's work area. */
+/* Center a WIN_W x WIN_H window in mon's work area. */
 static CFORCEINLINE void CenteredPos(HMONITOR mon, int* px, int* py)
 {
     MONITORINFO mi;
@@ -270,36 +262,23 @@ static CFORCEINLINE void CenteredPos(HMONITOR mon, int* px, int* py)
 __declspec(safebuffers) void mainCRTStartup(void)
 {
     STARTUPINFOW si;
-    int x, y;
+    int nCmdShow, x, y;
     POINT pt;
-    DWORD tMin, tMax, tCur;
     MSG msg;
-
-    NtQueryTimerResolution(&tMin, &tMax, &tCur);
-    NtSetTimerResolution(tMax, TRUE, &tCur);
-
-    /* Hide the console without deactivating it (so it stays foreground
-       and there's NO Explorer handoff). Disable transitions FIRST so the cloak and
-       the offscreen move are instant (no fade/slide animation), then cloak
-       (compositor hide) and shove it offscreen. The transition-disable synergizes
-       with the SetWindowPos: the move doesn't animate. Only the pre-main conhost
-       frame (painted by the OS before main runs) can still appear. */
-    HWND con = GetConsoleWindow();
-    BOOL dwmTrue = TRUE;
-    SetWindowLongW(con, GWL_EXSTYLE, WS_EX_TOOLWINDOW);   /* off the taskbar, no button -- WITHOUT hiding
-                                                            it (SW_HIDE bounced foreground to the shell
-                                                            and back, desyncing our active state) */
-    DwmSetWindowAttribute(con, DWMWA_TRANSITIONS_FORCEDISABLED, &dwmTrue, sizeof(dwmTrue));
-    DwmSetWindowAttribute(con, DWMWA_CLOAK, &dwmTrue, sizeof(dwmTrue));
-    SetWindowPos(con, 0, WHERE_NOONE_CAN_SEE_ME, WHERE_NOONE_CAN_SEE_ME, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
-
+    /* /SUBSYSTEM:CONSOLE: Explorer's WaitForInputIdle returns IMMEDIATELY for a console process,
+       so the double-click elicits NO app-starting/wait cursor (a GUI launch always does). Hide the
+       conhost window before it can paint, then detach from it. */
+    {
+        HWND con = GetConsoleWindow();
+        if (con)
+            ShowWindow(con, SW_HIDE);
+    }
+    FreeConsole();
     GetStartupInfoW(&si);
-    g_nCmdShow = (si.dwFlags & STARTF_USESHOWWINDOW) ? (int)si.wShowWindow : SW_SHOWNORMAL;
+    nCmdShow = (si.dwFlags & STARTF_USESHOWWINDOW) ? (int)si.wShowWindow : SW_SHOWNORMAL;
 
-    /* Resolve the final top-left up front -- no CW_USEDEFAULT, no create-then-move:
-       1. STARTF_USEPOSITION  -> launcher's dwX/dwY.
-       2. STARTF_HASSHELLDATA -> center on the shell's HMONITOR (hStdOutput).
-       3. otherwise           -> center on the monitor under the cursor. */
+    /* Resolve the top-left: USEPOSITION -> launcher's dwX/dwY; HASSHELLDATA -> center on the
+       shell's HMONITOR; otherwise center on the monitor under the cursor. */
     if (si.dwFlags & STARTF_USEPOSITION)
     {
         x = (int)si.dwX;
@@ -330,17 +309,14 @@ __declspec(safebuffers) void mainCRTStartup(void)
     wc.lpszClassName = L"DummyWindowClass";
     RegisterClassW(&wc);
 
-    HWND hwnd = CreateWindowExW(WS_EX_APPWINDOW, wc.lpszClassName, L"DummyWindow",
-        WS_OVERLAPPEDWINDOW,
+    HWND hWnd = CreateWindowExW(WS_EX_APPWINDOW, wc.lpszClassName, L"DummyWindow",
+        WS_OVERLAPPEDWINDOW | WS_VISIBLE,
         x, y, WIN_W, WIN_H,
         0, 0, wc.hInstance, 0);
 
-    ShowWindow(hwnd, SW_SHOWNOACTIVATE);   /* show but DON'T activate: creates our taskbar button while
-                                              the (invisible) console stays foreground. The activation is
-                                              deferred to the TaskbarButtonCreated handler so it happens
-                                              AFTER the button exists and as a real foreground change. */
-    UpdateWindow(hwnd);
-    BOOL boosted = TRUE;
+    ShowWindow(hWnd, nCmdShow);
+    UpdateWindow(hWnd);
+    SetForegroundWindow(hWnd);
 
     for (;;)
     {
@@ -351,11 +327,6 @@ __declspec(safebuffers) void mainCRTStartup(void)
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
-        if (boosted)                       /* queue drained == loop idle: startup has settled */
-        {
-            NtSetTimerResolution(0, FALSE, &tCur);   /* drop the finer-timer boost here, not in WndProc */
-            boosted = FALSE;
-        }
-        WaitMessage();                     /* block until the next message (no busy-spin) */
+        WaitMessage();
     }
 }
