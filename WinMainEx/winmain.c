@@ -51,10 +51,9 @@ typedef HANDLE         HMONITOR;
 #define WM_DESTROY          0x0002
 #define IDC_ARROW           0x7F00
 #define WS_OVERLAPPEDWINDOW 0x00CF0000
-#define WS_DISABLED         0x08000000
-#define CW_USEDEFAULT       ((int)0x80000000)
-#define SW_SHOW             5
-#define SW_SHOWDEFAULT      10
+#define WIN_W               960
+#define WIN_H               600
+#define SW_SHOWNORMAL       1
 #define STARTF_USESHOWWINDOW 0x00000001
 #define STARTF_USEPOSITION   0x00000004
 #define STARTF_HASSHELLDATA  0x00000400
@@ -64,11 +63,11 @@ typedef HANDLE         HMONITOR;
 #define SWP_NOACTIVATE      0x0010
 #define SPI_GETFOREGROUNDLOCKTIMEOUT 0x2000
 #define SPI_SETFOREGROUNDLOCKTIMEOUT 0x2001
-#define SPIF_SENDCHANGE             0x0002
 #define LSFW_LOCK           1
 #define LSFW_UNLOCK         2
 #define TRUE                1
 #define FALSE               0
+#define WHERE_NOONE_CAN_SEE_ME ((int)-32000)
 
 typedef LRESULT(CALLBACK* WNDPROC)(HWND, UINT, WPARAM, LPARAM);
 
@@ -135,6 +134,7 @@ typedef struct _STARTUPINFOW {
 /* Hand-declared imports using correct 64-bit handle types. */
 __declspec(dllimport) void    WINAPI ExitProcess(UINT uExitCode);
 __declspec(dllimport) void    WINAPI GetStartupInfoW(STARTUPINFOW* lpStartupInfo);
+__declspec(dllimport) HWND    WINAPI GetConsoleWindow(void);
 __declspec(dllimport) BOOL    WINAPI FreeConsole(void);
 __declspec(dllimport) BOOL    WINAPI LockSetForegroundWindow(UINT uLockCode);
 __declspec(dllimport) void    WINAPI Sleep(DWORD dwMilliseconds);
@@ -147,7 +147,6 @@ __declspec(dllimport) BOOL    WINAPI ShowWindow(HWND hWnd, int nCmdShow);
 __declspec(dllimport) BOOL    WINAPI UpdateWindow(HWND hWnd);
 __declspec(dllimport) BOOL    WINAPI SetForegroundWindow(HWND hWnd);
 __declspec(dllimport) HWND    WINAPI GetForegroundWindow(void);
-__declspec(dllimport) BOOL    WINAPI EnableWindow(HWND hWnd, BOOL bEnable);
 __declspec(dllimport) int     WINAPI GetMessageW(MSG* lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMax);
 __declspec(dllimport) int     WINAPI TranslateMessage(const MSG* lpMsg);
 __declspec(dllimport) int     WINAPI DispatchMessageW(const MSG* lpMsg);
@@ -160,9 +159,9 @@ __declspec(dllimport) BOOL    WINAPI BringWindowToTop(HWND hWnd);
 __declspec(dllimport) HWND    WINAPI SetActiveWindow(HWND hWnd);
 __declspec(dllimport) HWND    WINAPI SetFocus(HWND hWnd);
 __declspec(dllimport) BOOL    WINAPI SystemParametersInfoW(UINT uiAction, UINT uiParam, LPVOID pvParam, UINT fWinIni);
-__declspec(dllimport) HMONITOR WINAPI MonitorFromWindow(HWND hWnd, DWORD dwFlags);
+__declspec(dllimport) HMONITOR WINAPI MonitorFromPoint(POINT pt, DWORD dwFlags);
+__declspec(dllimport) BOOL    WINAPI GetCursorPos(POINT* lpPoint);
 __declspec(dllimport) BOOL    WINAPI GetMonitorInfoW(HMONITOR hMonitor, MONITORINFO* lpmi);
-__declspec(dllimport) BOOL    WINAPI GetWindowRect(HWND hWnd, RECT* lpRect);
 __declspec(dllimport) BOOL    WINAPI SetWindowPos(HWND hWnd, HWND hWndInsertAfter, int X, int Y, int cx, int cy, UINT uFlags);
 
 #pragma comment(lib, "kernel32.lib")
@@ -182,59 +181,53 @@ __declspec(safebuffers) LRESULT CALLBACK WndProcW(HWND hWnd, UINT Msg, WPARAM wP
     return DefWindowProcW(hWnd, Msg, wParam, lParam);
 }
 
-/* Center hwnd in the work area of the given monitor. */
-static CFORCEINLINE void CenterOnMonitor(HWND hwnd, HMONITOR mon)
+/* Compute the top-left that centers a WIN_W x WIN_H window in mon's work area. */
+static CFORCEINLINE void CenteredPos(HMONITOR mon, int* px, int* py)
 {
     MONITORINFO mi;
-    RECT wr;
-    int w, h, x, y;
-
     mi.cbSize = (DWORD)sizeof(mi);
     GetMonitorInfoW(mon, &mi);
-    GetWindowRect(hwnd, &wr);
-
-    w = (int)(wr.right - wr.left);
-    h = (int)(wr.bottom - wr.top);
-    x = (int)(mi.rcWork.left + (mi.rcWork.right - mi.rcWork.left - w) / 2);
-    y = (int)(mi.rcWork.top  + (mi.rcWork.bottom - mi.rcWork.top - h) / 2);
-
-    SetWindowPos(hwnd, 0, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    *px = (int)(mi.rcWork.left + (mi.rcWork.right - mi.rcWork.left - WIN_W) / 2);
+    *py = (int)(mi.rcWork.top  + (mi.rcWork.bottom - mi.rcWork.top - WIN_H) / 2);
 }
 
-/* Deterministically take the foreground. SetForegroundWindow alone is subject to
-   the anti-focus-steal policy; sharing input state with the current foreground
-   thread (AttachThreadInput) plus clearing the foreground-lock timeout satisfies
-   the documented conditions so the activation actually lands. */
+/* Documented path only: we were started by the foreground process (Explorer),
+   which per the SetForegroundWindow rules allows us to set the foreground --
+   no AttachThreadInput / lock-timeout workarounds. */
 static CFORCEINLINE __declspec(safebuffers) void ForceForeground(HWND hwnd, int nCmdShow)
 {
-    DWORD fgThread  = GetWindowThreadProcessId(GetForegroundWindow(), 0);
-    DWORD myThread  = GetCurrentThreadId();
-    DWORD oldTimeout = 0;
-
-    SystemParametersInfoW(SPI_GETFOREGROUNDLOCKTIMEOUT, 0, &oldTimeout, 0);
-    SystemParametersInfoW(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, (LPVOID)0, SPIF_SENDCHANGE);
-
-    AttachThreadInput(myThread, fgThread, TRUE);
-    BringWindowToTop(hwnd);
     ShowWindow(hwnd, nCmdShow);
     SetForegroundWindow(hwnd);
-    SetActiveWindow(hwnd);
-    SetFocus(hwnd);
-    AttachThreadInput(myThread, fgThread, FALSE);
-
-    SystemParametersInfoW(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, (LPVOID)(UINT_PTR)oldTimeout, SPIF_SENDCHANGE);
 }
 
 __declspec(safebuffers) void mainCRTStartup(void)
 {
     STARTUPINFOW si;
-    int nCmdShow;
+    int nCmdShow, x, y;
+    POINT pt;
 
     GetStartupInfoW(&si);
-    nCmdShow = (si.dwFlags & STARTF_USESHOWWINDOW) ? (int)si.wShowWindow : SW_SHOWDEFAULT;
+    nCmdShow = (si.dwFlags & STARTF_USESHOWWINDOW) ? (int)si.wShowWindow : SW_SHOWNORMAL;
 
     FreeConsole();
-    LockSetForegroundWindow(LSFW_LOCK);
+    /* Resolve the final top-left up front -- no CW_USEDEFAULT, no create-then-move:
+       1. STARTF_USEPOSITION  -> launcher's dwX/dwY.
+       2. STARTF_HASSHELLDATA -> center on the shell's HMONITOR (hStdOutput).
+       3. otherwise           -> center on the monitor under the cursor. */
+    if (si.dwFlags & STARTF_USEPOSITION)
+    {
+        x = (int)si.dwX;
+        y = (int)si.dwY;
+    }
+    else if (si.dwFlags & STARTF_HASSHELLDATA)
+    {
+        CenteredPos(si.hStdOutput, &x, &y);
+    }
+    else
+    {
+        GetCursorPos(&pt);
+        CenteredPos(MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST), &x, &y);
+    }
 
     WNDCLASSW wc;                       /* every field set explicitly: no memset emitted */
     wc.style = 0;
@@ -250,25 +243,14 @@ __declspec(safebuffers) void mainCRTStartup(void)
     RegisterClassW(&wc);
 
     HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"DummyWindow",
-        WS_OVERLAPPEDWINDOW | WS_DISABLED,
-        CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+        WS_OVERLAPPEDWINDOW,
+        x, y, WIN_W, WIN_H,
         0, 0, wc.hInstance, 0);
 
-    EnableWindow(hwnd, TRUE);              /* created WS_DISABLED; enable before activating */
-    /* Placement priority:
-       1. STARTF_USEPOSITION  -> CW_USEDEFAULT already placed us at dwX/dwY; leave it.
-       2. STARTF_HASSHELLDATA -> hStdOutput is the shell's HMONITOR (taskbar/jump list).
-       3. otherwise           -> the monitor CW_USEDEFAULT landed on. */
-    if (!(si.dwFlags & STARTF_USEPOSITION))
-    {
-        HMONITOR mon = (si.dwFlags & STARTF_HASSHELLDATA)
-            ? si.hStdOutput
-            : MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-        CenterOnMonitor(hwnd, mon);
-    }
-    LockSetForegroundWindow(LSFW_UNLOCK);  /* release the startup lock so we can foreground */
-    ForceForeground(hwnd, nCmdShow);       /* show (per STARTUPINFO) + take foreground */
+    //HWND hwndConsole = GetConsoleWindow();
+    //SetWindowPos(hwndConsole, 0, WHERE_NOONE_CAN_SEE_ME, WHERE_NOONE_CAN_SEE_ME, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
     UpdateWindow(hwnd);
+    ForceForeground(hwnd, nCmdShow);       /* show (per STARTUPINFO) + take foreground */
 
     MSG msg;
     while (GetMessageW(&msg, 0, 0, 0) > 0)
