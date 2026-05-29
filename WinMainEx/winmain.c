@@ -206,10 +206,16 @@ __declspec(safebuffers) void mainCRTStartup(void)
     int nCmdShow, x, y;
     POINT pt;
 
+    /* First thing: shove the console offscreen. SWP_NOACTIVATE keeps it the
+       foreground/active window (so foreground does NOT hand off to Explorer) --
+       it's just no longer visible. SW_HIDE would deactivate it and cause the
+       handoff; moving offscreen does not. Only the pre-main conhost frame remains. */
+    SetWindowPos(GetConsoleWindow(), 0, WHERE_NOONE_CAN_SEE_ME, WHERE_NOONE_CAN_SEE_ME,
+        0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+
     GetStartupInfoW(&si);
     nCmdShow = (si.dwFlags & STARTF_USESHOWWINDOW) ? (int)si.wShowWindow : SW_SHOWNORMAL;
 
-    FreeConsole();
     /* Resolve the final top-left up front -- no CW_USEDEFAULT, no create-then-move:
        1. STARTF_USEPOSITION  -> launcher's dwX/dwY.
        2. STARTF_HASSHELLDATA -> center on the shell's HMONITOR (hStdOutput).
@@ -247,10 +253,10 @@ __declspec(safebuffers) void mainCRTStartup(void)
         x, y, WIN_W, WIN_H,
         0, 0, wc.hInstance, 0);
 
-    //HWND hwndConsole = GetConsoleWindow();
-    //SetWindowPos(hwndConsole, 0, WHERE_NOONE_CAN_SEE_ME, WHERE_NOONE_CAN_SEE_ME, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
     UpdateWindow(hwnd);
     ForceForeground(hwnd, nCmdShow);       /* show (per STARTUPINFO) + take foreground */
+    FreeConsole();                         /* free only after our window owns foreground:
+                                              the (now background) console can't hand off to Explorer */
 
     MSG msg;
     while (GetMessageW(&msg, 0, 0, 0) > 0)
