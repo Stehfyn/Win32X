@@ -6,7 +6,7 @@
  * take the W/A suffix via WBXNAME()/WBXCAT(); the SDK identifiers that are themselves macros
  * (GetCommandLine, GetStartupInfo, STARTUPINFO) cannot be suffix-pasted, so the includer aliases
  * them per pass to their real ...W/...A names (WBX_GETCMDLINE, WBX_GETSTARTUP, WBX_STARTUPINFO).
- * The includer also defines WBXSUF, WBXSTR, WBXTEXT(), WBX_RUN, WBX_USE_WIDE.
+ * The includer also defines WBXSUF, WBXSTR, WBXTEXT(), WBX_RUN, WBX_UNICODE.
  */
 
 static WBXSTR WBXNAME(WbxWinMainCommandLine)(void)
@@ -76,7 +76,7 @@ int __cdecl WBX_RUN(WBXCAT(WBX_PFN_WINMAINEX, WBXSUF) pfnWinMainEx)
         return 3;
     }
     pState                               = WbxState();
-    pState->fUseWideCallback             = WBX_USE_WIDE;
+    pState->fIsUnicode                   = WBX_UNICODE;
     pState->WBXCAT(pfnWinMainEx, WBXSUF) = pfnWinMainEx;
 
     rc = WbxRunCommon(&fProceed);

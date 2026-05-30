@@ -86,11 +86,13 @@ typedef struct WBX_STATE
     volatile LONG      nObjectCount;
     BOOL               fRegistrationLoaded;
     BOOL               fComServer;
-    BOOL               fUseWideCallback;
+    BOOL               fIsUnicode;
     /* process identity + forward scratch */
     WCHAR              szMyPath[MAX_PATH];
     WCHAR              szCmdBuf[WBX_CMD_CCH];  /* wide forward command line (COM path) */
     CHAR               szCmdBufA[WBX_CMD_CCH]; /* ANSI client command line (W->A bridge) */
+    CHAR               szDesktopA[MAX_PATH];   /* ANSI STARTUPINFO.lpDesktop (W->A bridge) */
+    CHAR               szTitleA[MAX_PATH];     /* ANSI STARTUPINFO.lpTitle   (W->A bridge) */
 } WBX_STATE;
 
 typedef struct CommandObject
@@ -112,7 +114,7 @@ static DWORD s_dwTlsState = TLS_OUT_OF_INDEXES; /* the one irreducible root */
 
 /* ExecuteCommand_Execute (wide COM section) forwards a self/no-selection activation through here; the body is
    defined after the generated W/A call-client helpers exist. */
-static int   WbxCallClientFromWideStartup(LPWSTR pszCmdLine, const STARTUPINFOW* psi);
+static int   WbxCallClientFromStartup(LPWSTR pszCmdLine, const STARTUPINFOW* psi);
 
 /* name/identifier paste used by the WinBaseXText.inl template: WBXCAT(STARTUPINFO, W) -> STARTUPINFOW,
    WBXNAME(WbxCallClient) -> WbxCallClient<WBXSUF>. */
@@ -415,7 +417,7 @@ static HRESULT STDMETHODCALLTYPE ExecuteCommand_Execute(IExecuteCommand* pThis)
     if (NULL == pObj->selection)
     {
         WbxFillStartupInfo(pObj, &si, FALSE);
-        WbxCallClientFromWideStartup(pObj->params, &si);
+        WbxCallClientFromStartup(pObj->params, &si);
         return S_OK;
     }
 
@@ -437,7 +439,7 @@ static HRESULT STDMETHODCALLTYPE ExecuteCommand_Execute(IExecuteCommand* pThis)
     {
         CoTaskMemFree(pszPath);
         WbxFillStartupInfo(pObj, &si, FALSE);
-        WbxCallClientFromWideStartup(pObj->params, &si);
+        WbxCallClientFromStartup(pObj->params, &si);
         return S_OK;
     }
 
@@ -923,10 +925,34 @@ static int WbxRunCommon(BOOL* pfProceed)
     return 0;
 }
 
+/* Convert a wide string to ANSI into pszBufA; returns the buffer, or NULL for a NULL/unconvertible
+   source (NULL is the correct STARTUPINFO default for an absent lpDesktop/lpTitle). */
+static LPSTR WbxWideToAnsi(LPCWSTR pszW, LPSTR pszBufA, int cchBufA)
+{
+    if (NULL == pszW)
+    {
+        return NULL;
+    }
+    if (0 == WideCharToMultiByte(CP_ACP, 0, pszW, -1, pszBufA, cchBufA, NULL, NULL))
+    {
+        return NULL;
+    }
+    return pszBufA;
+}
+
+/* STARTUPINFOA and STARTUPINFOW share an identical binary layout; the only members that genuinely
+   differ are the LPWSTR strings, which must be charset-converted. Scalars/handles copy across, the
+   CRT lpReserved2 block is charset-neutral, and lpReserved stays NULL (reserved). */
 static void WbxStartupInfoWToA(const STARTUPINFOW* psiW, STARTUPINFOA* psiA)
 {
+    WBX_STATE* pState;
+
+    pState = WbxState();
     SecureZeroMemory(psiA, sizeof((*psiA)));
     psiA->cb              = (DWORD)sizeof((*psiA));
+    psiA->lpReserved      = NULL;
+    psiA->lpDesktop       = WbxWideToAnsi(psiW->lpDesktop, pState->szDesktopA, ARRAYSIZE(pState->szDesktopA));
+    psiA->lpTitle         = WbxWideToAnsi(psiW->lpTitle, pState->szTitleA, ARRAYSIZE(pState->szTitleA));
     psiA->dwX             = psiW->dwX;
     psiA->dwY             = psiW->dwY;
     psiA->dwXSize         = psiW->dwXSize;
@@ -966,7 +992,7 @@ static LPSTR WbxCommandLineWToA(LPCWSTR pszCmdLine)
 #define WBX_GETCMDLINE  GetCommandLineW
 #define WBX_GETSTARTUP  GetStartupInfoW
 #define WBX_RUN         WinBaseXRunWide
-#define WBX_USE_WIDE    TRUE
+#define WBX_UNICODE     TRUE
 #include "WinBaseXText.inl"
 #undef WBXSUF
 #undef WBXSTR
@@ -975,7 +1001,7 @@ static LPSTR WbxCommandLineWToA(LPCWSTR pszCmdLine)
 #undef WBX_GETCMDLINE
 #undef WBX_GETSTARTUP
 #undef WBX_RUN
-#undef WBX_USE_WIDE
+#undef WBX_UNICODE
 
 /* --- generate the ANSI (A) client-facing layer --- */
 #define WBXSUF          A
@@ -985,7 +1011,7 @@ static LPSTR WbxCommandLineWToA(LPCWSTR pszCmdLine)
 #define WBX_GETCMDLINE  GetCommandLineA
 #define WBX_GETSTARTUP  GetStartupInfoA
 #define WBX_RUN         WinBaseXRunAnsi
-#define WBX_USE_WIDE    FALSE
+#define WBX_UNICODE     FALSE
 #include "WinBaseXText.inl"
 #undef WBXSUF
 #undef WBXSTR
@@ -994,19 +1020,34 @@ static LPSTR WbxCommandLineWToA(LPCWSTR pszCmdLine)
 #undef WBX_GETCMDLINE
 #undef WBX_GETSTARTUP
 #undef WBX_RUN
-#undef WBX_USE_WIDE
+#undef WBX_UNICODE
 
-/* COM (always wide) self/no-selection forward: call the wide client, or bridge to the ANSI one. */
-static int WbxCallClientFromWideStartup(LPWSTR pszCmdLine, const STARTUPINFOW* psi)
+/* W variant: hand the wide command line + STARTUPINFO straight to the wide client. */
+static int WbxCallClientFromStartupW(LPWSTR pszCmdLine, const STARTUPINFOW* psi)
+{
+    return WbxCallClientW(pszCmdLine, psi);
+}
+
+/* A variant: the conversion onus -- map the wide COM data down to ANSI, then call the ANSI client.
+   (It cannot delegate to the W variant: an ANSI-built process sets only pfnWinMainExA, so the wide
+   path would dereference a NULL callback.) */
+static int WbxCallClientFromStartupA(LPWSTR pszCmdLine, const STARTUPINFOW* psi)
 {
     STARTUPINFOA siA;
     LPSTR        pszCmdLineA;
 
-    if (WbxState()->fUseWideCallback)
-    {
-        return WbxCallClientW(pszCmdLine, psi);
-    }
     WbxStartupInfoWToA(psi, &siA);
     pszCmdLineA = WbxCommandLineWToA(pszCmdLine);
     return WbxCallClientA(pszCmdLineA, &siA);
+}
+
+/* The COM server is always wide; dispatch to whichever variant matches the client this process was
+   built with (the SDK's compile-time W/A selection, made at run time because one binary holds both). */
+static int WbxCallClientFromStartup(LPWSTR pszCmdLine, const STARTUPINFOW* psi)
+{
+    if (WbxState()->fIsUnicode)
+    {
+        return WbxCallClientFromStartupW(pszCmdLine, psi);
+    }
+    return WbxCallClientFromStartupA(pszCmdLine, psi);
 }
