@@ -814,10 +814,10 @@ static int WbxRunComServer(void)
         return 2;
     }
 
-    while (0 < GetMessageW(&msg, NULL, 0, 0))
+    while (0 < GetMessage(&msg, NULL, 0, 0))
     {
         TranslateMessage(&msg);
-        DispatchMessageW(&msg);
+        DispatchMessage(&msg);
     }
 
     if (dwCookie)
@@ -826,46 +826,6 @@ static int WbxRunComServer(void)
     }
     CoUninitialize();
     return 0;
-}
-
-static BOOL WbxLoadRegistration(void)
-{
-    WBX_STATE*                        pState;
-    WINBASEX_REGISTRATION_PROPERTIESW props;
-    BOOL                              fGotProps;
-    BOOL                              fValidCb;
-    BOOL                              fValidFields;
-
-    pState = WbxState();
-    if (pState->fRegistrationLoaded)
-    {
-        return TRUE;
-    }
-
-    SecureZeroMemory(&props, sizeof(props));
-    props.cb  = (DWORD)sizeof(props);
-    fGotProps = GetWinBaseXRegistrationProperties(&props);
-    if (!fGotProps)
-    {
-        return FALSE;
-    }
-
-    fValidCb     = (sizeof(props) <= props.cb);
-    fValidFields = (NULL != props.lpClsid) && (NULL != props.lpFriendlyName) && (0 == props.dwFlags);
-    if (!fValidCb || !fValidFields)
-    {
-        return FALSE;
-    }
-
-    pState->clsid               = *props.lpClsid;
-    pState->pszFriendlyName     = props.lpFriendlyName;
-    pState->pszLaunchHistoryKey = props.lpLaunchHistoryKey;
-    if (NULL == pState->pszLaunchHistoryKey)
-    {
-        pState->pszLaunchHistoryKey = WBX_DEFAULT_LIST_KEY;
-    }
-    pState->fRegistrationLoaded = TRUE;
-    return TRUE;
 }
 
 /* Allocate the apartment-local state once, at the very top of the entry body. */
@@ -888,6 +848,45 @@ static BOOL WbxStateInit(void)
     return TRUE;
 }
 
+/* Fetch the client's registration through the generic entrypoint (per convention: use the generic
+   TCHAR entrypoint -- the header's A/W/generic macro family selects W or A at compile time). */
+static BOOL WbxLoadRegistration(void)
+{
+    WBX_STATE*                       pState;
+    WINBASEX_REGISTRATION_PROPERTIES props;
+    BOOL                             fGotProps;
+    BOOL                             fValidCb;
+    BOOL                             fValidFields;
+
+    pState = WbxState();
+    if (pState->fRegistrationLoaded)
+    {
+        return TRUE;
+    }
+    SecureZeroMemory(&props, sizeof(props));
+    props.cb  = (DWORD)sizeof(props);
+    fGotProps = GetWinBaseXRegistrationProperties(&props);
+    if (!fGotProps)
+    {
+        return FALSE;
+    }
+    fValidCb     = (sizeof(props) <= props.cb);
+    fValidFields = (NULL != props.lpClsid) && (NULL != props.lpFriendlyName) && (0 == props.dwFlags);
+    if (!fValidCb || !fValidFields)
+    {
+        return FALSE;
+    }
+    pState->clsid               = *props.lpClsid;
+    pState->pszFriendlyName     = props.lpFriendlyName;
+    pState->pszLaunchHistoryKey = props.lpLaunchHistoryKey;
+    if (NULL == pState->pszLaunchHistoryKey)
+    {
+        pState->pszLaunchHistoryKey = WBX_DEFAULT_LIST_KEY;
+    }
+    pState->fRegistrationLoaded = TRUE;
+    return TRUE;
+}
+
 /* Shared mode dispatch (charset-independent). Sets (*pfProceed) when the caller should go on to
    invoke the client directly; otherwise returns the handled exit code. */
 static int WbxRunCommon(BOOL* pfProceed)
@@ -904,9 +903,9 @@ static int WbxRunCommon(BOOL* pfProceed)
     {
         return 3;
     }
-    GetModuleFileNameW(NULL, pState->szMyPath, MAX_PATH);
+    GetModuleFileName(NULL, pState->szMyPath, MAX_PATH);
 
-    pszCmd      = GetCommandLineW();
+    pszCmd      = GetCommandLine();
     fUnregister = WbxIsArg(pszCmd, L"/unregister");
     fEmbedding  = WbxIsArg(pszCmd, L"-Embedding") || WbxIsArg(pszCmd, L"/Embedding");
     if (fUnregister)
@@ -985,14 +984,14 @@ static LPSTR WbxCommandLineWToA(LPCWSTR pszCmdLine)
 }
 
 /* --- generate the wide (W) client-facing layer --- */
-#define WBXSUF          W
-#define WBXSTR          LPWSTR
-#define WBXTEXT(x)      L##x
-#define WBX_STARTUPINFO STARTUPINFOW
-#define WBX_GETCMDLINE  GetCommandLineW
-#define WBX_GETSTARTUP  GetStartupInfoW
-#define WBX_RUN         WinBaseXRunWide
-#define WBX_UNICODE     TRUE
+#define WBXSUF                   W
+#define WBXSTR                   LPWSTR
+#define WBXTEXT(x)               L##x
+#define WBX_STARTUPINFO          STARTUPINFOW
+#define WBX_GETCMDLINE           GetCommandLine
+#define WBX_GETSTARTUP           GetStartupInfoW
+#define WBX_RUN                  WinBaseXRunWide
+#define WBX_UNICODE              TRUE
 #include "WinBaseXText.inl"
 #undef WBXSUF
 #undef WBXSTR
@@ -1004,14 +1003,14 @@ static LPSTR WbxCommandLineWToA(LPCWSTR pszCmdLine)
 #undef WBX_UNICODE
 
 /* --- generate the ANSI (A) client-facing layer --- */
-#define WBXSUF          A
-#define WBXSTR          LPSTR
-#define WBXTEXT(x)      x
-#define WBX_STARTUPINFO STARTUPINFOA
-#define WBX_GETCMDLINE  GetCommandLineA
-#define WBX_GETSTARTUP  GetStartupInfoA
-#define WBX_RUN         WinBaseXRunAnsi
-#define WBX_UNICODE     FALSE
+#define WBXSUF                   A
+#define WBXSTR                   LPSTR
+#define WBXTEXT(x)               x
+#define WBX_STARTUPINFO          STARTUPINFOA
+#define WBX_GETCMDLINE           GetCommandLineA
+#define WBX_GETSTARTUP           GetStartupInfoA
+#define WBX_RUN                  WinBaseXRunAnsi
+#define WBX_UNICODE              FALSE
 #include "WinBaseXText.inl"
 #undef WBXSUF
 #undef WBXSTR

@@ -21,18 +21,18 @@
 #define STARTF_HASSHELLDATA 0x00000400
 #endif
 
-#define WMX_WND_CLASS     L"WinMainEx"
-#define WMX_WND_TITLE     L"WinMainEx"
-#define WMX_FRIENDLY_NAME L"WinMainEx"
-#define WMX_LIST_KEY      L"Software\\WinMainEx\\Launched"
+#define WC_WINMAINEX     TEXT("WinMainEx")
+#define WMX_WND_TITLE     TEXT("WinMainEx")
+#define WMX_FRIENDLY_NAME TEXT("WinMainEx")
+#define WMX_LIST_KEY      TEXT("Software\\WinMainEx\\Launched")
 #define WMX_WND_PCT       50
 #define WMX_PCT_DENOM     100
 
 DEFINE_GUID(CLSID_WinMainEx, 0xE5F1A9C2, 0x8B7D, 0x4E3F, 0xA1, 0x5C, 0x9D, 0x2E, 0x7B, 0x6F, 0x4A, 0x83);
 
-static void ShowGui(const STARTUPINFOW* psi);
+static void ShowGui(const STARTUPINFO* psi);
 
-BOOL WINAPI GetWinBaseXRegistrationProperties(_Out_ PWINBASEX_REGISTRATION_PROPERTIESW pRegistrationProperties)
+BOOL WINAPI GetWinBaseXRegistrationProperties(_Out_ PWINBASEX_REGISTRATION_PROPERTIES pRegistrationProperties)
 {
     if (NULL == pRegistrationProperties)
     {
@@ -64,7 +64,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
     {
         HANDLE_MSG(hwnd, WM_DESTROY, WinMainEx_OnDestroy);
     }
-    return DefWindowProcW(hwnd, uMsg, wParam, lParam);
+    return DefWindowProc(hwnd, uMsg, wParam, lParam);
 }
 
 static void CenterOnMonitor(HWND hwnd, HMONITOR hMon)
@@ -80,7 +80,7 @@ static void CenterOnMonitor(HWND hwnd, HMONITOR hMon)
 
     SecureZeroMemory(&mi, sizeof(mi));
     mi.cbSize = (DWORD)sizeof(mi);
-    fGotInfo  = GetMonitorInfoW(hMon, &mi);
+    fGotInfo  = GetMonitorInfo(hMon, &mi);
     if (!fGotInfo)
     {
         return;
@@ -91,12 +91,12 @@ static void CenterOnMonitor(HWND hwnd, HMONITOR hMon)
     nHeight     = nWorkHeight * WMX_WND_PCT / WMX_PCT_DENOM;
     nX          = mi.rcWork.left + (nWorkWidth - nWidth) / 2;
     nY          = mi.rcWork.top + (nWorkHeight - nHeight) / 2;
-    SetWindowPos(hwnd, NULL, nX, nY, nWidth, nHeight, SWP_NOZORDER | SWP_NOACTIVATE);
+    SetWindowPos(hwnd, HWND_DESKTOP, nX, nY, nWidth, nHeight, SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
-static void ShowGui(const STARTUPINFOW* psi)
+static void ShowGui(const STARTUPINFO* psi)
 {
-    WNDCLASSW wc;
+    WNDCLASS  wc;
     HINSTANCE hInstance;
     HMONITOR  hMon;
     HWND      hwnd;
@@ -104,7 +104,7 @@ static void ShowGui(const STARTUPINFOW* psi)
     BOOL      fUseShow;
     BOOL      fHasShellData;
 
-    hInstance = GetModuleHandleW(NULL);
+    hInstance = GetModuleHandle(NULL);
     fUseShow  = !!(STARTF_USESHOWWINDOW & psi->dwFlags);
     if (fUseShow)
     {
@@ -115,29 +115,29 @@ static void ShowGui(const STARTUPINFOW* psi)
         nCmdShow = SW_SHOWDEFAULT;
     }
 
-    /* Idempotent: a second RegisterClassW fails with ERROR_CLASS_ALREADY_EXISTS and the class
-       stays registered, so CreateWindowExW works regardless -- no need to track first-call state. */
+    /* Idempotent: a second RegisterClass fails with ERROR_CLASS_ALREADY_EXISTS and the class
+       stays registered, so CreateWindowEx works regardless -- no need to track first-call state. */
     SecureZeroMemory(&wc, sizeof(wc));
     wc.lpfnWndProc   = WndProc;
     wc.hInstance     = hInstance;
-    wc.hCursor       = LoadCursorW(NULL, IDC_ARROW);
+    wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-    wc.lpszClassName = WMX_WND_CLASS;
-    RegisterClassW(&wc);
+    wc.lpszClassName = WC_WINMAINEX;
+    RegisterClass(&wc);
 
-    hwnd = CreateWindowExW(0,
-                           WMX_WND_CLASS,
+    hwnd = CreateWindowEx(0,
+                           WC_WINMAINEX,
                            WMX_WND_TITLE,
                            WS_OVERLAPPEDWINDOW,
                            CW_USEDEFAULT,
                            CW_USEDEFAULT,
                            CW_USEDEFAULT,
                            CW_USEDEFAULT,
-                           NULL,
+                           GetDesktopWindow(),
                            NULL,
                            hInstance,
                            NULL);
-    if (NULL == hwnd)
+    if (!hwnd)
     {
         return;
     }
@@ -156,11 +156,11 @@ static void ShowGui(const STARTUPINFOW* psi)
     SetForegroundWindow(hwnd);
 }
 
-int WINAPI wWinMainEx(_In_ HINSTANCE           hInstance,
-                      _In_opt_ HINSTANCE       hPrevInstance,
-                      _In_ LPWSTR              lpCmdLine,
-                      _In_ int                 nShowCmd,
-                      _In_ const STARTUPINFOW* lpStartupInfo)
+int WINAPI _tWinMainEx(_In_ HINSTANCE          hInstance,
+                       _In_opt_ HINSTANCE      hPrevInstance,
+                       _In_ LPTSTR             lpCmdLine,
+                       _In_ int                nShowCmd,
+                       _In_ const STARTUPINFO* lpStartupInfo)
 {
     MSG msg;
 
@@ -175,10 +175,10 @@ int WINAPI wWinMainEx(_In_ HINSTANCE           hInstance,
         return 0;
     }
 
-    while (0 < GetMessageW(&msg, NULL, 0, 0))
+    while (0 < GetMessage(&msg, NULL, 0, 0))
     {
         TranslateMessage(&msg);
-        DispatchMessageW(&msg);
+        DispatchMessage(&msg);
     }
     return 0;
 }

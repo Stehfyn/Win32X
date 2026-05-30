@@ -59,7 +59,7 @@ static int WBXNAME(WbxCallClient)(WBXSTR pszCmdLine, const WBX_STARTUPINFO* psi)
     int        nShowCmd;
 
     pState    = WbxState();
-    hInstance = GetModuleHandleW(NULL);
+    hInstance = GetModuleHandle(NULL);
     nShowCmd  = WBXNAME(WbxShowWindowFromStartup)(psi);
     return pState->WBXCAT(pfnWinMainEx, WBXSUF)(hInstance, NULL, pszCmdLine, nShowCmd, psi);
 }
