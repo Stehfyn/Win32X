@@ -8,15 +8,7 @@
 
 #include "WinBaseX.h"
 
-int __cdecl WinBaseXRunWide(
-    int (WINAPI *pfnWinMainEx)(
-        HINSTANCE,
-        HINSTANCE,
-        LPWSTR,
-        int,
-        const STARTUPINFOW *
-        )
-    );
+int __cdecl WinBaseXRunWide(int(WINAPI* pfnWinMainEx)(HINSTANCE, HINSTANCE, LPWSTR, int, const STARTUPINFOW*));
 
 void __cdecl wWinMainCRTStartup(void)
 {

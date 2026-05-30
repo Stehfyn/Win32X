@@ -18,19 +18,19 @@
 #include "WinBaseX.h"
 
 #ifndef STARTF_HASSHELLDATA
-#define STARTF_HASSHELLDATA  0x00000400
+#define STARTF_HASSHELLDATA 0x00000400
 #endif
 
-#define WMX_WND_CLASS        L"WinMainEx"
-#define WMX_WND_TITLE        L"WinMainEx"
-#define WMX_FRIENDLY_NAME    L"WinMainEx"
-#define WMX_LIST_KEY         L"Software\\WinMainEx\\Launched"
-#define WMX_WND_PCT          50
-#define WMX_PCT_DENOM        100
+#define WMX_WND_CLASS     L"WinMainEx"
+#define WMX_WND_TITLE     L"WinMainEx"
+#define WMX_FRIENDLY_NAME L"WinMainEx"
+#define WMX_LIST_KEY      L"Software\\WinMainEx\\Launched"
+#define WMX_WND_PCT       50
+#define WMX_PCT_DENOM     100
 
 DEFINE_GUID(CLSID_WinMainEx, 0xE5F1A9C2, 0x8B7D, 0x4E3F, 0xA1, 0x5C, 0x9D, 0x2E, 0x7B, 0x6F, 0x4A, 0x83);
 
-static void ShowGui(const STARTUPINFOW *psi);
+static void ShowGui(const STARTUPINFOW* psi);
 
 BOOL WINAPI GetWinBaseXRegistrationProperties(_Out_ PWINBASEX_REGISTRATION_PROPERTIESW pRegistrationProperties)
 {
@@ -95,7 +95,7 @@ static void CenterOnMonitor(HWND hwnd, HMONITOR hMon)
     SetWindowPos(hwnd, NULL, nX, nY, nWidth, nHeight, SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
-static void ShowGui(const STARTUPINFOW *psi)
+static void ShowGui(const STARTUPINFOW* psi)
 {
     static BOOL s_fClassRegistered = FALSE;
     WNDCLASSW   wc;
@@ -129,8 +129,18 @@ static void ShowGui(const STARTUPINFOW *psi)
         s_fClassRegistered = TRUE;
     }
 
-    hwnd = CreateWindowExW(0, WMX_WND_CLASS, WMX_WND_TITLE, WS_OVERLAPPEDWINDOW, CW_USEDEFAULT,
-                           CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, NULL, NULL, hInstance, NULL);
+    hwnd = CreateWindowExW(0,
+                           WMX_WND_CLASS,
+                           WMX_WND_TITLE,
+                           WS_OVERLAPPEDWINDOW,
+                           CW_USEDEFAULT,
+                           CW_USEDEFAULT,
+                           CW_USEDEFAULT,
+                           CW_USEDEFAULT,
+                           NULL,
+                           NULL,
+                           hInstance,
+                           NULL);
     if (NULL == hwnd)
     {
         return;
@@ -150,13 +160,11 @@ static void ShowGui(const STARTUPINFOW *psi)
     SetForegroundWindow(hwnd);
 }
 
-int WINAPI wWinMainEx(
-    _In_ HINSTANCE hInstance,
-    _In_opt_ HINSTANCE hPrevInstance,
-    _In_ LPWSTR lpCmdLine,
-    _In_ int nShowCmd,
-    _In_ const STARTUPINFOW *lpStartupInfo
-    )
+int WINAPI wWinMainEx(_In_ HINSTANCE           hInstance,
+                      _In_opt_ HINSTANCE       hPrevInstance,
+                      _In_ LPWSTR              lpCmdLine,
+                      _In_ int                 nShowCmd,
+                      _In_ const STARTUPINFOW* lpStartupInfo)
 {
     MSG msg;
 

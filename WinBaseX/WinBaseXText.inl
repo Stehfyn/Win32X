@@ -9,7 +9,7 @@
  * The includer also defines WBXSUF, WBXSTR, WBXTEXT(), WBX_RUN, WBX_USE_WIDE.
  */
 
-static WBXSTR WBXNAME(wbx_winmain_command_line)(void)
+static WBXSTR WBXNAME(WbxWinMainCommandLine)(void)
 {
     WBXSTR pszCmd;
 
@@ -40,7 +40,7 @@ static WBXSTR WBXNAME(wbx_winmain_command_line)(void)
     return pszCmd;
 }
 
-static int WBXNAME(wbx_show_window_from_startup)(const WBX_STARTUPINFO *psi)
+static int WBXNAME(WbxShowWindowFromStartup)(const WBX_STARTUPINFO* psi)
 {
     BOOL fUseShow;
 
@@ -52,38 +52,38 @@ static int WBXNAME(wbx_show_window_from_startup)(const WBX_STARTUPINFO *psi)
     return SW_SHOWDEFAULT;
 }
 
-static int WBXNAME(wbx_call_client)(WBXSTR pszCmdLine, const WBX_STARTUPINFO *psi)
+static int WBXNAME(WbxCallClient)(WBXSTR pszCmdLine, const WBX_STARTUPINFO* psi)
 {
-    WBX_STATE *pState;
+    WBX_STATE* pState;
     HINSTANCE  hInstance;
     int        nShowCmd;
 
-    pState    = wbx_state();
+    pState    = WbxState();
     hInstance = GetModuleHandleW(NULL);
-    nShowCmd  = WBXNAME(wbx_show_window_from_startup)(psi);
+    nShowCmd  = WBXNAME(WbxShowWindowFromStartup)(psi);
     return pState->WBXCAT(pfnWinMainEx, WBXSUF)(hInstance, NULL, pszCmdLine, nShowCmd, psi);
 }
 
 int __cdecl WBX_RUN(WBXCAT(WBX_PFN_WINMAINEX, WBXSUF) pfnWinMainEx)
 {
-    WBX_STATE      *pState;
+    WBX_STATE*      pState;
     WBX_STARTUPINFO si;
     BOOL            fProceed;
     int             rc;
 
-    if (!wbx_state_init())
+    if (!WbxStateInit())
     {
         return 3;
     }
-    pState                               = wbx_state();
+    pState                               = WbxState();
     pState->fUseWideCallback             = WBX_USE_WIDE;
     pState->WBXCAT(pfnWinMainEx, WBXSUF) = pfnWinMainEx;
 
-    rc = wbx_run_common(&fProceed);
+    rc = WbxRunCommon(&fProceed);
     if (!fProceed)
     {
         return rc;
     }
     WBX_GETSTARTUP(&si);
-    return WBXNAME(wbx_call_client)(WBXNAME(wbx_winmain_command_line)(), &si);
+    return WBXNAME(WbxCallClient)(WBXNAME(WbxWinMainCommandLine)(), &si);
 }
