@@ -117,7 +117,7 @@ int __cdecl memcmp(_In_reads_bytes_(cb) const void *pvA, _In_reads_bytes_(cb) co
 
     pbA = (const BYTE *)pvA;
     pbB = (const BYTE *)pvB;
-    while (0u != cb)
+    while (cb)
     {
         if ((*pbA) != (*pbB))
         {
@@ -139,7 +139,7 @@ static int wmx_strlen(LPCWSTR psz)
     int cch;
 
     cch = 0;
-    while (0 != psz[cch])
+    while (psz[cch])
     {
         cch++;
     }
@@ -148,7 +148,7 @@ static int wmx_strlen(LPCWSTR psz)
 
 static void wmx_strcpy(LPWSTR pszDst, LPCWSTR pszSrc)
 {
-    while (0 != (*pszSrc))
+    while ((*pszSrc))
     {
         (*pszDst) = (*pszSrc);
         pszDst++;
@@ -160,7 +160,7 @@ static void wmx_strcpy(LPWSTR pszDst, LPCWSTR pszSrc)
 /* Append pszSrc onto pszDst; return a pointer to the new terminating nul so callers can chain. */
 static LPWSTR wmx_strappend(LPWSTR pszDst, LPCWSTR pszSrc)
 {
-    while (0 != (*pszSrc))
+    while ((*pszSrc))
     {
         (*pszDst) = (*pszSrc);
         pszDst++;
@@ -182,7 +182,7 @@ static BOOL wmx_isarg(LPCWSTR pszCmd, LPCWSTR pszTarget)
     BOOL    fTokenEnd;
 
     cchTarget = wmx_strlen(pszTarget);
-    for (p = pszCmd; 0 != (*p); p++)
+    for (p = pszCmd; (*p); p++)
     {
         if (p == pszCmd)
         {
@@ -203,7 +203,7 @@ static BOOL wmx_isarg(LPCWSTR pszCmd, LPCWSTR pszTarget)
             continue;
         }
         chPost    = p[cchTarget];
-        fTokenEnd = (0 == chPost) || (L' ' == chPost) || (L'"' == chPost);
+        fTokenEnd = (!chPost) || (L' ' == chPost) || (L'"' == chPost);
         if (fTokenEnd)
         {
             return TRUE;
@@ -455,7 +455,7 @@ static HRESULT STDMETHODCALLTYPE ec_SetParameters(IExecuteCommand *pThis, LPCWST
     cch  = 0;
     if (NULL != pszParams)
     {
-        while ((0 != pszParams[cch]) && ((WMX_PARAMS_CCH - 1) > cch))
+        while (pszParams[cch] && ((WMX_PARAMS_CCH - 1) > cch))
         {
             pObj->params[cch] = pszParams[cch];
             cch++;
@@ -501,7 +501,7 @@ static HRESULT STDMETHODCALLTYPE ec_SetDirectory(IExecuteCommand *pThis, LPCWSTR
     cch  = 0;
     if (NULL != pszDir)
     {
-        while ((0 != pszDir[cch]) && ((MAX_PATH - 1) > cch))
+        while (pszDir[cch] && ((MAX_PATH - 1) > cch))
         {
             pObj->directory[cch] = pszDir[cch];
             cch++;
@@ -597,7 +597,7 @@ static HRESULT STDMETHODCALLTYPE ec_Execute(IExecuteCommand *pThis)
     pszWrite     = wmx_strappend(pszWrite, pszPath);
     (*pszWrite)  = L'"';
     pszWrite++;
-    fHasParams = (0 != pObj->params[0]);
+    fHasParams = !!pObj->params[0];
     if (fHasParams)
     {
         (*pszWrite) = L' ';
@@ -615,7 +615,7 @@ static HRESULT STDMETHODCALLTYPE ec_Execute(IExecuteCommand *pThis)
     }
 
     pszDir = NULL;
-    if (0 != pObj->directory[0])
+    if (pObj->directory[0])
     {
         pszDir = pObj->directory;
     }
@@ -952,7 +952,7 @@ static int run_com_server(void)
         DispatchMessageW(&msg);
     }
 
-    if (0 != dwCookie)
+    if (dwCookie)
     {
         CoRevokeClassObject(dwCookie);
     }
