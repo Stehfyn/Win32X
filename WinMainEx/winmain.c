@@ -1,32 +1,30 @@
 /*
- * winmain.c — WinMainEx, reworked as a lean COM server for the exefile
- * "open" verb via DelegateExecute.
+ * winmain.c -- WinMainEx, a lean COM server for the exefile "open" verb via DelegateExecute.
  *
- * Why: the launch "spinny" (IDC_APPSTARTING) is armed by the shell when it
- * cold-CreateProcess'es a GUI exe, and nothing the launched process does to
- * itself reaches that decision (we proved this exhaustively). The fix is to
- * change WHO launches: register as the DelegateExecute handler for exefile so
- * a double-click routes through this resident, already-input-idle COM server,
- * which performs the CreateProcessW itself -> no cold-launch feedback cursor.
+ * Why: the launch "spinny" (IDC_APPSTARTING) is armed by the shell when it cold-CreateProcess'es
+ * a GUI exe, and nothing the launched process does to itself reaches that decision. The fix is to
+ * change WHO launches: register as the DelegateExecute handler for exefile so a double-click routes
+ * through this resident, already-input-idle COM server, which performs the CreateProcessW itself --
+ * so the shell never arms the cold-launch feedback cursor.
  *
- * NoCRT, custom entry. Imports kernel32, user32, ole32, advapi32.
+ * NoCRT, custom entry. Imports kernel32, user32, ole32, advapi32, shell32.
  *
- * MODES (parsed by substring match on GetCommandLineW)
+ * MODES (parsed by whole-token match on GetCommandLineW)
  *   /unregister    Tear down HKCU registration.
  *   -Embedding     rpcss launched us as a COM server -> run_com_server.
  *   (other)        Direct launch -> self-install on first run, show GUI.
  *
  * REGISTRATION (HKCU only)
- *   CLSID\{guid}\LocalServer32\(Default) = exe path
- *   exefile\shell\open\command\DelegateExecute = "{guid}"
+ *   CLSID\{guid}\LocalServer32\(Default)        = exe path
+ *   exefile\shell\open\command\DelegateExecute  = "{guid}"
  *
  * RECOVERY
  *   cmd /c "<exe>" /unregister
  */
 
-/* NoCRT: kill the per-function instrumentation that emits CRT helper calls
-   (_RTC_* under Debug /RTC, stack probes, /GS cookie checks) -- none of those
-   support functions exist when we link /NODEFAULTLIB. */
+/* NoCRT: disable per-function instrumentation that emits CRT helper calls (_RTC_* under Debug
+   /RTC, stack probes, /GS cookie checks) -- none of those support functions exist under
+   /NODEFAULTLIB. These are codegen toggles, not warning suppressions. */
 #pragma runtime_checks("", off)
 #pragma check_stack(off)
 #pragma strict_gs_check(off)
@@ -44,506 +42,920 @@
 #define COBJMACROS
 #define INITGUID
 
-/* /Wall flags pedantic-but-harmless things; disable BEFORE the includes so the
-   noisy SDK headers are covered too. /WX still catches genuine warnings. */
-#pragma warning(disable: 4710)   /* function not inlined */
-#pragma warning(disable: 4711)   /* function selected for automatic inline expansion */
-#pragma warning(disable: 4820)   /* padding added after data member */
-#pragma warning(disable: 4324)   /* structure padded due to alignment specifier */
-#pragma warning(disable: 5045)   /* Spectre mitigation insertion advisory */
-#pragma warning(disable: 4132)   /* const object forward-declared (vtbls defined below) */
-
-#pragma warning(push, 0)   /* belt-and-suspenders for other SDK-header noise */
 #include <windows.h>
+#include <windowsx.h>
 #include <initguid.h>
 #include <objbase.h>
 #include <shobjidl.h>
 #include <shellapi.h>
 #include <shlobj.h>
-#pragma warning(pop)
 
 #ifndef STARTF_HASSHELLDATA
-#define STARTF_HASSHELLDATA 0x00000400   /* not in the SDK headers; hStdOutput holds the shell HMONITOR */
+#define STARTF_HASSHELLDATA  0x00000400 /* not in the SDK headers; hStdOutput holds the shell HMONITOR */
 #endif
 
-/* GUIDs we need emitted as storage, without uuid.lib. */
-DEFINE_GUID(IID_IUnknown,            0x00000000, 0x0000, 0x0000, 0xC0,0x00,0x00,0x00,0x00,0x00,0x00,0x46);
-DEFINE_GUID(IID_IClassFactory,       0x00000001, 0x0000, 0x0000, 0xC0,0x00,0x00,0x00,0x00,0x00,0x00,0x46);
-DEFINE_GUID(IID_IExecuteCommand,     0x7F9185B0, 0xCB92, 0x43C5, 0x80,0xA9,0x92,0x27,0x7A,0x4F,0x7B,0x54);
-DEFINE_GUID(IID_IObjectWithSelection,0x1C9CD5BB, 0x98E9, 0x4491, 0xA6,0x0F,0x31,0xAA,0xCC,0x72,0xB8,0x3C);
+#define WMX_WND_CLASS        L"WinMainEx"
+#define WMX_WND_TITLE        L"WinMainEx"
+#define WMX_FRIENDLY_NAME    L"WinMainEx"
+/* Set of every .exe that has activated through us. Value name = full path, data = L"1". */
+#define WMX_LIST_KEY         L"Software\\WinMainEx\\Launched"
+#define WMX_CLSID_PREFIX     L"Software\\Classes\\CLSID\\"
+#define WMX_EXEFILE_CMD_KEY  L"Software\\Classes\\exefile\\shell\\open\\command"
+#define WMX_WND_PCT          50   /* window size as a percent of the work area (keeps its aspect ratio) */
+#define WMX_PCT_DENOM        100
+#define WMX_GUID_CCH         40   /* {8-4-4-4-12} GUID string + brace + nul, per StringFromGUID2 */
+#define WMX_SUBKEY_CCH       256
+#define WMX_PARAMS_CCH       1024
+#define WMX_CMD_CCH          2048
+#define WMX_SVR_REFCOUNT     2    /* static class-factory ref: never freed, never zero */
 
-DEFINE_GUID(CLSID_WinMainEx,
-    0xE5F1A9C2, 0x8B7D, 0x4E3F,
-    0xA1, 0x5C, 0x9D, 0x2E, 0x7B, 0x6F, 0x4A, 0x83);
+/* GUIDs emitted as storage without uuid.lib. */
+DEFINE_GUID(IID_IUnknown,             0x00000000, 0x0000, 0x0000, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46);
+DEFINE_GUID(IID_IClassFactory,        0x00000001, 0x0000, 0x0000, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46);
+DEFINE_GUID(IID_IExecuteCommand,      0x7F9185B0, 0xCB92, 0x43C5, 0x80, 0xA9, 0x92, 0x27, 0x7A, 0x4F, 0x7B, 0x54);
+DEFINE_GUID(IID_IObjectWithSelection, 0x1C9CD5BB, 0x98E9, 0x4491, 0xA6, 0x0F, 0x31, 0xAA, 0xCC, 0x72, 0xB8, 0x3C);
+DEFINE_GUID(CLSID_WinMainEx,          0xE5F1A9C2, 0x8B7D, 0x4E3F, 0xA1, 0x5C, 0x9D, 0x2E, 0x7B, 0x6F, 0x4A, 0x83);
 
-/* NoCRT replacement for memcmp; IsEqualIID compiles down to memcmp.
- * `#pragma function` opts out of the /Oi intrinsic so we can supply our own. */
-#pragma function(memcmp)
-int __cdecl memcmp(const void *a, const void *b, size_t n) {
-    const BYTE *pa = a, *pb = b;
-    while (n--) { if (*pa != *pb) return (int)*pa - (int)*pb; pa++; pb++; }
-    return 0;
-}
+/* CommandObject implements IExecuteCommand + IObjectWithSelection. The two vtbl pointers lead so
+   EC_OBJ/OWS_OBJ container_of works; remaining members are ordered largest-alignment-first so the
+   layout carries no interior padding. */
+typedef struct CommandObject
+{
+    const IExecuteCommandVtbl      *vtbl_ec;
+    const IObjectWithSelectionVtbl *vtbl_ows;
+    IShellItemArray                *selection;
+    POINT                           pos;
+    LONG                            ref;
+    int                             show_window;
+    BOOL                            show_set;
+    BOOL                            pos_set;
+    WCHAR                           params[WMX_PARAMS_CCH];
+    WCHAR                           directory[MAX_PATH];
+} CommandObject;
 
+typedef struct ClassFactory
+{
+    const IClassFactoryVtbl *vtbl;
+} ClassFactory;
 
 static volatile LONG g_object_count;
-static BOOL          g_is_com_server;   /* TRUE in run_com_server; WM_DESTROY should NOT exit */
+static BOOL          g_is_com_server; /* TRUE in run_com_server; WM_DESTROY must NOT exit then */
 static WCHAR         g_my_path[MAX_PATH];
-/* Reusable command-line buffer for ec_Execute. STA serializes Execute()
- * calls on the main thread, so one shared buffer is safe. Lives in .bss. */
-static WCHAR         g_cmd_buf[2048];
+/* Reusable command-line buffer for ec_Execute. The STA serializes Execute() calls on one thread,
+   so a single shared buffer is safe. Lives in .bss (zero-initialized by the loader). */
+static WCHAR         g_cmd_buf[WMX_CMD_CCH];
 
-#define WMX_WND_CLASS L"WinMainEx"
-/* Set of every .exe that has activated through us. Value name = full path,
- * data = L"1". Idempotent: re-recording the same path overwrites in place. */
-#define WMX_LIST_KEY  L"Software\\WinMainEx\\Launched"
-/* Window size = this percent of the monitor work area (keeps the work-area aspect ratio). */
-#define WMX_WND_PCT   50
+/* NoCRT replacement for memcmp; IsEqualIID lowers to a memcmp. #pragma function opts out of the
+   /Oi intrinsic so this definition is the one that links. SAL matches the CRT declaration so the
+   redefinition is annotation-consistent (C28251). */
+#pragma function(memcmp)
+_Check_return_
+int __cdecl memcmp(_In_reads_bytes_(cb) const void *pvA, _In_reads_bytes_(cb) const void *pvB, _In_ size_t cb)
+{
+    const BYTE *pbA;
+    const BYTE *pbB;
+
+    pbA = (const BYTE *)pvA;
+    pbB = (const BYTE *)pvB;
+    while (0u != cb)
+    {
+        if ((*pbA) != (*pbB))
+        {
+            return (int)(*pbA) - (int)(*pbB);
+        }
+        pbA++;
+        pbB++;
+        cb--;
+    }
+    return 0;
+}
 
 /* ------------------------------------------------------------------ */
 /* Small inline string helpers (NoCRT, kernel32-only)                  */
 /* ------------------------------------------------------------------ */
 
-static __forceinline int gnc_strlen(LPCWSTR s) {
-    int n = 0; while (s[n]) n++; return n;
+static int wmx_strlen(LPCWSTR psz)
+{
+    int cch;
+
+    cch = 0;
+    while (0 != psz[cch])
+    {
+        cch++;
+    }
+    return cch;
 }
-static __forceinline void gnc_strcpy(LPWSTR dst, LPCWSTR src) {
-    while ((*dst++ = *src++) != 0) {}
+
+static void wmx_strcpy(LPWSTR pszDst, LPCWSTR pszSrc)
+{
+    while (0 != (*pszSrc))
+    {
+        (*pszDst) = (*pszSrc);
+        pszDst++;
+        pszSrc++;
+    }
+    (*pszDst) = 0;
 }
-static __forceinline LPWSTR gnc_append(LPWSTR dst, LPCWSTR src) {
-    while ((*dst = *src) != 0) { dst++; src++; }
-    return dst;
+
+/* Append pszSrc onto pszDst; return a pointer to the new terminating nul so callers can chain. */
+static LPWSTR wmx_strappend(LPWSTR pszDst, LPCWSTR pszSrc)
+{
+    while (0 != (*pszSrc))
+    {
+        (*pszDst) = (*pszSrc);
+        pszDst++;
+        pszSrc++;
+    }
+    (*pszDst) = 0;
+    return pszDst;
 }
-static __forceinline BOOL gnc_iarg(LPCWSTR cmd, LPCWSTR target) {
-    /* Whole-token case-insensitive substring search across cmd. */
-    int tlen = gnc_strlen(target);
-    for (LPCWSTR p = cmd; *p; p++) {
-        WCHAR pre = (p == cmd) ? L' ' : p[-1];
-        if (pre != L' ' && pre != L'"') continue;
-        if (CompareStringOrdinal(p, tlen, target, tlen, TRUE) != CSTR_EQUAL) continue;
-        WCHAR post = p[tlen];
-        if (post == 0 || post == L' ' || post == L'"') return TRUE;
+
+/* Whole-token, case-insensitive search for pszTarget across the command line pszCmd. */
+static BOOL wmx_isarg(LPCWSTR pszCmd, LPCWSTR pszTarget)
+{
+    LPCWSTR p;
+    int     cchTarget;
+    WCHAR   chPre;
+    WCHAR   chPost;
+    BOOL    fTokenStart;
+    BOOL    fMatch;
+    BOOL    fTokenEnd;
+
+    cchTarget = wmx_strlen(pszTarget);
+    for (p = pszCmd; 0 != (*p); p++)
+    {
+        if (p == pszCmd)
+        {
+            chPre = L' ';
+        }
+        else
+        {
+            chPre = p[-1];
+        }
+        fTokenStart = (L' ' == chPre) || (L'"' == chPre);
+        if (!fTokenStart)
+        {
+            continue;
+        }
+        fMatch = (CSTR_EQUAL == CompareStringOrdinal(p, cchTarget, pszTarget, cchTarget, TRUE));
+        if (!fMatch)
+        {
+            continue;
+        }
+        chPost    = p[cchTarget];
+        fTokenEnd = (0 == chPost) || (L' ' == chPost) || (L'"' == chPost);
+        if (fTokenEnd)
+        {
+            return TRUE;
+        }
     }
     return FALSE;
 }
 
-/* Add an activated exe path to the WMX_LIST_KEY set. One create+set call,
- * idempotent, errors ignored — recording must never affect the launch. */
-static void record_exe(LPCWSTR path)
+/* ------------------------------------------------------------------ */
+/* Launched-exe set (HKCU)                                             */
+/* ------------------------------------------------------------------ */
+
+/* Add an activated exe path to the set. One create+set, idempotent, errors ignored -- recording
+   must never affect the launch. */
+static void record_exe(LPCWSTR pszPath)
 {
-    HKEY hKey;
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, WMX_LIST_KEY, 0, NULL, 0,
-                        KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
-        static const WCHAR one[] = L"1";
-        RegSetValueExW(hKey, path, 0, REG_SZ, (const BYTE *)one, (DWORD)sizeof(one));
+    static const WCHAR szOne[] = L"1";
+    HKEY               hKey;
+    LONG               lr;
+
+    lr = RegCreateKeyExW(HKEY_CURRENT_USER, WMX_LIST_KEY, 0, NULL, 0, KEY_WRITE, NULL, &hKey, NULL);
+    if (ERROR_SUCCESS == lr)
+    {
+        RegSetValueExW(hKey, pszPath, 0, REG_SZ, (const BYTE *)szOne, (DWORD)sizeof(szOne));
         RegCloseKey(hKey);
     }
 }
 
-/* Is this exe already in the launched-exe set (i.e. opted in to our handling)? */
-static BOOL is_exe_registered(LPCWSTR path)
+/* Is this exe already in the set (i.e. opted in to our handling)? */
+static BOOL is_exe_registered(LPCWSTR pszPath)
 {
     HKEY hKey;
-    BOOL found = FALSE;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, WMX_LIST_KEY, 0, KEY_QUERY_VALUE, &hKey) == ERROR_SUCCESS) {
-        if (RegQueryValueExW(hKey, path, NULL, NULL, NULL, NULL) == ERROR_SUCCESS) found = TRUE;
+    LONG lrOpen;
+    LONG lrQuery;
+    BOOL fFound;
+
+    fFound = FALSE;
+    lrOpen = RegOpenKeyExW(HKEY_CURRENT_USER, WMX_LIST_KEY, 0, KEY_QUERY_VALUE, &hKey);
+    if (ERROR_SUCCESS == lrOpen)
+    {
+        lrQuery = RegQueryValueExW(hKey, pszPath, NULL, NULL, NULL, NULL);
+        fFound  = (ERROR_SUCCESS == lrQuery);
         RegCloseKey(hKey);
     }
-    return found;
+    return fFound;
+}
+
+/* ------------------------------------------------------------------ */
+/* GUI: one overlapped window per show_gui call                        */
+/* ------------------------------------------------------------------ */
+
+/* void Cls_OnDestroy(HWND hwnd) */
+static void WinMainEx_OnDestroy(HWND hwnd)
+{
+    UNREFERENCED_PARAMETER(hwnd);
+
+    /* Direct-run mode: the window IS the process -> quit. COM-server mode: windows come and go,
+       the server stays alive. */
+    if (!g_is_com_server)
+    {
+        PostQuitMessage(0);
+    }
+}
+
+static LRESULT CALLBACK WinMainEx_WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+    switch (uMsg)
+    {
+        HANDLE_MSG(hwnd, WM_DESTROY, WinMainEx_OnDestroy);
+    default:
+        return DefWindowProcW(hwnd, uMsg, wParam, lParam);
+    }
+}
+
+/* Size hwnd to WMX_WND_PCT% of the monitor work area (which preserves the work-area aspect ratio)
+   and center it there. */
+static void CenterOnMonitor(HWND hwnd, HMONITOR hMon)
+{
+    MONITORINFO mi;
+    BOOL        fGotInfo;
+    int         nWorkWidth;
+    int         nWorkHeight;
+    int         nWidth;
+    int         nHeight;
+    int         nX;
+    int         nY;
+
+    SecureZeroMemory(&mi, sizeof(mi));
+    mi.cbSize = (DWORD)sizeof(mi);
+    fGotInfo  = GetMonitorInfoW(hMon, &mi);
+    if (!fGotInfo)
+    {
+        return;
+    }
+    nWorkWidth  = (int)(mi.rcWork.right - mi.rcWork.left);
+    nWorkHeight = (int)(mi.rcWork.bottom - mi.rcWork.top);
+    nWidth      = nWorkWidth * WMX_WND_PCT / WMX_PCT_DENOM;
+    nHeight     = nWorkHeight * WMX_WND_PCT / WMX_PCT_DENOM;
+    nX          = mi.rcWork.left + (nWorkWidth - nWidth) / 2;
+    nY          = mi.rcWork.top + (nWorkHeight - nHeight) / 2;
+    SetWindowPos(hwnd, NULL, nX, nY, nWidth, nHeight, SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+/* Show our window honoring the launcher's STARTUPINFO show state, then size+center it. For the COM
+   path psi is synthesized from the shell's IExecuteCommand intent; for the direct path it is the
+   real GetStartupInfoW. We always center our own window (the shell's SetPosition is an icon-click
+   point, not a window origin); position pass-through still applies to FORWARDED child launches. */
+static void show_gui(const STARTUPINFOW *psi)
+{
+    static BOOL s_fClassRegistered = FALSE;
+    WNDCLASSW   wc;
+    HINSTANCE   hInstance;
+    HMONITOR    hMon;
+    HWND        hwnd;
+    int         nCmdShow;
+    BOOL        fUseShow;
+    BOOL        fHasShellData;
+
+    hInstance = GetModuleHandleW(NULL);
+    fUseShow  = !!(STARTF_USESHOWWINDOW & psi->dwFlags);
+    if (fUseShow)
+    {
+        nCmdShow = (int)psi->wShowWindow;
+    }
+    else
+    {
+        nCmdShow = SW_SHOWDEFAULT;
+    }
+
+    if (!s_fClassRegistered)
+    {
+        SecureZeroMemory(&wc, sizeof(wc));
+        wc.lpfnWndProc   = WinMainEx_WndProc;
+        wc.hInstance     = hInstance;
+        wc.hCursor       = LoadCursorW(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        wc.lpszClassName = WMX_WND_CLASS;
+        RegisterClassW(&wc);
+        s_fClassRegistered = TRUE;
+    }
+
+    /* Created hidden at default size; CenterOnMonitor then sizes + positions it before we honor
+       the requested show state. */
+    hwnd = CreateWindowExW(0, WMX_WND_CLASS, WMX_WND_TITLE, WS_OVERLAPPEDWINDOW, CW_USEDEFAULT,
+                           CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, NULL, NULL, hInstance, NULL);
+    if (NULL == hwnd)
+    {
+        return;
+    }
+
+    fHasShellData = !!(STARTF_HASSHELLDATA & psi->dwFlags);
+    if (fHasShellData)
+    {
+        hMon = (HMONITOR)psi->hStdOutput;
+    }
+    else
+    {
+        hMon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    }
+    CenterOnMonitor(hwnd, hMon);
+    ShowWindow(hwnd, nCmdShow);
+    SetForegroundWindow(hwnd);
 }
 
 /* ------------------------------------------------------------------ */
 /* CommandObject: IExecuteCommand + IObjectWithSelection                */
 /* ------------------------------------------------------------------ */
 
-typedef struct CommandObject {
-    const IExecuteCommandVtbl      *vtbl_ec;
-    const IObjectWithSelectionVtbl *vtbl_ows;
-    LONG                            ref;
-    IShellItemArray                *selection;
-    WCHAR                           params[1024];
-    WCHAR                           directory[MAX_PATH];
-    int                             show_window;
-    BOOL                            show_set;
-    POINT                           pos;
-    BOOL                            pos_set;
-} CommandObject;
-
-static const IExecuteCommandVtbl      g_ec_vtbl;
-static const IObjectWithSelectionVtbl g_ows_vtbl;
-
-static void show_gui(const STARTUPINFOW *si);
-
-static HRESULT cmd_QI(CommandObject *obj, REFIID iid, void **ppv) {
-    if (IsEqualIID(iid, &IID_IUnknown) || IsEqualIID(iid, &IID_IExecuteCommand))
-        *ppv = (void *)&obj->vtbl_ec;
-    else if (IsEqualIID(iid, &IID_IObjectWithSelection))
-        *ppv = (void *)&obj->vtbl_ows;
-    else { *ppv = NULL; return E_NOINTERFACE; }
-    InterlockedIncrement(&obj->ref);
-    return S_OK;
-}
-static ULONG cmd_AddRef(CommandObject *obj) {
-    return (ULONG)InterlockedIncrement(&obj->ref);
-}
-static ULONG cmd_Release(CommandObject *obj) {
-    LONG r = InterlockedDecrement(&obj->ref);
-    if (r == 0) {
-        if (obj->selection) IShellItemArray_Release(obj->selection);
-        HeapFree(GetProcessHeap(), 0, obj);
-        InterlockedDecrement(&g_object_count);
-    }
-    return (ULONG)r;
-}
-
 #define EC_OBJ(p)  ((CommandObject *)((BYTE *)(p) - offsetof(CommandObject, vtbl_ec)))
 #define OWS_OBJ(p) ((CommandObject *)((BYTE *)(p) - offsetof(CommandObject, vtbl_ows)))
 
+static HRESULT cmd_QI(CommandObject *pObj, REFIID riid, void **ppv)
+{
+    BOOL fUnknown;
+    BOOL fExecute;
+    BOOL fSelection;
+
+    fUnknown   = IsEqualIID(riid, &IID_IUnknown);
+    fExecute   = IsEqualIID(riid, &IID_IExecuteCommand);
+    fSelection = IsEqualIID(riid, &IID_IObjectWithSelection);
+    if (fUnknown || fExecute)
+    {
+        (*ppv) = (void *)&pObj->vtbl_ec;
+    }
+    else if (fSelection)
+    {
+        (*ppv) = (void *)&pObj->vtbl_ows;
+    }
+    else
+    {
+        (*ppv) = NULL;
+        return E_NOINTERFACE;
+    }
+    InterlockedIncrement(&pObj->ref);
+    return S_OK;
+}
+
+static ULONG cmd_AddRef(CommandObject *pObj)
+{
+    return (ULONG)InterlockedIncrement(&pObj->ref);
+}
+
+static ULONG cmd_Release(CommandObject *pObj)
+{
+    LONG lRef;
+
+    lRef = InterlockedDecrement(&pObj->ref);
+    if (0 == lRef)
+    {
+        if (NULL != pObj->selection)
+        {
+            IShellItemArray_Release(pObj->selection);
+        }
+        HeapFree(GetProcessHeap(), 0, pObj);
+        InterlockedDecrement(&g_object_count);
+    }
+    return (ULONG)lRef;
+}
+
 /* IExecuteCommand */
-static HRESULT STDMETHODCALLTYPE ec_QI(IExecuteCommand *s, REFIID i, void **p)        { return cmd_QI(EC_OBJ(s), i, p); }
-static ULONG   STDMETHODCALLTYPE ec_AddRef(IExecuteCommand *s)                         { return cmd_AddRef(EC_OBJ(s)); }
-static ULONG   STDMETHODCALLTYPE ec_Release(IExecuteCommand *s)                        { return cmd_Release(EC_OBJ(s)); }
-static HRESULT STDMETHODCALLTYPE ec_SetKeyState(IExecuteCommand *s, DWORD k)           { (void)s; (void)k; return S_OK; }
-static HRESULT STDMETHODCALLTYPE ec_SetParameters(IExecuteCommand *s, LPCWSTR p) {
-    CommandObject *o = EC_OBJ(s);
-    if (p) { int i; for (i = 0; p[i] && i < 1023; i++) o->params[i] = p[i]; o->params[i] = 0; }
-    else o->params[0] = 0;
+static HRESULT STDMETHODCALLTYPE ec_QI(IExecuteCommand *pThis, REFIID riid, void **ppv)
+{
+    return cmd_QI(EC_OBJ(pThis), riid, ppv);
+}
+
+static ULONG STDMETHODCALLTYPE ec_AddRef(IExecuteCommand *pThis)
+{
+    return cmd_AddRef(EC_OBJ(pThis));
+}
+
+static ULONG STDMETHODCALLTYPE ec_Release(IExecuteCommand *pThis)
+{
+    return cmd_Release(EC_OBJ(pThis));
+}
+
+static HRESULT STDMETHODCALLTYPE ec_SetKeyState(IExecuteCommand *pThis, DWORD dwKeyState)
+{
+    UNREFERENCED_PARAMETER(pThis);
+    UNREFERENCED_PARAMETER(dwKeyState);
     return S_OK;
 }
-static HRESULT STDMETHODCALLTYPE ec_SetPosition(IExecuteCommand *s, POINT pt) {
-    CommandObject *o = EC_OBJ(s);
-    o->pos = pt;
-    o->pos_set = TRUE;
+
+static HRESULT STDMETHODCALLTYPE ec_SetParameters(IExecuteCommand *pThis, LPCWSTR pszParams)
+{
+    CommandObject *pObj;
+    int            cch;
+
+    pObj = EC_OBJ(pThis);
+    cch  = 0;
+    if (NULL != pszParams)
+    {
+        while ((0 != pszParams[cch]) && ((WMX_PARAMS_CCH - 1) > cch))
+        {
+            pObj->params[cch] = pszParams[cch];
+            cch++;
+        }
+    }
+    pObj->params[cch] = 0;
     return S_OK;
 }
-static HRESULT STDMETHODCALLTYPE ec_SetShowWindow(IExecuteCommand *s, int n) {
-    CommandObject *o = EC_OBJ(s);
-    o->show_window = n;
-    o->show_set    = TRUE;
+
+static HRESULT STDMETHODCALLTYPE ec_SetPosition(IExecuteCommand *pThis, POINT pt)
+{
+    CommandObject *pObj;
+
+    pObj          = EC_OBJ(pThis);
+    pObj->pos     = pt;
+    pObj->pos_set = TRUE;
     return S_OK;
 }
-static HRESULT STDMETHODCALLTYPE ec_SetNoShowUI(IExecuteCommand *s, BOOL b)            { (void)s; (void)b; return S_OK; }
-static HRESULT STDMETHODCALLTYPE ec_SetDirectory(IExecuteCommand *s, LPCWSTR d) {
-    CommandObject *o = EC_OBJ(s);
-    if (d) { int i; for (i = 0; d[i] && i < MAX_PATH - 1; i++) o->directory[i] = d[i]; o->directory[i] = 0; }
-    else o->directory[0] = 0;
+
+static HRESULT STDMETHODCALLTYPE ec_SetShowWindow(IExecuteCommand *pThis, int nShow)
+{
+    CommandObject *pObj;
+
+    pObj              = EC_OBJ(pThis);
+    pObj->show_window = nShow;
+    pObj->show_set    = TRUE;
     return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE ec_SetNoShowUI(IExecuteCommand *pThis, BOOL fNoShowUI)
+{
+    UNREFERENCED_PARAMETER(pThis);
+    UNREFERENCED_PARAMETER(fNoShowUI);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE ec_SetDirectory(IExecuteCommand *pThis, LPCWSTR pszDir)
+{
+    CommandObject *pObj;
+    int            cch;
+
+    pObj = EC_OBJ(pThis);
+    cch  = 0;
+    if (NULL != pszDir)
+    {
+        while ((0 != pszDir[cch]) && ((MAX_PATH - 1) > cch))
+        {
+            pObj->directory[cch] = pszDir[cch];
+            cch++;
+        }
+    }
+    pObj->directory[cch] = 0;
+    return S_OK;
+}
+
+/* Build a STARTUPINFO that carries the shell's show state (and, for child launches, position). */
+static void wmx_fill_startupinfo(const CommandObject *pObj, STARTUPINFOW *psi, BOOL fForwardChild)
+{
+    SecureZeroMemory(psi, sizeof(*psi));
+    psi->cb = (DWORD)sizeof(*psi);
+    if (pObj->show_set)
+    {
+        psi->dwFlags |= STARTF_USESHOWWINDOW;
+        psi->wShowWindow = (WORD)pObj->show_window;
+    }
+    /* Position pass-through only for forwarded children; our own window always centers. */
+    if (fForwardChild && pObj->pos_set)
+    {
+        psi->dwFlags |= STARTF_USEPOSITION;
+        psi->dwX = (DWORD)pObj->pos.x;
+        psi->dwY = (DWORD)pObj->pos.y;
+    }
 }
 
 /* --- THE HOT PATH ------------------------------------------------- */
-static HRESULT STDMETHODCALLTYPE ec_Execute(IExecuteCommand *self)
+static HRESULT STDMETHODCALLTYPE ec_Execute(IExecuteCommand *pThis)
 {
-    CommandObject *o = EC_OBJ(self);
+    CommandObject      *pObj;
+    IShellItem         *pItem;
+    LPWSTR              pszPath;
+    LPWSTR              pszWrite;
+    LPCWSTR             pszDir;
+    STARTUPINFOW        si;
+    PROCESS_INFORMATION pi;
+    SHELLEXECUTEINFOW   sei;
+    HRESULT             hr;
+    HRESULT             rc;
+    DWORD               dwErr;
+    BOOL                fIsSelf;
+    BOOL                fRegistered;
+    BOOL                fHasParams;
+    BOOL                fCreated;
 
-    if (!o->selection) { STARTUPINFOW s0 = { sizeof(s0) }; show_gui(&s0); return S_OK; }
+    pObj = EC_OBJ(pThis);
 
-    IShellItem *item;
-    if (FAILED(IShellItemArray_GetItemAt(o->selection, 0, &item))) return E_FAIL;
-
-    LPWSTR path = NULL;
-    HRESULT hr = IShellItem_GetDisplayName(item, SIGDN_FILESYSPATH, &path);
-    IShellItem_Release(item);
-    if (FAILED(hr) || !path) return hr;
-
-    /* Single ordinal full-path compare against cached g_my_path. */
-    if (CompareStringOrdinal(path, -1, g_my_path, -1, TRUE) == CSTR_EQUAL) {
-        /* Synthesize a STARTUPINFO from the shell's IExecuteCommand intent so our
-         * window honors the requested show state + position. */
-        STARTUPINFOW s2 = { sizeof(s2) };
-        if (o->show_set) { s2.dwFlags |= STARTF_USESHOWWINDOW; s2.wShowWindow = (WORD)o->show_window; }
-        if (o->pos_set)  { s2.dwFlags |= STARTF_USEPOSITION;   s2.dwX = (DWORD)o->pos.x; s2.dwY = (DWORD)o->pos.y; }
-        CoTaskMemFree(path);
-        show_gui(&s2);
+    if (NULL == pObj->selection)
+    {
+        wmx_fill_startupinfo(pObj, &si, FALSE);
+        show_gui(&si);
         return S_OK;
     }
 
-    /* Non-self exe. Only exes already in our set get the cursor-free treatment.
-     * A first-seen exe is recorded (the one-call bootstrap) but its launch this
-     * time is left UNMOLESTED -- faithful pass-through, normal feedback. */
-    BOOL registered = is_exe_registered(path);
-    if (!registered) record_exe(path);
-
-    /* Forward: build "<path>" + params into the static g_cmd_buf. STA,
-     * sequential Execute() calls -> safe to reuse. Zero alloc per launch.
-     * The CreateProcessW happens from this resident, input-idle server,
-     * so the shell never arms IDC_APPSTARTING -> no spinny. */
-    LPWSTR w = g_cmd_buf;
-    *w++ = L'"';
-    w = gnc_append(w, path);
-    *w++ = L'"';
-    if (o->params[0]) {
-        *w++ = L' ';
-        w = gnc_append(w, o->params);
+    hr = IShellItemArray_GetItemAt(pObj->selection, 0, &pItem);
+    if (FAILED(hr))
+    {
+        return E_FAIL;
     }
-    *w = 0;
+    pszPath = NULL;
+    hr      = IShellItem_GetDisplayName(pItem, SIGDN_FILESYSPATH, &pszPath);
+    IShellItem_Release(pItem);
+    if (FAILED(hr) || (NULL == pszPath))
+    {
+        return hr;
+    }
 
-    STARTUPINFOW si = { sizeof(si) };
-    /* Only opted-in exes get cursor suppression; non-registered launches are
-     * left exactly as the shell would have done them (no flag = normal feedback). */
-    si.dwFlags = registered ? STARTF_FORCEOFFFEEDBACK : 0;
-    if (o->show_set) { si.dwFlags |= STARTF_USESHOWWINDOW; si.wShowWindow = (WORD)o->show_window; }
-    if (o->pos_set)  { si.dwFlags |= STARTF_USEPOSITION;   si.dwX = (DWORD)o->pos.x; si.dwY = (DWORD)o->pos.y; }
-    PROCESS_INFORMATION pi;
-    HRESULT rc;
-    if (CreateProcessW(NULL, g_cmd_buf, NULL, NULL, FALSE, 0, NULL,
-            o->directory[0] ? o->directory : NULL, &si, &pi)) {
+    /* Single ordinal full-path compare against the cached g_my_path. */
+    fIsSelf = (CSTR_EQUAL == CompareStringOrdinal(pszPath, -1, g_my_path, -1, TRUE));
+    if (fIsSelf)
+    {
+        CoTaskMemFree(pszPath);
+        wmx_fill_startupinfo(pObj, &si, FALSE);
+        show_gui(&si);
+        return S_OK;
+    }
+
+    /* Non-self exe. Only exes already in the set get the cursor-free treatment; a first-seen exe is
+       recorded (the one-call bootstrap) and launched UNMOLESTED this time (normal feedback). */
+    fRegistered = is_exe_registered(pszPath);
+    if (!fRegistered)
+    {
+        record_exe(pszPath);
+    }
+
+    /* Forward: build "<path>" + params into g_cmd_buf. The CreateProcessW runs from this resident,
+       input-idle server, so the shell never arms IDC_APPSTARTING. */
+    pszWrite     = g_cmd_buf;
+    (*pszWrite)  = L'"';
+    pszWrite++;
+    pszWrite     = wmx_strappend(pszWrite, pszPath);
+    (*pszWrite)  = L'"';
+    pszWrite++;
+    fHasParams = (0 != pObj->params[0]);
+    if (fHasParams)
+    {
+        (*pszWrite) = L' ';
+        pszWrite++;
+        pszWrite = wmx_strappend(pszWrite, pObj->params);
+    }
+    (*pszWrite) = 0;
+
+    wmx_fill_startupinfo(pObj, &si, TRUE);
+    /* Only opted-in exes get cursor suppression; non-registered launches stay exactly as the shell
+       would have done them (no flag -> normal feedback). */
+    if (fRegistered)
+    {
+        si.dwFlags |= STARTF_FORCEOFFFEEDBACK;
+    }
+
+    pszDir = NULL;
+    if (0 != pObj->directory[0])
+    {
+        pszDir = pObj->directory;
+    }
+
+    fCreated = CreateProcessW(NULL, g_cmd_buf, NULL, NULL, FALSE, 0, NULL, pszDir, &si, &pi);
+    if (fCreated)
+    {
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
         rc = S_OK;
-    } else if (GetLastError() == ERROR_ELEVATION_REQUIRED) {
-        /* Retain correct behavior: target requires admin. Route through the
-         * 'runas' verb (exefile\shell\runas, NOT our 'open' DelegateExecute,
-         * so no re-entry) to get the normal UAC consent prompt. */
-        SHELLEXECUTEINFOW sei = { sizeof(sei) };
-        sei.fMask        = SEE_MASK_FLAG_NO_UI;
-        sei.lpVerb       = L"runas";
-        sei.lpFile       = path;
-        sei.lpParameters = o->params[0]    ? o->params    : NULL;
-        sei.lpDirectory  = o->directory[0] ? o->directory : NULL;
-        sei.nShow        = o->show_set ? o->show_window : SW_SHOWNORMAL;
-        rc = ShellExecuteExW(&sei) ? S_OK : HRESULT_FROM_WIN32(GetLastError());
-    } else {
-        rc = HRESULT_FROM_WIN32(GetLastError());
     }
-    CoTaskMemFree(path);
+    else
+    {
+        dwErr = GetLastError();
+        if (ERROR_ELEVATION_REQUIRED == dwErr)
+        {
+            /* Target requires admin: route through the 'runas' verb (exefile\shell\runas, NOT our
+               'open' DelegateExecute, so no re-entry) for the normal UAC consent prompt. */
+            SecureZeroMemory(&sei, sizeof(sei));
+            sei.cbSize       = (DWORD)sizeof(sei);
+            sei.fMask        = SEE_MASK_FLAG_NO_UI;
+            sei.lpVerb       = L"runas";
+            sei.lpFile       = pszPath;
+            sei.lpDirectory  = pszDir;
+            sei.nShow        = SW_SHOWNORMAL;
+            if (pObj->params[0])
+            {
+                sei.lpParameters = pObj->params;
+            }
+            if (pObj->show_set)
+            {
+                sei.nShow = pObj->show_window;
+            }
+            if (ShellExecuteExW(&sei))
+            {
+                rc = S_OK;
+            }
+            else
+            {
+                rc = HRESULT_FROM_WIN32(GetLastError());
+            }
+        }
+        else
+        {
+            rc = HRESULT_FROM_WIN32(dwErr);
+        }
+    }
+    CoTaskMemFree(pszPath);
     return rc;
 }
 
 static const IExecuteCommandVtbl g_ec_vtbl = {
-    ec_QI, ec_AddRef, ec_Release,
-    ec_SetKeyState, ec_SetParameters, ec_SetPosition,
-    ec_SetShowWindow, ec_SetNoShowUI, ec_SetDirectory, ec_Execute
-};
+    ec_QI,        ec_AddRef,       ec_Release,     ec_SetKeyState, ec_SetParameters,
+    ec_SetPosition, ec_SetShowWindow, ec_SetNoShowUI, ec_SetDirectory, ec_Execute};
 
 /* IObjectWithSelection */
-static HRESULT STDMETHODCALLTYPE ows_QI(IObjectWithSelection *s, REFIID i, void **p) { return cmd_QI(OWS_OBJ(s), i, p); }
-static ULONG   STDMETHODCALLTYPE ows_AddRef(IObjectWithSelection *s)                  { return cmd_AddRef(OWS_OBJ(s)); }
-static ULONG   STDMETHODCALLTYPE ows_Release(IObjectWithSelection *s)                 { return cmd_Release(OWS_OBJ(s)); }
-static HRESULT STDMETHODCALLTYPE ows_SetSelection(IObjectWithSelection *s, IShellItemArray *psia) {
-    CommandObject *o = OWS_OBJ(s);
-    if (o->selection) IShellItemArray_Release(o->selection);
-    o->selection = psia;
-    if (psia) IShellItemArray_AddRef(psia);
+static HRESULT STDMETHODCALLTYPE ows_QI(IObjectWithSelection *pThis, REFIID riid, void **ppv)
+{
+    return cmd_QI(OWS_OBJ(pThis), riid, ppv);
+}
+
+static ULONG STDMETHODCALLTYPE ows_AddRef(IObjectWithSelection *pThis)
+{
+    return cmd_AddRef(OWS_OBJ(pThis));
+}
+
+static ULONG STDMETHODCALLTYPE ows_Release(IObjectWithSelection *pThis)
+{
+    return cmd_Release(OWS_OBJ(pThis));
+}
+
+static HRESULT STDMETHODCALLTYPE ows_SetSelection(IObjectWithSelection *pThis, IShellItemArray *psia)
+{
+    CommandObject *pObj;
+
+    pObj = OWS_OBJ(pThis);
+    if (NULL != pObj->selection)
+    {
+        IShellItemArray_Release(pObj->selection);
+    }
+    pObj->selection = psia;
+    if (NULL != psia)
+    {
+        IShellItemArray_AddRef(psia);
+    }
     return S_OK;
 }
-static HRESULT STDMETHODCALLTYPE ows_GetSelection(IObjectWithSelection *s, REFIID riid, void **ppv) {
-    CommandObject *o = OWS_OBJ(s);
-    if (!o->selection) { *ppv = NULL; return E_FAIL; }
-    return IShellItemArray_QueryInterface(o->selection, riid, ppv);
+
+static HRESULT STDMETHODCALLTYPE ows_GetSelection(IObjectWithSelection *pThis, REFIID riid, void **ppv)
+{
+    CommandObject *pObj;
+
+    pObj = OWS_OBJ(pThis);
+    if (NULL == pObj->selection)
+    {
+        (*ppv) = NULL;
+        return E_FAIL;
+    }
+    return IShellItemArray_QueryInterface(pObj->selection, riid, ppv);
 }
+
 static const IObjectWithSelectionVtbl g_ows_vtbl = {
-    ows_QI, ows_AddRef, ows_Release, ows_SetSelection, ows_GetSelection
-};
+    ows_QI, ows_AddRef, ows_Release, ows_SetSelection, ows_GetSelection};
 
 /* ------------------------------------------------------------------ */
-/* IClassFactory singleton                                              */
+/* IClassFactory singleton                                             */
 /* ------------------------------------------------------------------ */
 
-typedef struct ClassFactory { const IClassFactoryVtbl *vtbl; } ClassFactory;
-static HRESULT STDMETHODCALLTYPE cf_QI(IClassFactory *s, REFIID i, void **p) {
-    if (IsEqualIID(i, &IID_IUnknown) || IsEqualIID(i, &IID_IClassFactory)) { *p = s; return S_OK; }
-    *p = NULL; return E_NOINTERFACE;
+static HRESULT STDMETHODCALLTYPE cf_QI(IClassFactory *pThis, REFIID riid, void **ppv)
+{
+    BOOL fUnknown;
+    BOOL fFactory;
+
+    fUnknown = IsEqualIID(riid, &IID_IUnknown);
+    fFactory = IsEqualIID(riid, &IID_IClassFactory);
+    if (fUnknown || fFactory)
+    {
+        (*ppv) = pThis;
+        return S_OK;
+    }
+    (*ppv) = NULL;
+    return E_NOINTERFACE;
 }
-static ULONG STDMETHODCALLTYPE cf_AddRef(IClassFactory *s)  { (void)s; return 2; }
-static ULONG STDMETHODCALLTYPE cf_Release(IClassFactory *s) { (void)s; return 1; }
-static HRESULT STDMETHODCALLTYPE cf_CreateInstance(IClassFactory *s, IUnknown *outer, REFIID iid, void **ppv) {
-    (void)s;
-    *ppv = NULL;
-    if (outer) return CLASS_E_NOAGGREGATION;
-    CommandObject *obj = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(CommandObject));
-    if (!obj) return E_OUTOFMEMORY;
-    obj->vtbl_ec  = &g_ec_vtbl;
-    obj->vtbl_ows = &g_ows_vtbl;
-    obj->ref      = 1;
+
+static ULONG STDMETHODCALLTYPE cf_AddRef(IClassFactory *pThis)
+{
+    UNREFERENCED_PARAMETER(pThis);
+    return WMX_SVR_REFCOUNT;
+}
+
+static ULONG STDMETHODCALLTYPE cf_Release(IClassFactory *pThis)
+{
+    UNREFERENCED_PARAMETER(pThis);
+    return WMX_SVR_REFCOUNT - 1;
+}
+
+static HRESULT STDMETHODCALLTYPE cf_CreateInstance(IClassFactory *pThis, IUnknown *pOuter, REFIID riid, void **ppv)
+{
+    CommandObject *pObj;
+    HRESULT        hr;
+
+    UNREFERENCED_PARAMETER(pThis);
+
+    (*ppv) = NULL;
+    if (NULL != pOuter)
+    {
+        return CLASS_E_NOAGGREGATION;
+    }
+    pObj = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(CommandObject));
+    if (NULL == pObj)
+    {
+        return E_OUTOFMEMORY;
+    }
+    pObj->vtbl_ec  = &g_ec_vtbl;
+    pObj->vtbl_ows = &g_ows_vtbl;
+    pObj->ref      = 1;
     InterlockedIncrement(&g_object_count);
-    HRESULT hr = cmd_QI(obj, iid, ppv);
-    cmd_Release(obj);
+    hr = cmd_QI(pObj, riid, ppv);
+    cmd_Release(pObj);
     return hr;
 }
-static HRESULT STDMETHODCALLTYPE cf_LockServer(IClassFactory *s, BOOL b) { (void)s; (void)b; return S_OK; }
-static const IClassFactoryVtbl g_cf_vtbl = {
-    cf_QI, cf_AddRef, cf_Release, cf_CreateInstance, cf_LockServer
-};
-static ClassFactory g_class_factory = { &g_cf_vtbl };
 
-/* ------------------------------------------------------------------ */
-/* GUI (slim) — one overlapped window per show_gui call.                */
-/* ------------------------------------------------------------------ */
-static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
-    if (m == WM_DESTROY) {
-        /* Direct-run mode: the window IS the process -> exit. COM-server
-         * mode: windows come and go; the server stays alive. */
-        if (!g_is_com_server) PostQuitMessage(0);
-        return 0;
-    }
-    return DefWindowProcW(h, m, wp, lp);
-}
-/* Size hwnd to WMX_WND_PCT% of the monitor's work area (which preserves the
-   work-area aspect ratio) and center it there. */
-static void CenterOnMonitor(HWND hwnd, HMONITOR mon)
+static HRESULT STDMETHODCALLTYPE cf_LockServer(IClassFactory *pThis, BOOL fLock)
 {
-    MONITORINFO mi;
-    int ww, wh, w, h, x, y;
-    mi.cbSize = (DWORD)sizeof(mi);
-    if (!GetMonitorInfoW(mon, &mi)) return;
-    ww = (int)(mi.rcWork.right - mi.rcWork.left);
-    wh = (int)(mi.rcWork.bottom - mi.rcWork.top);
-    w  = ww * WMX_WND_PCT / 100;
-    h  = wh * WMX_WND_PCT / 100;
-    x  = mi.rcWork.left + (ww - w) / 2;
-    y  = mi.rcWork.top  + (wh - h) / 2;
-    SetWindowPos(hwnd, NULL, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+    UNREFERENCED_PARAMETER(pThis);
+    UNREFERENCED_PARAMETER(fLock);
+    return S_OK;
 }
 
-/* Show our window honoring the launcher's STARTUPINFO (show state + placement).
- *   show state: STARTF_USESHOWWINDOW -> wShowWindow, else SW_SHOWDEFAULT.
- *   placement:  STARTF_USEPOSITION  -> create at dwX/dwY (leave it).
- *               STARTF_HASSHELLDATA -> hStdOutput is the shell's HMONITOR; center there.
- *               otherwise           -> center on the monitor we landed on.
- * For the COM path `si` is synthesized from IExecuteCommand (SetShowWindow/SetPosition);
- * for the direct path it is the real GetStartupInfoW. */
-static void show_gui(const STARTUPINFOW *si)
+static const IClassFactoryVtbl g_cf_vtbl = {cf_QI, cf_AddRef, cf_Release, cf_CreateInstance, cf_LockServer};
+static ClassFactory            g_class_factory = {&g_cf_vtbl};
+
+/* ------------------------------------------------------------------ */
+/* Registry install / uninstall (HKCU)                                 */
+/* ------------------------------------------------------------------ */
+
+static void clsid_str(WCHAR rgClsid[WMX_GUID_CCH])
 {
-    static BOOL class_registered = FALSE;
-    HINSTANCE hi = GetModuleHandleW(NULL);
-    int  nCmdShow = (si->dwFlags & STARTF_USESHOWWINDOW) ? (int)si->wShowWindow : SW_SHOWDEFAULT;
-    HMONITOR mon;
-    HWND hwnd;
-    if (!class_registered) {
-        WNDCLASSW wc = {0};
-        wc.lpfnWndProc   = WndProc;
-        wc.hInstance     = hi;
-        wc.hCursor       = LoadCursorW(NULL, IDC_ARROW);
-        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-        wc.lpszClassName = WMX_WND_CLASS;
-        RegisterClassW(&wc);
-        class_registered = TRUE;
+    int cch;
+
+    /* WMX_GUID_CCH is provably large enough for a GUID string, but check the count rather than
+       discard it (C6031); fall back to an empty string on the impossible failure. */
+    cch = StringFromGUID2(&CLSID_WinMainEx, rgClsid, WMX_GUID_CCH);
+    if (0 == cch)
+    {
+        rgClsid[0] = 0;
     }
-    /* Created hidden at default size; CenterOnMonitor sizes (to WMX_WND_PCT% of the
-       work area) and positions it before we honor the show state. */
-    hwnd = CreateWindowExW(0, WMX_WND_CLASS, L"WinMainEx",
-        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, NULL, NULL, hi, NULL);
-    if (!hwnd) return;
-    /* Always center our own window. The shell's IExecuteCommand SetPosition is an
-       icon-click point, not a window origin, so honoring it would mis-place us --
-       center instead (on the HASSHELLDATA launch monitor if given, else the one we
-       landed on). Position pass-through still applies to FORWARDED child launches. */
-    mon = (si->dwFlags & STARTF_HASSHELLDATA)
-        ? (HMONITOR)si->hStdOutput
-        : MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-    CenterOnMonitor(hwnd, mon);
-    ShowWindow(hwnd, nCmdShow);
-    SetForegroundWindow(hwnd);
 }
 
-/* ------------------------------------------------------------------ */
-/* Registry install / uninstall (HKCU)                                  */
-/* ------------------------------------------------------------------ */
+static LONG reg_set_sz(HKEY hParent, LPCWSTR pszSubKey, LPCWSTR pszName, LPCWSTR pszValue)
+{
+    HKEY  hKey;
+    LONG  lr;
+    int   cch;
+    DWORD cbValue;
 
-static void clsid_str(WCHAR out[40]) {
-    StringFromGUID2(&CLSID_WinMainEx, out, 40);
-}
-static LONG reg_set_sz(HKEY parent, LPCWSTR sub, LPCWSTR name, LPCWSTR val) {
-    HKEY hKey;
-    LONG e = RegCreateKeyExW(parent, sub, 0, NULL, 0, KEY_WRITE, NULL, &hKey, NULL);
-    if (e) return e;
-    int n = gnc_strlen(val);
-    e = RegSetValueExW(hKey, name, 0, REG_SZ, (const BYTE *)val, (DWORD)((n + 1) * sizeof(WCHAR)));
+    lr = RegCreateKeyExW(hParent, pszSubKey, 0, NULL, 0, KEY_WRITE, NULL, &hKey, NULL);
+    if (ERROR_SUCCESS != lr)
+    {
+        return lr;
+    }
+    cch     = wmx_strlen(pszValue);
+    cbValue = (DWORD)(((size_t)cch + 1) * sizeof(WCHAR));
+    lr      = RegSetValueExW(hKey, pszName, 0, REG_SZ, (const BYTE *)pszValue, cbValue);
     RegCloseKey(hKey);
-    return e;
+    return lr;
 }
 
 static int do_register(void)
 {
-    WCHAR clsid[40]; clsid_str(clsid);
-    WCHAR sub[256];
-    /* sub = "Software\\Classes\\CLSID\\{guid}" */
-    LPWSTR w = sub;
-    w = gnc_append(w, L"Software\\Classes\\CLSID\\");
-    gnc_strcpy(w, clsid);
-    if (reg_set_sz(HKEY_CURRENT_USER, sub, NULL, L"WinMainEx")) return 1;
+    WCHAR  rgClsid[WMX_GUID_CCH];
+    WCHAR  szSub[WMX_SUBKEY_CCH];
+    LPWSTR pszWrite;
+    LONG   lr;
 
-    /* sub = "Software\\Classes\\CLSID\\{guid}\\LocalServer32" */
-    w = gnc_append(sub, L"Software\\Classes\\CLSID\\");
-    w = gnc_append(w, clsid);
-    gnc_strcpy(w, L"\\LocalServer32");
-    if (reg_set_sz(HKEY_CURRENT_USER, sub, NULL, g_my_path)) return 1;
+    clsid_str(rgClsid);
 
-    /* exefile open\command DelegateExecute = our CLSID */
-    if (reg_set_sz(HKEY_CURRENT_USER,
-            L"Software\\Classes\\exefile\\shell\\open\\command",
-            NULL, L"\"%1\" %*")) return 1;
-    if (reg_set_sz(HKEY_CURRENT_USER,
-            L"Software\\Classes\\exefile\\shell\\open\\command",
-            L"DelegateExecute", clsid)) return 1;
-    /* Tell the shell the exefile association changed, else Explorer keeps using
-     * its cached (default cold-launch) association and never calls our handler. */
+    /* CLSID\{guid} (Default) = friendly name */
+    pszWrite = wmx_strappend(szSub, WMX_CLSID_PREFIX);
+    wmx_strcpy(pszWrite, rgClsid);
+    lr = reg_set_sz(HKEY_CURRENT_USER, szSub, NULL, WMX_FRIENDLY_NAME);
+    if (ERROR_SUCCESS != lr)
+    {
+        return 1;
+    }
+
+    /* CLSID\{guid}\LocalServer32 (Default) = our exe path */
+    pszWrite = wmx_strappend(szSub, WMX_CLSID_PREFIX);
+    pszWrite = wmx_strappend(pszWrite, rgClsid);
+    wmx_strcpy(pszWrite, L"\\LocalServer32");
+    lr = reg_set_sz(HKEY_CURRENT_USER, szSub, NULL, g_my_path);
+    if (ERROR_SUCCESS != lr)
+    {
+        return 1;
+    }
+
+    /* exefile open command default + DelegateExecute = our CLSID */
+    lr = reg_set_sz(HKEY_CURRENT_USER, WMX_EXEFILE_CMD_KEY, NULL, L"\"%1\" %*");
+    if (ERROR_SUCCESS != lr)
+    {
+        return 1;
+    }
+    lr = reg_set_sz(HKEY_CURRENT_USER, WMX_EXEFILE_CMD_KEY, L"DelegateExecute", rgClsid);
+    if (ERROR_SUCCESS != lr)
+    {
+        return 1;
+    }
+
+    /* Tell the shell the exefile association changed, else Explorer keeps its cached (cold-launch)
+       association and never calls our handler. */
     SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, NULL, NULL);
     return 0;
 }
 
 static int do_unregister(void)
 {
-    WCHAR clsid[40]; clsid_str(clsid);
-    WCHAR sub[256];
-    LPWSTR w = gnc_append(sub, L"Software\\Classes\\CLSID\\");
-    gnc_strcpy(w, clsid);
-    RegDeleteTreeW(HKEY_CURRENT_USER, sub);
+    WCHAR  rgClsid[WMX_GUID_CCH];
+    WCHAR  szSub[WMX_SUBKEY_CCH];
+    LPWSTR pszWrite;
+    HKEY   hKey;
+    LONG   lrOpen;
 
-    HKEY hKey;
-    if (ERROR_SUCCESS == RegOpenKeyExW(HKEY_CURRENT_USER,
-            L"Software\\Classes\\exefile\\shell\\open\\command",
-            0, KEY_SET_VALUE, &hKey)) {
+    clsid_str(rgClsid);
+    pszWrite = wmx_strappend(szSub, WMX_CLSID_PREFIX);
+    wmx_strcpy(pszWrite, rgClsid);
+    RegDeleteTreeW(HKEY_CURRENT_USER, szSub);
+
+    lrOpen = RegOpenKeyExW(HKEY_CURRENT_USER, WMX_EXEFILE_CMD_KEY, 0, KEY_SET_VALUE, &hKey);
+    if (ERROR_SUCCESS == lrOpen)
+    {
         RegDeleteValueW(hKey, L"DelegateExecute");
         RegDeleteValueW(hKey, NULL);
         RegCloseKey(hKey);
     }
-    RegDeleteKeyExW(HKEY_CURRENT_USER, L"Software\\Classes\\exefile\\shell\\open\\command", 0, 0);
-    RegDeleteKeyExW(HKEY_CURRENT_USER, L"Software\\Classes\\exefile\\shell\\open",         0, 0);
-    RegDeleteKeyExW(HKEY_CURRENT_USER, L"Software\\Classes\\exefile\\shell",               0, 0);
-    RegDeleteKeyExW(HKEY_CURRENT_USER, L"Software\\Classes\\exefile",                       0, 0);
+    RegDeleteKeyExW(HKEY_CURRENT_USER, WMX_EXEFILE_CMD_KEY, 0, 0);
+    RegDeleteKeyExW(HKEY_CURRENT_USER, L"Software\\Classes\\exefile\\shell\\open", 0, 0);
+    RegDeleteKeyExW(HKEY_CURRENT_USER, L"Software\\Classes\\exefile\\shell", 0, 0);
+    RegDeleteKeyExW(HKEY_CURRENT_USER, L"Software\\Classes\\exefile", 0, 0);
     return 0;
 }
 
 static BOOL is_registered(void)
 {
-    WCHAR clsid[40]; clsid_str(clsid);
-    WCHAR sub[256];
-    LPWSTR w = gnc_append(sub, L"Software\\Classes\\CLSID\\");
-    w = gnc_append(w, clsid);
-    gnc_strcpy(w, L"\\LocalServer32");
-    HKEY hKey;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, sub, 0, KEY_READ, &hKey)) return FALSE;
+    WCHAR  rgClsid[WMX_GUID_CCH];
+    WCHAR  szSub[WMX_SUBKEY_CCH];
+    LPWSTR pszWrite;
+    HKEY   hKey;
+    LONG   lrOpen;
+
+    clsid_str(rgClsid);
+    pszWrite = wmx_strappend(szSub, WMX_CLSID_PREFIX);
+    pszWrite = wmx_strappend(pszWrite, rgClsid);
+    wmx_strcpy(pszWrite, L"\\LocalServer32");
+    lrOpen = RegOpenKeyExW(HKEY_CURRENT_USER, szSub, 0, KEY_READ, &hKey);
+    if (ERROR_SUCCESS != lrOpen)
+    {
+        return FALSE;
+    }
     RegCloseKey(hKey);
     return TRUE;
 }
 
 /* ------------------------------------------------------------------ */
-/* Modes                                                                */
+/* Modes                                                               */
 /* ------------------------------------------------------------------ */
 
 static int run_com_server(void)
 {
+    MSG     msg;
+    HRESULT hrInit;
+    HRESULT hrReg;
+    DWORD   dwCookie;
+
     g_is_com_server = TRUE;
-    if (FAILED(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE)))
+    hrInit          = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    if (FAILED(hrInit))
+    {
         return 1;
-    DWORD cookie = 0;
-    if (FAILED(CoRegisterClassObject(&CLSID_WinMainEx,
-            (IUnknown *)&g_class_factory,
-            CLSCTX_LOCAL_SERVER, REGCLS_MULTIPLEUSE, &cookie))) {
+    }
+    dwCookie = 0;
+    hrReg    = CoRegisterClassObject(&CLSID_WinMainEx, (IUnknown *)&g_class_factory,
+                                     CLSCTX_LOCAL_SERVER, REGCLS_MULTIPLEUSE, &dwCookie);
+    if (FAILED(hrReg))
+    {
         CoUninitialize();
         return 2;
     }
-    /* Standard STA pump: dispatches COM RPC (ole32's hidden STA window)
-     * and any show_gui window messages. WM_QUIT from PostQuitMessage in
-     * WndProc on WM_DESTROY, or from the OS at logoff. */
-    MSG msg;
-    while (GetMessageW(&msg, NULL, 0, 0) > 0) {
+
+    /* Standard STA pump: dispatches COM RPC (ole32's hidden STA window) and any show_gui window
+       messages. WM_QUIT comes from PostQuitMessage in WinMainEx_OnDestroy, or from the OS at logoff. */
+    while (0 < GetMessageW(&msg, NULL, 0, 0))
+    {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
 
-    if (cookie) CoRevokeClassObject(cookie);
+    if (0 != dwCookie)
+    {
+        CoRevokeClassObject(dwCookie);
+    }
     CoUninitialize();
     return 0;
 }
@@ -551,11 +963,17 @@ static int run_com_server(void)
 static int run_direct(void)
 {
     STARTUPINFOW si;
-    if (!is_registered()) do_register();
-    GetStartupInfoW(&si);   /* direct launch: honor the real launcher's STARTUPINFO */
+    MSG          msg;
+
+    if (!is_registered())
+    {
+        do_register();
+    }
+    /* Direct launch: honor the real launcher's STARTUPINFO. GetStartupInfoW fills it completely. */
+    GetStartupInfoW(&si);
     show_gui(&si);
-    MSG msg;
-    while (GetMessageW(&msg, NULL, 0, 0) > 0) {
+    while (0 < GetMessageW(&msg, NULL, 0, 0))
+    {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
@@ -563,21 +981,32 @@ static int run_direct(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* Entry — NoCRT custom entry                                           */
+/* Entry -- NoCRT custom entry                                         */
 /* ------------------------------------------------------------------ */
 
 void __cdecl mainCRTStartup(void)
 {
+    LPCWSTR cmd;
+    int     rc;
+    BOOL    fUnregister;
+    BOOL    fEmbedding;
+
     GetModuleFileNameW(NULL, g_my_path, MAX_PATH);
 
-    LPCWSTR cmd = GetCommandLineW();
-    int rc;
-    if (gnc_iarg(cmd, L"/unregister"))
+    cmd         = GetCommandLineW();
+    fUnregister = wmx_isarg(cmd, L"/unregister");
+    fEmbedding  = wmx_isarg(cmd, L"-Embedding") || wmx_isarg(cmd, L"/Embedding");
+    if (fUnregister)
+    {
         rc = do_unregister();
-    else if (gnc_iarg(cmd, L"-Embedding") || gnc_iarg(cmd, L"/Embedding"))
+    }
+    else if (fEmbedding)
+    {
         rc = run_com_server();
+    }
     else
+    {
         rc = run_direct();
-
+    }
     ExitProcess((UINT)rc);
 }
