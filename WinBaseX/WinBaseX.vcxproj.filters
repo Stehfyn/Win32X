@@ -25,5 +25,8 @@
     <ClInclude Include="WinBaseX.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="WinBaseXText.inl">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>
