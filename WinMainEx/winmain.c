@@ -58,7 +58,7 @@ static void WinMainEx_OnDestroy(HWND hwnd)
     }
 }
 
-static LRESULT CALLBACK WinMainEx_WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
     switch (uMsg)
     {
@@ -96,14 +96,13 @@ static void CenterOnMonitor(HWND hwnd, HMONITOR hMon)
 
 static void ShowGui(const STARTUPINFOW* psi)
 {
-    static BOOL s_fClassRegistered = FALSE;
-    WNDCLASSW   wc;
-    HINSTANCE   hInstance;
-    HMONITOR    hMon;
-    HWND        hwnd;
-    int         nCmdShow;
-    BOOL        fUseShow;
-    BOOL        fHasShellData;
+    WNDCLASSW wc;
+    HINSTANCE hInstance;
+    HMONITOR  hMon;
+    HWND      hwnd;
+    int       nCmdShow;
+    BOOL      fUseShow;
+    BOOL      fHasShellData;
 
     hInstance = GetModuleHandleW(NULL);
     fUseShow  = !!(STARTF_USESHOWWINDOW & psi->dwFlags);
@@ -116,17 +115,15 @@ static void ShowGui(const STARTUPINFOW* psi)
         nCmdShow = SW_SHOWDEFAULT;
     }
 
-    if (!s_fClassRegistered)
-    {
-        SecureZeroMemory(&wc, sizeof(wc));
-        wc.lpfnWndProc   = WinMainEx_WndProc;
-        wc.hInstance     = hInstance;
-        wc.hCursor       = LoadCursorW(NULL, IDC_ARROW);
-        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-        wc.lpszClassName = WMX_WND_CLASS;
-        RegisterClassW(&wc);
-        s_fClassRegistered = TRUE;
-    }
+    /* Idempotent: a second RegisterClassW fails with ERROR_CLASS_ALREADY_EXISTS and the class
+       stays registered, so CreateWindowExW works regardless -- no need to track first-call state. */
+    SecureZeroMemory(&wc, sizeof(wc));
+    wc.lpfnWndProc   = WndProc;
+    wc.hInstance     = hInstance;
+    wc.hCursor       = LoadCursorW(NULL, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    wc.lpszClassName = WMX_WND_CLASS;
+    RegisterClassW(&wc);
 
     hwnd = CreateWindowExW(0,
                            WMX_WND_CLASS,
