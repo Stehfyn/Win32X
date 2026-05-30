@@ -44,6 +44,10 @@
 #include <shellapi.h>
 #include <shlobj.h>
 
+#ifndef STARTF_HASSHELLDATA
+#define STARTF_HASSHELLDATA 0x00000400   /* not in the SDK headers; hStdOutput holds the shell HMONITOR */
+#endif
+
 /* GUIDs we need emitted as storage, without uuid.lib. */
 DEFINE_GUID(IID_IUnknown,            0x00000000, 0x0000, 0x0000, 0xC0,0x00,0x00,0x00,0x00,0x00,0x00,0x46);
 DEFINE_GUID(IID_IClassFactory,       0x00000001, 0x0000, 0x0000, 0xC0,0x00,0x00,0x00,0x00,0x00,0x00,0x46);
@@ -141,12 +145,14 @@ typedef struct CommandObject {
     WCHAR                           directory[MAX_PATH];
     int                             show_window;
     BOOL                            show_set;
+    POINT                           pos;
+    BOOL                            pos_set;
 } CommandObject;
 
 static const IExecuteCommandVtbl      g_ec_vtbl;
 static const IObjectWithSelectionVtbl g_ows_vtbl;
 
-static void show_gui(void);
+static void show_gui(const STARTUPINFOW *si);
 
 static HRESULT cmd_QI(CommandObject *obj, REFIID iid, void **ppv) {
     if (IsEqualIID(iid, &IID_IUnknown) || IsEqualIID(iid, &IID_IExecuteCommand))
@@ -184,7 +190,12 @@ static HRESULT STDMETHODCALLTYPE ec_SetParameters(IExecuteCommand *s, LPCWSTR p)
     else o->params[0] = 0;
     return S_OK;
 }
-static HRESULT STDMETHODCALLTYPE ec_SetPosition(IExecuteCommand *s, POINT pt)          { (void)s; (void)pt; return S_OK; }
+static HRESULT STDMETHODCALLTYPE ec_SetPosition(IExecuteCommand *s, POINT pt) {
+    CommandObject *o = EC_OBJ(s);
+    o->pos = pt;
+    o->pos_set = TRUE;
+    return S_OK;
+}
 static HRESULT STDMETHODCALLTYPE ec_SetShowWindow(IExecuteCommand *s, int n) {
     CommandObject *o = EC_OBJ(s);
     o->show_window = n;
@@ -204,7 +215,7 @@ static HRESULT STDMETHODCALLTYPE ec_Execute(IExecuteCommand *self)
 {
     CommandObject *o = EC_OBJ(self);
 
-    if (!o->selection) { show_gui(); return S_OK; }
+    if (!o->selection) { STARTUPINFOW s0 = { sizeof(s0) }; show_gui(&s0); return S_OK; }
 
     IShellItem *item;
     if (FAILED(IShellItemArray_GetItemAt(o->selection, 0, &item))) return E_FAIL;
@@ -216,8 +227,13 @@ static HRESULT STDMETHODCALLTYPE ec_Execute(IExecuteCommand *self)
 
     /* Single ordinal full-path compare against cached g_my_path. */
     if (CompareStringOrdinal(path, -1, g_my_path, -1, TRUE) == CSTR_EQUAL) {
+        /* Synthesize a STARTUPINFO from the shell's IExecuteCommand intent so our
+         * window honors the requested show state + position. */
+        STARTUPINFOW s2 = { sizeof(s2) };
+        if (o->show_set) { s2.dwFlags |= STARTF_USESHOWWINDOW; s2.wShowWindow = (WORD)o->show_window; }
+        if (o->pos_set)  { s2.dwFlags |= STARTF_USEPOSITION;   s2.dwX = (DWORD)o->pos.x; s2.dwY = (DWORD)o->pos.y; }
         CoTaskMemFree(path);
-        show_gui();
+        show_gui(&s2);
         return S_OK;
     }
 
@@ -246,6 +262,7 @@ static HRESULT STDMETHODCALLTYPE ec_Execute(IExecuteCommand *self)
      * left exactly as the shell would have done them (no flag = normal feedback). */
     si.dwFlags = registered ? STARTF_FORCEOFFFEEDBACK : 0;
     if (o->show_set) { si.dwFlags |= STARTF_USESHOWWINDOW; si.wShowWindow = (WORD)o->show_window; }
+    if (o->pos_set)  { si.dwFlags |= STARTF_USEPOSITION;   si.dwX = (DWORD)o->pos.x; si.dwY = (DWORD)o->pos.y; }
     PROCESS_INFORMATION pi;
     HRESULT rc;
     if (CreateProcessW(NULL, g_cmd_buf, NULL, NULL, FALSE, 0, NULL,
@@ -341,10 +358,38 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     }
     return DefWindowProcW(h, m, wp, lp);
 }
-static void show_gui(void)
+/* Center hwnd in the work area of the given monitor. */
+static void CenterOnMonitor(HWND hwnd, HMONITOR mon)
+{
+    MONITORINFO mi;
+    RECT wr;
+    int w, h, x, y;
+    mi.cbSize = (DWORD)sizeof(mi);
+    if (!GetMonitorInfoW(mon, &mi)) return;
+    GetWindowRect(hwnd, &wr);
+    w = (int)(wr.right - wr.left);
+    h = (int)(wr.bottom - wr.top);
+    x = mi.rcWork.left + ((mi.rcWork.right - mi.rcWork.left) - w) / 2;
+    y = mi.rcWork.top  + ((mi.rcWork.bottom - mi.rcWork.top) - h) / 2;
+    SetWindowPos(hwnd, NULL, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+/* Show our window honoring the launcher's STARTUPINFO (show state + placement).
+ *   show state: STARTF_USESHOWWINDOW -> wShowWindow, else SW_SHOWDEFAULT.
+ *   placement:  STARTF_USEPOSITION  -> create at dwX/dwY (leave it).
+ *               STARTF_HASSHELLDATA -> hStdOutput is the shell's HMONITOR; center there.
+ *               otherwise           -> center on the monitor we landed on.
+ * For the COM path `si` is synthesized from IExecuteCommand (SetShowWindow/SetPosition);
+ * for the direct path it is the real GetStartupInfoW. */
+static void show_gui(const STARTUPINFOW *si)
 {
     static BOOL class_registered = FALSE;
     HINSTANCE hi = GetModuleHandleW(NULL);
+    int  nCmdShow = (si->dwFlags & STARTF_USESHOWWINDOW) ? (int)si->wShowWindow : SW_SHOWDEFAULT;
+    BOOL usePos   = (si->dwFlags & STARTF_USEPOSITION) != 0;
+    int  x = usePos ? (int)si->dwX : CW_USEDEFAULT;
+    int  y = usePos ? (int)si->dwY : CW_USEDEFAULT;
+    HWND hwnd;
     if (!class_registered) {
         WNDCLASSW wc = {0};
         wc.lpfnWndProc   = WndProc;
@@ -355,10 +400,17 @@ static void show_gui(void)
         RegisterClassW(&wc);
         class_registered = TRUE;
     }
-    HWND hwnd = CreateWindowExW(0, WMX_WND_CLASS, L"WinMainEx",
-        WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-        CW_USEDEFAULT, CW_USEDEFAULT, 700, 220, NULL, NULL, hi, NULL);
+    /* Created hidden so we can place it before honoring the show state. */
+    hwnd = CreateWindowExW(0, WMX_WND_CLASS, L"WinMainEx",
+        WS_OVERLAPPEDWINDOW, x, y, 700, 220, NULL, NULL, hi, NULL);
     if (!hwnd) return;
+    if (!usePos) {
+        HMONITOR mon = (si->dwFlags & STARTF_HASSHELLDATA)
+            ? (HMONITOR)si->hStdOutput
+            : MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        CenterOnMonitor(hwnd, mon);
+    }
+    ShowWindow(hwnd, nCmdShow);
     SetForegroundWindow(hwnd);
 }
 
@@ -476,8 +528,10 @@ static int run_com_server(void)
 
 static int run_direct(void)
 {
+    STARTUPINFOW si;
     if (!is_registered()) do_register();
-    show_gui();
+    GetStartupInfoW(&si);   /* direct launch: honor the real launcher's STARTUPINFO */
+    show_gui(&si);
     MSG msg;
     while (GetMessageW(&msg, NULL, 0, 0) > 0) {
         TranslateMessage(&msg);
