@@ -7,13 +7,9 @@
 #endif
 
 #include "WinBaseX.h"
-
-int __cdecl WinBaseXRunWide(int(WINAPI* pfnWinMainEx)(HINSTANCE, HINSTANCE, LPWSTR, int, const STARTUPINFOW*));
+#include "WinBaseXText.inl" /* UNICODE defined for this TU -> WinBaseXRunW */
 
 void __cdecl wWinMainCRTStartup(void)
 {
-    int rc;
-
-    rc = WinBaseXRunWide(wWinMainEx);
-    ExitProcess((UINT)rc);
+    ExitProcess((UINT)WinBaseXRun(_tWinMainEx, &WinBaseXRegistration));
 }

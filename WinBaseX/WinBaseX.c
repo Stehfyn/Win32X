@@ -46,6 +46,7 @@
 #define WBX_EXEFILE_CMD_KEY  L"Software\\Classes\\exefile\\shell\\open\\command"
 #define WBX_GUID_CCH         40
 #define WBX_SUBKEY_CCH       256
+#define WBX_NAME_CCH         128
 #define WBX_PARAMS_CCH       1024
 #define WBX_CMD_CCH          2048
 #define WBX_SVR_REFCOUNT     2
@@ -54,18 +55,6 @@ DEFINE_GUID(IID_IUnknown, 0x00000000, 0x0000, 0x0000, 0xC0, 0x00, 0x00, 0x00, 0x
 DEFINE_GUID(IID_IClassFactory, 0x00000001, 0x0000, 0x0000, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46);
 DEFINE_GUID(IID_IExecuteCommand, 0x7F9185B0, 0xCB92, 0x43C5, 0x80, 0xA9, 0x92, 0x27, 0x7A, 0x4F, 0x7B, 0x54);
 DEFINE_GUID(IID_IObjectWithSelection, 0x1C9CD5BB, 0x98E9, 0x4491, 0xA6, 0x0F, 0x31, 0xAA, 0xCC, 0x72, 0xB8, 0x3C);
-
-typedef int(WINAPI* WBX_PFN_WINMAINEXA)(HINSTANCE           hInstance,
-                                        HINSTANCE           hPrevInstance,
-                                        LPSTR               lpCmdLine,
-                                        int                 nShowCmd,
-                                        const STARTUPINFOA* lpStartupInfo);
-
-typedef int(WINAPI* WBX_PFN_WINMAINEXW)(HINSTANCE           hInstance,
-                                        HINSTANCE           hPrevInstance,
-                                        LPWSTR              lpCmdLine,
-                                        int                 nShowCmd,
-                                        const STARTUPINFOW* lpStartupInfo);
 
 typedef struct ClassFactory
 {
@@ -90,6 +79,8 @@ typedef struct WBX_STATE
     /* process identity + forward scratch */
     WCHAR              szMyPath[MAX_PATH];
     WCHAR              szCmdBuf[WBX_CMD_CCH];  /* wide forward command line (COM path) */
+    WCHAR              szFriendlyName[WBX_NAME_CCH];
+    WCHAR              szHistoryKey[MAX_PATH];
     CHAR               szCmdBufA[WBX_CMD_CCH]; /* ANSI client command line (W->A bridge) */
     CHAR               szDesktopA[MAX_PATH];   /* ANSI STARTUPINFO.lpDesktop (W->A bridge) */
     CHAR               szTitleA[MAX_PATH];     /* ANSI STARTUPINFO.lpTitle   (W->A bridge) */
@@ -378,7 +369,7 @@ static HRESULT STDMETHODCALLTYPE ExecuteCommand_SetDirectory(IExecuteCommand* pT
     CommandObject* pObj;
 
     pObj = EC_OBJ(pThis);
-    if (NULL != pszDir)
+    if (pszDir)
     {
         (void)lstrcpynW(pObj->directory, pszDir, MAX_PATH);
     }
@@ -683,7 +674,7 @@ static void                    WbxClsidString(WCHAR rgClsid[WBX_GUID_CCH])
     }
 }
 
-static LONG WbxRegSetString(HKEY hParent, LPCWSTR pszSubKey, LPCWSTR pszName, LPCWSTR pszValue)
+LONG WbxRegSetStringW(HKEY hParent, LPCWSTR pszSubKey, LPCWSTR pszName, LPCWSTR pszValue)
 {
     HKEY  hKey;
     LONG  lr;
@@ -702,6 +693,28 @@ static LONG WbxRegSetString(HKEY hParent, LPCWSTR pszSubKey, LPCWSTR pszName, LP
     return lr;
 }
 
+/* A variant: convert the ANSI subkey/name/value up to wide, then call the W variant. */
+LONG WbxRegSetStringA(HKEY hParent, LPCSTR pszSubKey, LPCSTR pszName, LPCSTR pszValue)
+{
+    WCHAR   szSubKey[WBX_SUBKEY_CCH];
+    WCHAR   szName[WBX_SUBKEY_CCH];
+    WCHAR   szValue[MAX_PATH];
+    LPCWSTR pszNameW;
+
+    szSubKey[0] = 0;
+    szValue[0]  = 0;
+    (void)MultiByteToWideChar(CP_ACP, 0, pszSubKey, -1, szSubKey, WBX_SUBKEY_CCH);
+    (void)MultiByteToWideChar(CP_ACP, 0, pszValue, -1, szValue, MAX_PATH);
+    pszNameW = NULL;
+    if (NULL != pszName)
+    {
+        szName[0] = 0;
+        (void)MultiByteToWideChar(CP_ACP, 0, pszName, -1, szName, WBX_SUBKEY_CCH);
+        pszNameW = szName;
+    }
+    return WbxRegSetStringW(hParent, szSubKey, pszNameW, szValue);
+}
+
 static int WbxRegister(void)
 {
     WBX_STATE* pState;
@@ -714,7 +727,7 @@ static int WbxRegister(void)
 
     lstrcpyW(szSub, WBX_CLSID_PREFIX);
     lstrcatW(szSub, rgClsid);
-    lr = WbxRegSetString(HKEY_CURRENT_USER, szSub, NULL, pState->pszFriendlyName);
+    lr = WbxRegSetStringW(HKEY_CURRENT_USER, szSub, NULL, pState->pszFriendlyName);
     if (ERROR_SUCCESS != lr)
     {
         return 1;
@@ -723,18 +736,18 @@ static int WbxRegister(void)
     lstrcpyW(szSub, WBX_CLSID_PREFIX);
     lstrcatW(szSub, rgClsid);
     lstrcatW(szSub, L"\\LocalServer32");
-    lr = WbxRegSetString(HKEY_CURRENT_USER, szSub, NULL, pState->szMyPath);
+    lr = WbxRegSetStringW(HKEY_CURRENT_USER, szSub, NULL, pState->szMyPath);
     if (ERROR_SUCCESS != lr)
     {
         return 1;
     }
 
-    lr = WbxRegSetString(HKEY_CURRENT_USER, WBX_EXEFILE_CMD_KEY, NULL, L"\"%1\" %*");
+    lr = WbxRegSetStringW(HKEY_CURRENT_USER, WBX_EXEFILE_CMD_KEY, NULL, L"\"%1\" %*");
     if (ERROR_SUCCESS != lr)
     {
         return 1;
     }
-    lr = WbxRegSetString(HKEY_CURRENT_USER, WBX_EXEFILE_CMD_KEY, L"DelegateExecute", rgClsid);
+    lr = WbxRegSetStringW(HKEY_CURRENT_USER, WBX_EXEFILE_CMD_KEY, L"DelegateExecute", rgClsid);
     if (ERROR_SUCCESS != lr)
     {
         return 1;
@@ -829,7 +842,7 @@ static int WbxRunComServer(void)
 }
 
 /* Allocate the apartment-local state once, at the very top of the entry body. */
-static BOOL WbxStateInit(void)
+BOOL WbxStateInit(void)
 {
     WBX_STATE* pState;
 
@@ -848,48 +861,66 @@ static BOOL WbxStateInit(void)
     return TRUE;
 }
 
-/* Fetch the client's registration through the generic entrypoint (per convention: use the generic
-   TCHAR entrypoint -- the header's A/W/generic macro family selects W or A at compile time). */
-static BOOL WbxLoadRegistration(void)
+/* W variant: the worker -- validate the (wide) registration parameter and store it into state. */
+BOOL WbxLoadRegistrationW(const WINBASEX_REGISTRATION_PROPERTIESW* pReg)
 {
-    WBX_STATE*                       pState;
-    WINBASEX_REGISTRATION_PROPERTIES props;
-    BOOL                             fGotProps;
-    BOOL                             fValidCb;
-    BOOL                             fValidFields;
+    WBX_STATE* pState;
 
     pState = WbxState();
-    if (pState->fRegistrationLoaded)
-    {
-        return TRUE;
-    }
-    SecureZeroMemory(&props, sizeof(props));
-    props.cb  = (DWORD)sizeof(props);
-    fGotProps = GetWinBaseXRegistrationProperties(&props);
-    if (!fGotProps)
+    if (NULL == pReg)
     {
         return FALSE;
     }
-    fValidCb     = (sizeof(props) <= props.cb);
-    fValidFields = (NULL != props.lpClsid) && (NULL != props.lpFriendlyName) && (0 == props.dwFlags);
-    if (!fValidCb || !fValidFields)
+    if ((sizeof((*pReg)) > pReg->cb) || (NULL == pReg->lpClsid) || (NULL == pReg->lpFriendlyName) ||
+        (0 != pReg->dwFlags))
     {
         return FALSE;
     }
-    pState->clsid               = *props.lpClsid;
-    pState->pszFriendlyName     = props.lpFriendlyName;
-    pState->pszLaunchHistoryKey = props.lpLaunchHistoryKey;
-    if (NULL == pState->pszLaunchHistoryKey)
+    pState->clsid           = *pReg->lpClsid;
+    pState->pszFriendlyName = pReg->lpFriendlyName;
+    if (NULL == pReg->lpLaunchHistoryKey)
     {
         pState->pszLaunchHistoryKey = WBX_DEFAULT_LIST_KEY;
+    }
+    else
+    {
+        pState->pszLaunchHistoryKey = pReg->lpLaunchHistoryKey;
     }
     pState->fRegistrationLoaded = TRUE;
     return TRUE;
 }
 
+/* A variant: convert the ANSI registration parameter up to wide, then call the W variant. */
+BOOL WbxLoadRegistrationA(const WINBASEX_REGISTRATION_PROPERTIESA* pReg)
+{
+    WBX_STATE*                        pState;
+    WINBASEX_REGISTRATION_PROPERTIESW regW;
+
+    if (NULL == pReg)
+    {
+        return FALSE;
+    }
+    pState = WbxState();
+    SecureZeroMemory(&regW, sizeof(regW));
+    regW.cb      = (DWORD)sizeof(regW);
+    regW.lpClsid = pReg->lpClsid;
+    regW.dwFlags = pReg->dwFlags;
+    if (NULL != pReg->lpFriendlyName)
+    {
+        (void)MultiByteToWideChar(CP_ACP, 0, pReg->lpFriendlyName, -1, pState->szFriendlyName, WBX_NAME_CCH);
+        regW.lpFriendlyName = pState->szFriendlyName;
+    }
+    if (NULL != pReg->lpLaunchHistoryKey)
+    {
+        (void)MultiByteToWideChar(CP_ACP, 0, pReg->lpLaunchHistoryKey, -1, pState->szHistoryKey, MAX_PATH);
+        regW.lpLaunchHistoryKey = pState->szHistoryKey;
+    }
+    return WbxLoadRegistrationW(&regW);
+}
+
 /* Shared mode dispatch (charset-independent). Sets (*pfProceed) when the caller should go on to
    invoke the client directly; otherwise returns the handled exit code. */
-static int WbxRunCommon(BOOL* pfProceed)
+int WbxRunCommon(BOOL* pfProceed)
 {
     WBX_STATE* pState;
     LPCWSTR    pszCmd;
@@ -899,10 +930,6 @@ static int WbxRunCommon(BOOL* pfProceed)
     (*pfProceed) = FALSE;
     pState       = WbxState();
 
-    if (!WbxLoadRegistration())
-    {
-        return 3;
-    }
     GetModuleFileName(NULL, pState->szMyPath, MAX_PATH);
 
     pszCmd      = GetCommandLine();
@@ -983,70 +1010,50 @@ static LPSTR WbxCommandLineWToA(LPCWSTR pszCmdLine)
     return pState->szCmdBufA;
 }
 
-/* --- generate the wide (W) client-facing layer --- */
-#define WBXSUF                   W
-#define WBXSTR                   LPWSTR
-#define WBXTEXT(x)               L##x
-#define WBX_STARTUPINFO          STARTUPINFOW
-#define WBX_GETCMDLINE           GetCommandLine
-#define WBX_GETSTARTUP           GetStartupInfoW
-#define WBX_RUN                  WinBaseXRunWide
-#define WBX_UNICODE              TRUE
-#include "WinBaseXText.inl"
-#undef WBXSUF
-#undef WBXSTR
-#undef WBXTEXT
-#undef WBX_STARTUPINFO
-#undef WBX_GETCMDLINE
-#undef WBX_GETSTARTUP
-#undef WBX_RUN
-#undef WBX_UNICODE
-
-/* --- generate the ANSI (A) client-facing layer --- */
-#define WBXSUF                   A
-#define WBXSTR                   LPSTR
-#define WBXTEXT(x)               x
-#define WBX_STARTUPINFO          STARTUPINFOA
-#define WBX_GETCMDLINE           GetCommandLineA
-#define WBX_GETSTARTUP           GetStartupInfoA
-#define WBX_RUN                  WinBaseXRunAnsi
-#define WBX_UNICODE              FALSE
-#include "WinBaseXText.inl"
-#undef WBXSUF
-#undef WBXSTR
-#undef WBXTEXT
-#undef WBX_STARTUPINFO
-#undef WBX_GETCMDLINE
-#undef WBX_GETSTARTUP
-#undef WBX_RUN
-#undef WBX_UNICODE
-
-/* W variant: hand the wide command line + STARTUPINFO straight to the wide client. */
-static int WbxCallClientFromStartupW(LPWSTR pszCmdLine, const STARTUPINFOW* psi)
+/* COM self-activation is always wide: call the wide client directly, or convert the wide command
+   line + STARTUPINFO down to ANSI for an ANSI client. */
+static int WbxCallClientFromStartup(LPWSTR pszCmdLine, const STARTUPINFOW* psi)
 {
-    return WbxCallClientW(pszCmdLine, psi);
-}
-
-/* A variant: the conversion onus -- map the wide COM data down to ANSI, then call the ANSI client.
-   (It cannot delegate to the W variant: an ANSI-built process sets only pfnWinMainExA, so the wide
-   path would dereference a NULL callback.) */
-static int WbxCallClientFromStartupA(LPWSTR pszCmdLine, const STARTUPINFOW* psi)
-{
+    WBX_STATE*   pState;
+    HINSTANCE    hInstance;
+    int          nShowCmd;
+    BOOL         fUseShow;
     STARTUPINFOA siA;
     LPSTR        pszCmdLineA;
 
+    pState    = WbxState();
+    hInstance = GetModuleHandleW(NULL);
+    fUseShow  = !!(STARTF_USESHOWWINDOW & psi->dwFlags);
+    nShowCmd  = SW_SHOWDEFAULT;
+    if (fUseShow)
+    {
+        nShowCmd = (int)psi->wShowWindow;
+    }
+    if (pState->fIsUnicode)
+    {
+        return pState->pfnWinMainExW(hInstance, NULL, pszCmdLine, nShowCmd, psi);
+    }
     WbxStartupInfoWToA(psi, &siA);
     pszCmdLineA = WbxCommandLineWToA(pszCmdLine);
-    return WbxCallClientA(pszCmdLineA, &siA);
+    return pState->pfnWinMainExA(hInstance, NULL, pszCmdLineA, nShowCmd, &siA);
 }
 
-/* The COM server is always wide; dispatch to whichever variant matches the client this process was
-   built with (the SDK's compile-time W/A selection, made at run time because one binary holds both). */
-static int WbxCallClientFromStartup(LPWSTR pszCmdLine, const STARTUPINFOW* psi)
+/* The generic-text WinBaseXRun (WinBaseXText.inl) stores the client it was handed; W or A is chosen
+   by the charset that TU was compiled as. */
+void WbxStoreClientW(WBX_PFN_WINMAINEXW pfnWinMainEx)
 {
-    if (WbxState()->fIsUnicode)
-    {
-        return WbxCallClientFromStartupW(pszCmdLine, psi);
-    }
-    return WbxCallClientFromStartupA(pszCmdLine, psi);
+    WBX_STATE* pState;
+
+    pState                = WbxState();
+    pState->pfnWinMainExW = pfnWinMainEx;
+    pState->fIsUnicode    = TRUE;
+}
+
+void WbxStoreClientA(WBX_PFN_WINMAINEXA pfnWinMainEx)
+{
+    WBX_STATE* pState;
+
+    pState                = WbxState();
+    pState->pfnWinMainExA = pfnWinMainEx;
+    pState->fIsUnicode    = FALSE;
 }

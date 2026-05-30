@@ -25,47 +25,15 @@
 #define WMX_WND_TITLE     TEXT("WinMainEx")
 #define WMX_FRIENDLY_NAME TEXT("WinMainEx")
 #define WMX_LIST_KEY      TEXT("Software\\WinMainEx\\Launched")
-#define WMX_WND_PCT       50
+#define WMX_PCT_NUM       50
 #define WMX_PCT_DENOM     100
 
 DEFINE_GUID(CLSID_WinMainEx, 0xE5F1A9C2, 0x8B7D, 0x4E3F, 0xA1, 0x5C, 0x9D, 0x2E, 0x7B, 0x6F, 0x4A, 0x83);
 
-static void ShowGui(const STARTUPINFO* psi);
-
-BOOL WINAPI GetWinBaseXRegistrationProperties(_Out_ PWINBASEX_REGISTRATION_PROPERTIES pRegistrationProperties)
-{
-    if (NULL == pRegistrationProperties)
-    {
-        return FALSE;
-    }
-
-    pRegistrationProperties->cb                 = (DWORD)sizeof((*pRegistrationProperties));
-    pRegistrationProperties->lpClsid            = &CLSID_WinMainEx;
-    pRegistrationProperties->lpFriendlyName     = WMX_FRIENDLY_NAME;
-    pRegistrationProperties->lpLaunchHistoryKey = WMX_LIST_KEY;
-    pRegistrationProperties->dwFlags            = 0;
-    return TRUE;
-}
-
-/* void Cls_OnDestroy(HWND hwnd) */
-static void WinMainEx_OnDestroy(HWND hwnd)
-{
-    UNREFERENCED_PARAMETER(hwnd);
-
-    if (!IsWinBaseXComServer())
-    {
-        PostQuitMessage(0);
-    }
-}
-
-static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
-{
-    switch (uMsg)
-    {
-        HANDLE_MSG(hwnd, WM_DESTROY, WinMainEx_OnDestroy);
-    }
-    return DefWindowProc(hwnd, uMsg, wParam, lParam);
-}
+static void             CenterOnMonitor(HWND hwnd, HMONITOR hMon);
+static void             ShowGui(const STARTUPINFO* psi);
+static void    CALLBACK OnDestroy(HWND hwnd);
+static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
 static void CenterOnMonitor(HWND hwnd, HMONITOR hMon)
 {
@@ -85,10 +53,11 @@ static void CenterOnMonitor(HWND hwnd, HMONITOR hMon)
     {
         return;
     }
+
     nWorkWidth  = (int)(mi.rcWork.right - mi.rcWork.left);
     nWorkHeight = (int)(mi.rcWork.bottom - mi.rcWork.top);
-    nWidth      = nWorkWidth * WMX_WND_PCT / WMX_PCT_DENOM;
-    nHeight     = nWorkHeight * WMX_WND_PCT / WMX_PCT_DENOM;
+    nWidth      = nWorkWidth * WMX_PCT_NUM / WMX_PCT_DENOM;
+    nHeight     = nWorkHeight * WMX_PCT_NUM / WMX_PCT_DENOM;
     nX          = mi.rcWork.left + (nWorkWidth - nWidth) / 2;
     nY          = mi.rcWork.top + (nWorkHeight - nHeight) / 2;
     SetWindowPos(hwnd, HWND_DESKTOP, nX, nY, nWidth, nHeight, SWP_NOZORDER | SWP_NOACTIVATE);
@@ -154,6 +123,28 @@ static void ShowGui(const STARTUPINFO* psi)
     CenterOnMonitor(hwnd, hMon);
     ShowWindow(hwnd, nCmdShow);
     SetForegroundWindow(hwnd);
+}
+
+const WINBASEX_REGISTRATION_PROPERTIES WinBaseXRegistration = {
+    sizeof(WinBaseXRegistration), &CLSID_WinMainEx, WMX_FRIENDLY_NAME, WMX_LIST_KEY, 0};
+
+static void CALLBACK OnDestroy(HWND hwnd)
+{
+    UNREFERENCED_PARAMETER(hwnd);
+
+    if (!IsWinBaseXComServer())
+    {
+        PostQuitMessage(0);
+    }
+}
+
+static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+    switch (uMsg)
+    {
+        HANDLE_MSG(hwnd, WM_DESTROY, OnDestroy);
+    }
+    return DefWindowProc(hwnd, uMsg, wParam, lParam);
 }
 
 int WINAPI _tWinMainEx(_In_ HINSTANCE          hInstance,

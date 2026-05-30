@@ -1,3 +1,10 @@
+#ifdef UNICODE
+#undef UNICODE
+#endif
+#ifdef _UNICODE
+#undef _UNICODE
+#endif
+
 #pragma runtime_checks("", off)
 #pragma check_stack(off)
 #pragma strict_gs_check(off)
@@ -7,13 +14,9 @@
 #endif
 
 #include "WinBaseX.h"
-
-int __cdecl WinBaseXRunAnsi(int(WINAPI* pfnWinMainEx)(HINSTANCE, HINSTANCE, LPSTR, int, const STARTUPINFOA*));
+#include "WinBaseXText.inl" /* UNICODE undefined for this TU -> WinBaseXRunA */
 
 void __cdecl WinMainCRTStartup(void)
 {
-    int rc;
-
-    rc = WinBaseXRunAnsi(WinMainEx);
-    ExitProcess((UINT)rc);
+    ExitProcess((UINT)WinBaseXRun(_tWinMainEx, &WinBaseXRegistration));
 }

@@ -1,46 +1,61 @@
 /*
- * WinBaseXText.inl -- charset-agnostic template for the client-facing layer.
+ * WinBaseXText.inl -- generic-text client-facing run path.
  *
- * Included twice by WinBaseX.c (once with the W macros, once with the A macros) to generate the
- * wide and ANSI variants from one source -- the SDK generic-text pattern. Our own function names
- * take the W/A suffix via WBXNAME()/WBXCAT(); the SDK identifiers that are themselves macros
- * (GetCommandLine, GetStartupInfo, STARTUPINFO) cannot be suffix-pasted, so the includer aliases
- * them per pass to their real ...W/...A names (WBX_GETCMDLINE, WBX_GETSTARTUP, WBX_STARTUPINFO).
- * The includer also defines WBXSUF, WBXSTR, WBXTEXT(), WBX_RUN, WBX_UNICODE.
+ * Written in plain generic-text using the SDK's own identifiers (GetCommandLine, GetStartupInfo,
+ * STARTUPINFO, GetModuleHandle, TCHAR, TEXT). Compiled twice -- WinBaseXStartupW.c with UNICODE,
+ * WinBaseXStartupA.c without -- so one source yields WinBaseXRunW and WinBaseXRunA. The wide-only
+ * machinery (COM server, registry, state, the wide->ANSI client bridge) lives in WinBaseX.c.
  */
 
-static WBXSTR WBXNAME(WbxWinMainCommandLine)(void)
-{
-    WBXSTR pszCmd;
+/* Implemented (wide) in WinBaseX.c. */
+BOOL WbxStateInit(void);
+int  WbxRunCommon(BOOL* pfProceed);
+void WbxStoreClientA(WBX_PFN_WINMAINEXA pfnWinMainEx);
+void WbxStoreClientW(WBX_PFN_WINMAINEXW pfnWinMainEx);
+BOOL WbxLoadRegistrationA(const WINBASEX_REGISTRATION_PROPERTIESA* lpRegistrationProperties);
+BOOL WbxLoadRegistrationW(const WINBASEX_REGISTRATION_PROPERTIESW* lpRegistrationProperties);
 
-    pszCmd = WBX_GETCMDLINE();
-    if (WBXTEXT('"') == (*pszCmd))
+#ifdef UNICODE
+#define WbxStoreClient      WbxStoreClientW
+#define WbxLoadRegistration WbxLoadRegistrationW
+#else
+#define WbxStoreClient      WbxStoreClientA
+#define WbxLoadRegistration WbxLoadRegistrationA
+#endif
+
+/* Command-line tail: skip argv[0] (quoted or bare), then leading whitespace. */
+static LPTSTR WbxCommandLineTail(void)
+{
+    LPTSTR pszCmd;
+
+    pszCmd = GetCommandLine();
+    if (TEXT('"') == (*pszCmd))
     {
         pszCmd++;
-        while ((*pszCmd) && (WBXTEXT('"') != (*pszCmd)))
+        while ((*pszCmd) && (TEXT('"') != (*pszCmd)))
         {
             pszCmd++;
         }
-        if (WBXTEXT('"') == (*pszCmd))
+        if (TEXT('"') == (*pszCmd))
         {
             pszCmd++;
         }
     }
     else
     {
-        while ((*pszCmd) && (WBXTEXT(' ') < (*pszCmd)))
+        while ((*pszCmd) && (TEXT(' ') < (*pszCmd)))
         {
             pszCmd++;
         }
     }
-    while ((WBXTEXT(' ') == (*pszCmd)) || (WBXTEXT('\t') == (*pszCmd)))
+    while ((TEXT(' ') == (*pszCmd)) || (TEXT('\t') == (*pszCmd)))
     {
         pszCmd++;
     }
     return pszCmd;
 }
 
-static int WBXNAME(WbxShowWindowFromStartup)(const WBX_STARTUPINFO* psi)
+static int WbxShowCmd(const STARTUPINFO* psi)
 {
     BOOL fUseShow;
 
@@ -52,38 +67,26 @@ static int WBXNAME(WbxShowWindowFromStartup)(const WBX_STARTUPINFO* psi)
     return SW_SHOWDEFAULT;
 }
 
-static int WBXNAME(WbxCallClient)(WBXSTR pszCmdLine, const WBX_STARTUPINFO* psi)
+int __cdecl WinBaseXRun(WBX_PFN_WINMAINEX pfnWinMainEx, const WINBASEX_REGISTRATION_PROPERTIES* pReg)
 {
-    WBX_STATE* pState;
-    HINSTANCE  hInstance;
-    int        nShowCmd;
-
-    pState    = WbxState();
-    hInstance = GetModuleHandle(NULL);
-    nShowCmd  = WBXNAME(WbxShowWindowFromStartup)(psi);
-    return pState->WBXCAT(pfnWinMainEx, WBXSUF)(hInstance, NULL, pszCmdLine, nShowCmd, psi);
-}
-
-int __cdecl WBX_RUN(WBXCAT(WBX_PFN_WINMAINEX, WBXSUF) pfnWinMainEx)
-{
-    WBX_STATE*      pState;
-    WBX_STARTUPINFO si;
-    BOOL            fProceed;
-    int             rc;
+    STARTUPINFO si;
+    BOOL        fProceed;
+    int         rc;
 
     if (!WbxStateInit())
     {
         return 3;
     }
-    pState                               = WbxState();
-    pState->fIsUnicode                   = WBX_UNICODE;
-    pState->WBXCAT(pfnWinMainEx, WBXSUF) = pfnWinMainEx;
-
+    WbxStoreClient(pfnWinMainEx);
+    if (!WbxLoadRegistration(pReg))
+    {
+        return 3;
+    }
     rc = WbxRunCommon(&fProceed);
     if (!fProceed)
     {
         return rc;
     }
-    WBX_GETSTARTUP(&si);
-    return WBXNAME(WbxCallClient)(WBXNAME(WbxWinMainCommandLine)(), &si);
+    GetStartupInfo(&si);
+    return pfnWinMainEx(GetModuleHandle(NULL), NULL, WbxCommandLineTail(), WbxShowCmd(&si), &si);
 }
