@@ -24,6 +24,13 @@
  *   cmd /c "<exe>" /unregister
  */
 
+/* NoCRT: kill the per-function instrumentation that emits CRT helper calls
+   (_RTC_* under Debug /RTC, stack probes, /GS cookie checks) -- none of those
+   support functions exist when we link /NODEFAULTLIB. */
+#pragma runtime_checks("", off)
+#pragma check_stack(off)
+#pragma strict_gs_check(off)
+
 #pragma comment(linker, "/SUBSYSTEM:WINDOWS")
 #pragma comment(linker, "/ENTRY:mainCRTStartup")
 #pragma comment(linker, "/NODEFAULTLIB")
@@ -37,12 +44,23 @@
 #define COBJMACROS
 #define INITGUID
 
+/* /Wall flags pedantic-but-harmless things; disable BEFORE the includes so the
+   noisy SDK headers are covered too. /WX still catches genuine warnings. */
+#pragma warning(disable: 4710)   /* function not inlined */
+#pragma warning(disable: 4711)   /* function selected for automatic inline expansion */
+#pragma warning(disable: 4820)   /* padding added after data member */
+#pragma warning(disable: 4324)   /* structure padded due to alignment specifier */
+#pragma warning(disable: 5045)   /* Spectre mitigation insertion advisory */
+#pragma warning(disable: 4132)   /* const object forward-declared (vtbls defined below) */
+
+#pragma warning(push, 0)   /* belt-and-suspenders for other SDK-header noise */
 #include <windows.h>
 #include <initguid.h>
 #include <objbase.h>
 #include <shobjidl.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#pragma warning(pop)
 
 #ifndef STARTF_HASSHELLDATA
 #define STARTF_HASSHELLDATA 0x00000400   /* not in the SDK headers; hStdOutput holds the shell HMONITOR */
@@ -79,6 +97,8 @@ static WCHAR         g_cmd_buf[2048];
 /* Set of every .exe that has activated through us. Value name = full path,
  * data = L"1". Idempotent: re-recording the same path overwrites in place. */
 #define WMX_LIST_KEY  L"Software\\WinMainEx\\Launched"
+/* Window size = this percent of the monitor work area (keeps the work-area aspect ratio). */
+#define WMX_WND_PCT   50
 
 /* ------------------------------------------------------------------ */
 /* Small inline string helpers (NoCRT, kernel32-only)                  */
@@ -358,20 +378,21 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     }
     return DefWindowProcW(h, m, wp, lp);
 }
-/* Center hwnd in the work area of the given monitor. */
+/* Size hwnd to WMX_WND_PCT% of the monitor's work area (which preserves the
+   work-area aspect ratio) and center it there. */
 static void CenterOnMonitor(HWND hwnd, HMONITOR mon)
 {
     MONITORINFO mi;
-    RECT wr;
-    int w, h, x, y;
+    int ww, wh, w, h, x, y;
     mi.cbSize = (DWORD)sizeof(mi);
     if (!GetMonitorInfoW(mon, &mi)) return;
-    GetWindowRect(hwnd, &wr);
-    w = (int)(wr.right - wr.left);
-    h = (int)(wr.bottom - wr.top);
-    x = mi.rcWork.left + ((mi.rcWork.right - mi.rcWork.left) - w) / 2;
-    y = mi.rcWork.top  + ((mi.rcWork.bottom - mi.rcWork.top) - h) / 2;
-    SetWindowPos(hwnd, NULL, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    ww = (int)(mi.rcWork.right - mi.rcWork.left);
+    wh = (int)(mi.rcWork.bottom - mi.rcWork.top);
+    w  = ww * WMX_WND_PCT / 100;
+    h  = wh * WMX_WND_PCT / 100;
+    x  = mi.rcWork.left + (ww - w) / 2;
+    y  = mi.rcWork.top  + (wh - h) / 2;
+    SetWindowPos(hwnd, NULL, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
 /* Show our window honoring the launcher's STARTUPINFO (show state + placement).
@@ -386,9 +407,7 @@ static void show_gui(const STARTUPINFOW *si)
     static BOOL class_registered = FALSE;
     HINSTANCE hi = GetModuleHandleW(NULL);
     int  nCmdShow = (si->dwFlags & STARTF_USESHOWWINDOW) ? (int)si->wShowWindow : SW_SHOWDEFAULT;
-    BOOL usePos   = (si->dwFlags & STARTF_USEPOSITION) != 0;
-    int  x = usePos ? (int)si->dwX : CW_USEDEFAULT;
-    int  y = usePos ? (int)si->dwY : CW_USEDEFAULT;
+    HMONITOR mon;
     HWND hwnd;
     if (!class_registered) {
         WNDCLASSW wc = {0};
@@ -400,16 +419,19 @@ static void show_gui(const STARTUPINFOW *si)
         RegisterClassW(&wc);
         class_registered = TRUE;
     }
-    /* Created hidden so we can place it before honoring the show state. */
+    /* Created hidden at default size; CenterOnMonitor sizes (to WMX_WND_PCT% of the
+       work area) and positions it before we honor the show state. */
     hwnd = CreateWindowExW(0, WMX_WND_CLASS, L"WinMainEx",
-        WS_OVERLAPPEDWINDOW, x, y, 700, 220, NULL, NULL, hi, NULL);
+        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, NULL, NULL, hi, NULL);
     if (!hwnd) return;
-    if (!usePos) {
-        HMONITOR mon = (si->dwFlags & STARTF_HASSHELLDATA)
-            ? (HMONITOR)si->hStdOutput
-            : MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-        CenterOnMonitor(hwnd, mon);
-    }
+    /* Always center our own window. The shell's IExecuteCommand SetPosition is an
+       icon-click point, not a window origin, so honoring it would mis-place us --
+       center instead (on the HASSHELLDATA launch monitor if given, else the one we
+       landed on). Position pass-through still applies to FORWARDED child launches. */
+    mon = (si->dwFlags & STARTF_HASSHELLDATA)
+        ? (HMONITOR)si->hStdOutput
+        : MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    CenterOnMonitor(hwnd, mon);
     ShowWindow(hwnd, nCmdShow);
     SetForegroundWindow(hwnd);
 }
