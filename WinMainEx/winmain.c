@@ -63,9 +63,8 @@ static LRESULT CALLBACK WinMainEx_WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, L
     switch (uMsg)
     {
         HANDLE_MSG(hwnd, WM_DESTROY, WinMainEx_OnDestroy);
-    default:
-        return DefWindowProcW(hwnd, uMsg, wParam, lParam);
     }
+    return DefWindowProcW(hwnd, uMsg, wParam, lParam);
 }
 
 static void CenterOnMonitor(HWND hwnd, HMONITOR hMon)
