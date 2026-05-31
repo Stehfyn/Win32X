@@ -34,9 +34,11 @@ HMONITOR WINAPI GetStartupMonitor(_In_ DWORD dwFlags);
  * axis -- the window manager's own CW_USEDEFAULT sizing (win32kfull!SetTiledRect) -- and the position
  * defaults to centering that extent within the work area. The result is written to *prcOut.
  *
- * The ratio is taken against the resolved monitor's work area as GetMonitorInfo reports it; in a
- * per-monitor DPI-aware process that is the target monitor's physical extent at its own DPI, so the
- * default matches the OS on whichever monitor the launch resolves to.
+ * The 3/4 ratio is dimensionless and is applied to the work area in the same coordinate space
+ * SetWindowPos consumes, so the result is self-consistent under any process DPI awareness (unaware,
+ * system, or per-monitor) -- correctness does not depend on the manifest- or appcompat-declared
+ * awareness. ShowWindowEx additionally pins the launch measurement to a per-monitor context (see there)
+ * so the physical STARTUPINFO dwX/dwY resolve to the intended monitor regardless of that awareness.
  *
  * Returns FALSE -- leaving *prcOut untouched -- on a NULL argument or when the resolved monitor
  * yields no work area.
@@ -55,6 +57,44 @@ BOOL WINAPI CalculateWindowStartupPosition(_Out_ RECT* prcOut);
  * Returns the show result (TRUE when the startup sequence ran).
  */
 BOOL WINAPI ShowWindowEx(_In_ HWND hwnd, _In_ int nShowEx);
+
+/*
+ * Delay-bound DPI helpers (WinUser.h origin, user32.dll). Each *Ex wrapper resolves its export on first
+ * use and degrades to a legacy/constant fallback, so callers need not branch on OS version (the
+ * *ForDpi family and SetThreadDpiAwarenessContext are Windows 10 1607+). Signatures mirror the SDK,
+ * which stays authoritative. Bodies are generated in WinUserXThunks.inl, instantiated once by
+ * WinUserX.c.
+ */
+/* No SAL on these wrappers: the bodies are macro-generated (DECLARE_DLL_THUNK) and cannot carry
+   matching annotations, so annotating the declarations would trip C28251 (inconsistent annotation). */
+UINT WINAPI GetDpiForWindowEx(HWND hwnd);
+UINT WINAPI GetDpiForSystemEx(void);
+int  WINAPI GetSystemMetricsForDpiEx(int  nIndex,
+                                     UINT dpi);
+BOOL WINAPI AdjustWindowRectExForDpiEx(LPRECT lpRect,
+                                       DWORD  dwStyle,
+                                       BOOL   bMenu,
+                                       DWORD  dwExStyle,
+                                       UINT   dpi);
+/* SystemParametersInfoForDpi is charset-bearing (some SPI actions exchange ANSI vs wide buffers), so it
+   splits W/A like the SDK's SystemParametersInfo: the single SystemParametersInfoForDpi export serves
+   both, only the down-level fallback differs (SystemParametersInfoW vs ...A). */
+BOOL WINAPI SystemParametersInfoForDpiExW(UINT  uiAction,
+                                          UINT  uiParam,
+                                          PVOID pvParam,
+                                          UINT  fWinIni,
+                                          UINT  dpi);
+BOOL WINAPI SystemParametersInfoForDpiExA(UINT  uiAction,
+                                          UINT  uiParam,
+                                          PVOID pvParam,
+                                          UINT  fWinIni,
+                                          UINT  dpi);
+#ifdef UNICODE
+#define SystemParametersInfoForDpiEx SystemParametersInfoForDpiExW
+#else
+#define SystemParametersInfoForDpiEx SystemParametersInfoForDpiExA
+#endif
+DPI_AWARENESS_CONTEXT WINAPI SetThreadDpiAwarenessContextEx(DPI_AWARENESS_CONTEXT dpiContext);
 
 /*
  * ErrorMessageBox -- MessageBox preset for error reporting: MB_ICONERROR | MB_OK. Owner, message,

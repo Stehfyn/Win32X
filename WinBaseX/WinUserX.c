@@ -17,10 +17,14 @@
 #include "WinUserX.h"
 #include "windefx.h"
 #include "result.h"
+#include "delayimpx.h"
 
 #ifndef STARTF_HASSHELLDATA
 #define STARTF_HASSHELLDATA 0x00000400
 #endif
+
+/* user32 DPI *Ex wrapper bodies (declared in WinUserX.h); instantiated here, once. */
+#include "WinUserXThunks.inl"
 
 HMONITOR WINAPI GetStartupMonitor(_In_ DWORD dwFlags)
 {
@@ -83,8 +87,9 @@ BOOL WINAPI CalculateWindowStartupPosition(_Out_ RECT* prcOut)
 
     /* Extent: the launcher's STARTF_USESIZE wins; otherwise the window manager's own default applies --
        three-quarters of this (launch) monitor's work area per axis, matching win32kfull!SetTiledRect.
-       The app is per-monitor DPI-aware, so mi.rcWork is the target monitor's physical work area at its
-       own DPI; the ratio is therefore taken against the monitor the window will actually appear on. */
+       The 3/4 ratio is dimensionless and applied to mi.rcWork in the same coordinate space the eventual
+       SetWindowPos consumes, so it is correct under any process DPI awareness; ShowWindowEx pins this
+       measurement to a per-monitor context so rcWork is the target monitor's real extent regardless. */
     fUseSize = IsFlagSet(si.dwFlags, STARTF_USESIZE);
     if (fUseSize)
     {
@@ -130,13 +135,14 @@ BOOL WINAPI CalculateWindowStartupPosition(_Out_ RECT* prcOut)
 
 BOOL WINAPI ShowWindowEx(_In_ HWND hwnd, _In_ int nShowEx)
 {
-    BOOL fStartup;
-    BOOL fGotPos;
-    RECT rcPos;
-    int  nX;
-    int  nY;
-    int  nWidth;
-    int  nHeight;
+    BOOL                  fStartup;
+    BOOL                  fGotPos;
+    RECT                  rcPos;
+    DPI_AWARENESS_CONTEXT ctxPrev;
+    int                   nX;
+    int                   nY;
+    int                   nWidth;
+    int                   nHeight;
 
     fStartup = (SWX_SHOWSTARTUP == nShowEx);
     if (!fStartup)
@@ -144,11 +150,14 @@ BOOL WINAPI ShowWindowEx(_In_ HWND hwnd, _In_ int nShowEx)
         return ShowWindow(hwnd, nShowEx);
     }
 
-    /* Place per the launch policy: CalculateWindowStartupPosition sizes the window to three-quarters of
-       the launch monitor's work area (matching win32kfull!SetTiledRect) and positions it there,
-       honoring any STARTUPINFO size/position override. Because the app is per-monitor DPI-aware, that
-       work area is the target monitor's physical extent at its own DPI -- so the default tracks the OS
-       contract on whichever monitor the launch resolves to, not the primary. */
+    /* Pin the launch measurement and placement to a per-monitor-v2 thread context: the work area read by
+       CalculateWindowStartupPosition, the physical STARTUPINFO dwX/dwY it resolves, and the SetWindowPos
+       below are then all interpreted in real per-monitor pixels regardless of the process's declared DPI
+       awareness (manifest or appcompat) -- this is what makes placement correct without relying on either.
+       On pre-1607 the thunk is a no-op (returns NULL) and the flow reverts to the process default, still
+       self-consistent because the 3/4 ratio never leaves the work area's own coordinate space. Size is
+       three-quarters of the launch monitor's work area (matching win32kfull!SetTiledRect). */
+    ctxPrev = SetThreadDpiAwarenessContextEx(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     fGotPos = CalculateWindowStartupPosition(&rcPos);
 
     /* With a computed rectangle, position and show in one operation -- SWP_SHOWWINDOW shows and
@@ -166,6 +175,10 @@ BOOL WINAPI ShowWindowEx(_In_ HWND hwnd, _In_ int nShowEx)
     else
     {
         ShowWindow(hwnd, SW_SHOWNORMAL);
+    }
+    if (ctxPrev)
+    {
+        SetThreadDpiAwarenessContextEx(ctxPrev);
     }
 
     /* Deliberately no SetForegroundWindow: the activating show above (SWP_SHOWWINDOW / SW_SHOWNORMAL)

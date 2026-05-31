@@ -20,6 +20,15 @@
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "shell32.lib")
 
+/* Every non-kernel32 system DLL is delay-loaded (see <DelayLoadDLLs> in WinMainEx.vcxproj -- /DELAYLOAD
+   is not honored as an embedded #pragma comment(linker) directive, only as a real link option), so it
+   leaves the load-time (auto-load) import directory and binds on first call instead. The import libs
+   above still supply the call stubs; delay-load just moves the descriptor to the delay-import table.
+   This keeps guaranteed/colliding funcs statically referenced (no per-function thunk) while reducing the
+   PE's auto-load set to kernel32. The __delayLoadHelper2 the stubs call is our own CRT-free
+   implementation (delayhlpx.c), not delayimp.lib -- the latter's delayhlp.obj drags _load_config_used,
+   a CRT object incompatible with /NODEFAULTLIB. */
+
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
