@@ -135,6 +135,18 @@
       <Command>powershell -NoProfile -ExecutionPolicy Bypass -File "$(ProjectDir)prebuild.ps1"</Command>
       <Message>WinMainEx dev: kill running instance + unregister handler (free exe for link)</Message>
     </PreBuildEvent>
+    <Manifest>
+      <EnableDpiAwareness Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">PerMonitorHighDPIAware</EnableDpiAwareness>
+    </Manifest>
+    <Manifest>
+      <EnableDpiAwareness Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">PerMonitorHighDPIAware</EnableDpiAwareness>
+    </Manifest>
+    <Manifest>
+      <EnableDpiAwareness Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">PerMonitorHighDPIAware</EnableDpiAwareness>
+    </Manifest>
+    <Manifest>
+      <EnableDpiAwareness Condition="'$(Configuration)|$(Platform)'=='Release|x64'">PerMonitorHighDPIAware</EnableDpiAwareness>
+    </Manifest>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="winmain.c" />

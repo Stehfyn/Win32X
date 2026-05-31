@@ -54,7 +54,7 @@ _Success_(return != FALSE)
 BOOL WINAPI CalculateWindowStartupPosition(_In_ const SIZE* pDefaultSize, _Out_ RECT* prcOut)
 {
     STARTUPINFO si;
-    HMONITOR    hMon;
+    HMONITOR    hMonitor;
     MONITORINFO mi;
     BOOL        fGotInfo;
     LONG        nWorkWidth;
@@ -75,11 +75,11 @@ BOOL WINAPI CalculateWindowStartupPosition(_In_ const SIZE* pDefaultSize, _Out_ 
     SecureZeroMemory(&si, sizeof(si));
     GetStartupInfo(&si);
 
-    hMon = MonitorFromStartupInfo(&si, MONITOR_DEFAULTTOPRIMARY);
+    hMonitor = MonitorFromStartupInfo(&si, MONITOR_DEFAULTTOPRIMARY);
 
     SecureZeroMemory(&mi, sizeof(mi));
     mi.cbSize = (DWORD)sizeof(mi);
-    fGotInfo  = GetMonitorInfo(hMon, &mi);
+    fGotInfo  = GetMonitorInfo(hMonitor, &mi);
     RETURN_FALSE_IF_NOT(fGotInfo);
 
     nWorkWidth  = RECTWIDTH(mi.rcWork);
