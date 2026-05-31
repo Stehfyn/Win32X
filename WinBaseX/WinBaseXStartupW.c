@@ -8,6 +8,7 @@
 
 #include "WinBaseX.h"
 #include "windefx.h"
+#include "result.h"
 #include "WinBaseXText.inl" /* UNICODE defined for this TU -> WinBaseXRunW */
 
 void __cdecl wWinMainCRTStartup(void)

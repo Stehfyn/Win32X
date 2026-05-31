@@ -34,5 +34,8 @@
     <ClInclude Include="windefx.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="result.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>

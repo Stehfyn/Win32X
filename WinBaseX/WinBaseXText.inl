@@ -73,20 +73,11 @@ int __cdecl WinBaseXRun(WBX_PFN_WINMAINEX pfnWinMainEx, const WINBASEX_REGISTRAT
     BOOL        fProceed;
     int         rc;
 
-    if (!WbxStateInit())
-    {
-        return 3;
-    }
+    RETURN_VALUE_IF_NOT(WbxStateInit(), 3);
     WbxStoreClient(pfnWinMainEx);
-    if (!WbxLoadRegistration(pReg))
-    {
-        return 3;
-    }
+    RETURN_VALUE_IF_NOT(WbxLoadRegistration(pReg), 3);
     rc = WbxRunCommon(&fProceed);
-    if (!fProceed)
-    {
-        return rc;
-    }
+    RETURN_VALUE_IF_NOT(fProceed, rc);
     GetStartupInfo(&si);
     return pfnWinMainEx(GetModuleHandle(NULL), NULL, WbxCommandLineTail(), WbxShowCmd(&si), &si);
 }

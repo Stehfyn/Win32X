@@ -16,6 +16,7 @@
 
 #include "WinUserX.h"
 #include "windefx.h"
+#include "result.h"
 
 #ifndef STARTF_HASSHELLDATA
 #define STARTF_HASSHELLDATA 0x00000400
@@ -71,10 +72,8 @@ BOOL WINAPI CalculateWindowStartupPosition(_In_ const SIZE* pDefaultSize, _Out_ 
     BOOL        fOffsetXNonNeg;
     BOOL        fOffsetYNonNeg;
 
-    if ((NULL == pDefaultSize) || (NULL == prcOut))
-    {
-        return FALSE;
-    }
+    RETURN_FALSE_IF_NULL(pDefaultSize);
+    RETURN_FALSE_IF_NULL(prcOut);
 
     SecureZeroMemory(&si, sizeof(si));
     GetStartupInfo(&si);
@@ -84,10 +83,7 @@ BOOL WINAPI CalculateWindowStartupPosition(_In_ const SIZE* pDefaultSize, _Out_ 
     SecureZeroMemory(&mi, sizeof(mi));
     mi.cbSize = (DWORD)sizeof(mi);
     fGotInfo  = GetMonitorInfo(hMon, &mi);
-    if (!fGotInfo)
-    {
-        return FALSE;
-    }
+    RETURN_FALSE_IF_NOT(fGotInfo);
 
     nWorkWidth  = RECTWIDTH(mi.rcWork);
     nWorkHeight = RECTHEIGHT(mi.rcWork);

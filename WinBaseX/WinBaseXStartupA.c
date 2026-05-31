@@ -15,6 +15,7 @@
 
 #include "WinBaseX.h"
 #include "windefx.h"
+#include "result.h"
 #include "WinBaseXText.inl" /* UNICODE undefined for this TU -> WinBaseXRunA */
 
 void __cdecl WinMainCRTStartup(void)

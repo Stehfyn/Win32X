@@ -95,6 +95,7 @@
     <ClInclude Include="WinBaseXText.inl" />
     <ClInclude Include="WinUserX.h" />
     <ClInclude Include="windefx.h" />
+    <ClInclude Include="result.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

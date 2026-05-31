@@ -17,6 +17,7 @@
 #include <initguid.h>
 #include "WinBaseX.h"
 #include "WinUserX.h"
+#include "result.h"
 
 DEFINE_GUID(CLSID_WinMainEx, 0xE5F1A9C2, 0x8B7D, 0x4E3F, 0xA1, 0x5C, 0x9D, 0x2E, 0x7B, 0x6F, 0x4A, 0x83);
 
@@ -57,20 +58,14 @@ static BOOL InitInstance(HINSTANCE hInstance)
                           NULL,
                           hInstance,
                           NULL);
-    if (!hwnd)
-    {
-        return FALSE;
-    }
+    RETURN_FALSE_IF_NULL(hwnd);
 
     ShowWindowEx(hwnd, SWX_SHOWSTARTUP);
     UpdateWindow(hwnd);
 
     /* A COM-server (shell DelegateExecute) activation only needs the window shown; WinBaseX pumps
        messages for the embedding, so the client must not run its own loop. */
-    if (IsWinBaseXComServer())
-    {
-        return FALSE;
-    }
+    RETURN_FALSE_IF(IsWinBaseXComServer());
     return TRUE;
 }
 
@@ -112,10 +107,7 @@ int WINAPI _tWinMainEx(_In_ HINSTANCE          hInstance,
     /* RegisterClass returns 0 on a repeated activation (ERROR_CLASS_ALREADY_EXISTS); harmless --
        the class stays registered, so InitInstance's CreateWindowEx succeeds regardless. */
     MyRegisterClass(hInstance);
-    if (!InitInstance(hInstance))
-    {
-        return 0;
-    }
+    RETURN_ZERO_IF_NOT(InitInstance(hInstance));
 
     while (0 < GetMessage(&msg, NULL, 0, 0))
     {

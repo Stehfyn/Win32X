@@ -30,6 +30,7 @@
 
 #include "WinBaseX.h"
 #include "windefx.h"
+#include "result.h"
 #include <windowsx.h>
 #include <initguid.h>
 #include <objbase.h>
@@ -147,10 +148,7 @@ BOOL WINAPI IsWinBaseXComServer(void)
     WBX_STATE* pState;
 
     pState = WbxState();
-    if (NULL == pState)
-    {
-        return FALSE;
-    }
+    RETURN_FALSE_IF_NULL(pState);
     return pState->fComServer;
 }
 
@@ -796,10 +794,7 @@ static BOOL WbxIsRegistered(void)
     lstrcatW(szSub, rgClsid);
     lstrcatW(szSub, L"\\LocalServer32");
     lrOpen = RegOpenKeyExW(HKEY_CURRENT_USER, szSub, 0, KEY_READ, &hKey);
-    if (ERROR_SUCCESS != lrOpen)
-    {
-        return FALSE;
-    }
+    RETURN_FALSE_IF(ERROR_SUCCESS != lrOpen);
     RegCloseKey(hKey);
     return TRUE;
 }
@@ -848,15 +843,9 @@ BOOL WbxStateInit(void)
     WBX_STATE* pState;
 
     s_dwTlsState = TlsAlloc();
-    if (TLS_OUT_OF_INDEXES == s_dwTlsState)
-    {
-        return FALSE;
-    }
+    RETURN_FALSE_IF(TLS_OUT_OF_INDEXES == s_dwTlsState);
     pState = (WBX_STATE*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*pState));
-    if (NULL == pState)
-    {
-        return FALSE;
-    }
+    RETURN_FALSE_IF_NULL(pState);
     TlsSetValue(s_dwTlsState, pState);
     pState->factory.vtbl = &s_ClassFactoryVtbl;
     return TRUE;
@@ -868,15 +857,9 @@ BOOL WbxLoadRegistrationW(const WINBASEX_REGISTRATION_PROPERTIESW* pReg)
     WBX_STATE* pState;
 
     pState = WbxState();
-    if (NULL == pReg)
-    {
-        return FALSE;
-    }
-    if ((sizeof((*pReg)) > pReg->cb) || (NULL == pReg->lpClsid) || (NULL == pReg->lpFriendlyName) ||
-        (0 != pReg->dwFlags))
-    {
-        return FALSE;
-    }
+    RETURN_FALSE_IF_NULL(pReg);
+    RETURN_FALSE_IF((sizeof((*pReg)) > pReg->cb) || (NULL == pReg->lpClsid) ||
+                    (NULL == pReg->lpFriendlyName) || (0 != pReg->dwFlags));
     pState->clsid           = *pReg->lpClsid;
     pState->pszFriendlyName = pReg->lpFriendlyName;
     if (NULL == pReg->lpLaunchHistoryKey)
@@ -897,10 +880,7 @@ BOOL WbxLoadRegistrationA(const WINBASEX_REGISTRATION_PROPERTIESA* pReg)
     WBX_STATE*                        pState;
     WINBASEX_REGISTRATION_PROPERTIESW regW;
 
-    if (NULL == pReg)
-    {
-        return FALSE;
-    }
+    RETURN_FALSE_IF_NULL(pReg);
     pState = WbxState();
     SecureZeroMemory(&regW, sizeof(regW));
     regW.cb      = (DWORD)sizeof(regW);
