@@ -60,6 +60,11 @@ extern const WINBASEX_REGISTRATION_PROPERTIESW WinBaseXRegistrationW;
 
 BOOL WINAPI IsWinBaseXComServer(void);
 
+/* Bounded wide->ANSI conversion into pszBufA (cchBufA chars). Returns pszBufA, or NULL for a NULL or
+   unconvertible source. */
+_Success_(return != NULL)
+LPSTR SafeWideCharToMultiByte(_In_opt_ LPCWSTR pszW, _Out_writes_(cchBufA) LPSTR pszBufA, _In_ int cchBufA);
+
 int WINAPI WinMainEx(_In_ HINSTANCE hInstance,
                      _In_opt_ HINSTANCE hPrevInstance,
                      _In_ LPSTR lpCmdLine,

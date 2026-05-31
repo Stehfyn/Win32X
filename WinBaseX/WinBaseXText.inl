@@ -8,23 +8,23 @@
  */
 
 /* Implemented (wide) in WinBaseX.c. */
-BOOL WbxStateInit(void);
-int  WbxRunCommon(BOOL* pfProceed);
-void WbxStoreClientA(WBX_PFN_WINMAINEXA pfnWinMainEx);
-void WbxStoreClientW(WBX_PFN_WINMAINEXW pfnWinMainEx);
-BOOL WbxLoadRegistrationA(const WINBASEX_REGISTRATION_PROPERTIESA* lpRegistrationProperties);
-BOOL WbxLoadRegistrationW(const WINBASEX_REGISTRATION_PROPERTIESW* lpRegistrationProperties);
+BOOL StateInit(void);
+int  RunCommon(BOOL* pfProceed);
+void StoreClientA(WBX_PFN_WINMAINEXA pfnWinMainEx);
+void StoreClientW(WBX_PFN_WINMAINEXW pfnWinMainEx);
+BOOL LoadRegistrationA(const WINBASEX_REGISTRATION_PROPERTIESA* lpRegistrationProperties);
+BOOL LoadRegistrationW(const WINBASEX_REGISTRATION_PROPERTIESW* lpRegistrationProperties);
 
 #ifdef UNICODE
-#define WbxStoreClient      WbxStoreClientW
-#define WbxLoadRegistration WbxLoadRegistrationW
+#define StoreClient      StoreClientW
+#define LoadRegistration LoadRegistrationW
 #else
-#define WbxStoreClient      WbxStoreClientA
-#define WbxLoadRegistration WbxLoadRegistrationA
+#define StoreClient      StoreClientA
+#define LoadRegistration LoadRegistrationA
 #endif
 
 /* Command-line tail: skip argv[0] (quoted or bare), then leading whitespace. */
-static LPTSTR WbxCommandLineTail(void)
+static LPTSTR CommandLineTail(void)
 {
     LPTSTR pszCmd;
 
@@ -55,7 +55,7 @@ static LPTSTR WbxCommandLineTail(void)
     return pszCmd;
 }
 
-static int WbxShowCmd(const STARTUPINFO* psi)
+static int ShowCmd(const STARTUPINFO* psi)
 {
     BOOL fUseShow;
 
@@ -73,11 +73,11 @@ int __cdecl WinBaseXRun(WBX_PFN_WINMAINEX pfnWinMainEx, const WINBASEX_REGISTRAT
     BOOL        fProceed;
     int         rc;
 
-    RETURN_VALUE_IF_NOT(WbxStateInit(), 3);
-    WbxStoreClient(pfnWinMainEx);
-    RETURN_VALUE_IF_NOT(WbxLoadRegistration(pReg), 3);
-    rc = WbxRunCommon(&fProceed);
+    RETURN_VALUE_IF_NOT(StateInit(), 3);
+    StoreClient(pfnWinMainEx);
+    RETURN_VALUE_IF_NOT(LoadRegistration(pReg), 3);
+    rc = RunCommon(&fProceed);
     RETURN_VALUE_IF_NOT(fProceed, rc);
     GetStartupInfo(&si);
-    return pfnWinMainEx(GetModuleHandle(NULL), NULL, WbxCommandLineTail(), WbxShowCmd(&si), &si);
+    return pfnWinMainEx(GetModuleHandle(NULL), NULL, CommandLineTail(), ShowCmd(&si), &si);
 }
