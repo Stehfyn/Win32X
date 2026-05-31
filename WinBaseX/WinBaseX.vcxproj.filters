@@ -23,6 +23,9 @@
     <ClCompile Include="WinUserX.c">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="processenvx.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="WinBaseX.h">
@@ -39,6 +42,12 @@
     </ClInclude>
     <ClInclude Include="delayimpx.h">
       <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="processenvx.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="WinBaseXText.inl">
+      <Filter>Source Files</Filter>
     </ClInclude>
   </ItemGroup>
 </Project>
