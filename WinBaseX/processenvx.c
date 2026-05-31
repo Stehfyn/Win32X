@@ -16,6 +16,69 @@
 #include "processenvx.h"
 #include "result.h"
 
+LPWSTR WINAPI GetCommandLineArgumentsW(void)
+{
+    LPWSTR pszCmd;
+
+    pszCmd = GetCommandLineW();
+    if (L'"' == (*pszCmd))
+    {
+        pszCmd++;
+        while ((*pszCmd) && (L'"' != (*pszCmd)))
+        {
+            pszCmd++;
+        }
+        if (L'"' == (*pszCmd))
+        {
+            pszCmd++;
+        }
+    }
+    else
+    {
+        while ((*pszCmd) && (L' ' < (*pszCmd)))
+        {
+            pszCmd++;
+        }
+    }
+    while ((L' ' == (*pszCmd)) || (L'\t' == (*pszCmd)))
+    {
+        pszCmd++;
+    }
+    return pszCmd;
+}
+
+LPSTR WINAPI GetCommandLineArgumentsA(void)
+{
+    LPSTR pszCmd;
+
+    pszCmd = GetCommandLineA();
+    if ('"' == (*pszCmd))
+    {
+        pszCmd++;
+        while ((*pszCmd) && ('"' != (*pszCmd)))
+        {
+            pszCmd++;
+        }
+        if ('"' == (*pszCmd))
+        {
+            pszCmd++;
+        }
+    }
+    else
+    {
+        while ((*pszCmd) && (' ' < (*pszCmd)))
+        {
+            pszCmd++;
+        }
+    }
+    while ((' ' == (*pszCmd)) || ('\t' == (*pszCmd)))
+    {
+        pszCmd++;
+    }
+    return pszCmd;
+}
+
+/* Search the argument tail only -- never argv[0] -- so the program path can't false-match a flag. */
 LPWSTR WINAPI GetCommandLineArgumentW(_In_ LPCWSTR pszArgument)
 {
     LPWSTR pszCmd;
@@ -26,7 +89,7 @@ LPWSTR WINAPI GetCommandLineArgumentW(_In_ LPCWSTR pszArgument)
     BOOL   fTokenStart;
     BOOL   fTokenEnd;
 
-    pszCmd      = GetCommandLineW();
+    pszCmd      = GetCommandLineArgumentsW();
     cchArgument = lstrlenW(pszArgument);
     for (p = pszCmd; (*p); p++)
     {
@@ -66,7 +129,7 @@ LPSTR WINAPI GetCommandLineArgumentA(_In_ LPCSTR pszArgument)
     BOOL  fTokenStart;
     BOOL  fTokenEnd;
 
-    pszCmd      = GetCommandLineA();
+    pszCmd      = GetCommandLineArgumentsA();
     cchArgument = lstrlenA(pszArgument);
     for (p = pszCmd; (*p); p++)
     {
