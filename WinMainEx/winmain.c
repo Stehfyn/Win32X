@@ -16,47 +16,54 @@
 #include <windowsx.h>
 #include <initguid.h>
 #include "WinBaseX.h"
-
-#ifndef STARTF_HASSHELLDATA
-#define STARTF_HASSHELLDATA 0x00000400
-#endif
+#include "WinUserX.h"
 
 #define WMX_PCT_NUM       50
 #define WMX_PCT_DENOM     100
 
 DEFINE_GUID(CLSID_WinMainEx, 0xE5F1A9C2, 0x8B7D, 0x4E3F, 0xA1, 0x5C, 0x9D, 0x2E, 0x7B, 0x6F, 0x4A, 0x83);
 
-static void             CenterOnMonitor(HWND hwnd, HMONITOR hMon);
+static void             PlaceStartupWindow(HWND hwnd);
 static ATOM             MyRegisterClass(HINSTANCE hInstance);
-static BOOL             InitInstance(HINSTANCE hInstance, int nCmdShow, const STARTUPINFO* psi);
+static BOOL             InitInstance(HINSTANCE hInstance, int nCmdShow);
 static void    CALLBACK OnDestroy(HWND hwnd);
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
-static void CenterOnMonitor(HWND hwnd, HMONITOR hMon)
+static void PlaceStartupWindow(HWND hwnd)
 {
-    MONITORINFO mi;
-    BOOL        fGotInfo;
-    int         nWorkWidth;
-    int         nWorkHeight;
-    int         nWidth;
-    int         nHeight;
-    int         nX;
-    int         nY;
+    RECT rcWork;
+    BOOL fGotWork;
+    SIZE sizeDefault;
+    RECT rcPos;
+    BOOL fGotPos;
+    int  nX;
+    int  nY;
+    int  nWidth;
+    int  nHeight;
 
-    SecureZeroMemory(&mi, sizeof(mi));
-    mi.cbSize = (DWORD)sizeof(mi);
-    fGotInfo  = GetMonitorInfo(hMon, &mi);
-    if (!fGotInfo)
+    /* This client's default-extent policy: 50% of the primary work area. CalculateWindowStartupPosition
+       resolves the launch monitor, honors any launcher-specified STARTUPINFO position/size, and
+       otherwise centers this default extent on the work area. */
+    SecureZeroMemory(&rcWork, sizeof(rcWork));
+    fGotWork = SystemParametersInfo(SPI_GETWORKAREA, 0, &rcWork, 0);
+    if (!fGotWork)
     {
         return;
     }
 
-    nWorkWidth  = (int)(mi.rcWork.right - mi.rcWork.left);
-    nWorkHeight = (int)(mi.rcWork.bottom - mi.rcWork.top);
-    nWidth      = nWorkWidth * WMX_PCT_NUM / WMX_PCT_DENOM;
-    nHeight     = nWorkHeight * WMX_PCT_NUM / WMX_PCT_DENOM;
-    nX          = mi.rcWork.left + (nWorkWidth - nWidth) / 2;
-    nY          = mi.rcWork.top + (nWorkHeight - nHeight) / 2;
+    sizeDefault.cx = (rcWork.right - rcWork.left) * WMX_PCT_NUM / WMX_PCT_DENOM;
+    sizeDefault.cy = (rcWork.bottom - rcWork.top) * WMX_PCT_NUM / WMX_PCT_DENOM;
+
+    fGotPos = CalculateWindowStartupPosition(&sizeDefault, &rcPos);
+    if (!fGotPos)
+    {
+        return;
+    }
+
+    nX      = (int)rcPos.left;
+    nY      = (int)rcPos.top;
+    nWidth  = (int)(rcPos.right - rcPos.left);
+    nHeight = (int)(rcPos.bottom - rcPos.top);
     SetWindowPos(hwnd, HWND_DESKTOP, nX, nY, nWidth, nHeight, SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
@@ -75,11 +82,9 @@ static ATOM MyRegisterClass(HINSTANCE hInstance)
 }
 
 /* Creates and displays the main window. */
-static BOOL InitInstance(HINSTANCE hInstance, int nCmdShow, const STARTUPINFO* psi)
+static BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
 {
-    HMONITOR hMon;
-    HWND     hwnd;
-    BOOL     fHasShellData;
+    HWND hwnd;
 
     hwnd = CreateWindowEx(0,
                           WC_WINMAINEX,
@@ -98,16 +103,7 @@ static BOOL InitInstance(HINSTANCE hInstance, int nCmdShow, const STARTUPINFO* p
         return FALSE;
     }
 
-    fHasShellData = !!(STARTF_HASSHELLDATA & psi->dwFlags);
-    if (fHasShellData)
-    {
-        hMon = (HMONITOR)psi->hStdOutput;
-    }
-    else
-    {
-        hMon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-    }
-    CenterOnMonitor(hwnd, hMon);
+    PlaceStartupWindow(hwnd);
     ShowWindow(hwnd, nCmdShow);
     SetForegroundWindow(hwnd);
 
@@ -152,11 +148,12 @@ int WINAPI _tWinMainEx(_In_ HINSTANCE          hInstance,
 
     UNREFERENCED_PARAMETER(hPrevInstance);
     UNREFERENCED_PARAMETER(lpCmdLine);
+    UNREFERENCED_PARAMETER(lpStartupInfo);
 
     /* RegisterClass returns 0 on a repeated activation (ERROR_CLASS_ALREADY_EXISTS); harmless --
        the class stays registered, so InitInstance's CreateWindowEx succeeds regardless. */
     MyRegisterClass(hInstance);
-    if (!InitInstance(hInstance, nShowCmd, lpStartupInfo))
+    if (!InitInstance(hInstance, nShowCmd))
     {
         return 0;
     }
