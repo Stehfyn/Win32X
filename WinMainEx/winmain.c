@@ -21,17 +21,14 @@
 #define STARTF_HASSHELLDATA 0x00000400
 #endif
 
-#define WC_WINMAINEX     TEXT("WinMainEx")
-#define WMX_WND_TITLE     TEXT("WinMainEx")
-#define WMX_FRIENDLY_NAME TEXT("WinMainEx")
-#define WMX_LIST_KEY      TEXT("Software\\WinMainEx\\Launched")
 #define WMX_PCT_NUM       50
 #define WMX_PCT_DENOM     100
 
 DEFINE_GUID(CLSID_WinMainEx, 0xE5F1A9C2, 0x8B7D, 0x4E3F, 0xA1, 0x5C, 0x9D, 0x2E, 0x7B, 0x6F, 0x4A, 0x83);
 
 static void             CenterOnMonitor(HWND hwnd, HMONITOR hMon);
-static void             ShowGui(const STARTUPINFO* psi);
+static ATOM             MyRegisterClass(HINSTANCE hInstance);
+static BOOL             InitInstance(HINSTANCE hInstance, int nCmdShow, const STARTUPINFO* psi);
 static void    CALLBACK OnDestroy(HWND hwnd);
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
@@ -63,52 +60,42 @@ static void CenterOnMonitor(HWND hwnd, HMONITOR hMon)
     SetWindowPos(hwnd, HWND_DESKTOP, nX, nY, nWidth, nHeight, SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
-static void ShowGui(const STARTUPINFO* psi)
+/* Registers the window class. */
+static ATOM MyRegisterClass(HINSTANCE hInstance)
 {
-    WNDCLASS  wc;
-    HINSTANCE hInstance;
-    HMONITOR  hMon;
-    HWND      hwnd;
-    int       nCmdShow;
-    BOOL      fUseShow;
-    BOOL      fHasShellData;
+    WNDCLASS wc;
 
-    hInstance = GetModuleHandle(NULL);
-    fUseShow  = !!(STARTF_USESHOWWINDOW & psi->dwFlags);
-    if (fUseShow)
-    {
-        nCmdShow = (int)psi->wShowWindow;
-    }
-    else
-    {
-        nCmdShow = SW_SHOWDEFAULT;
-    }
-
-    /* Idempotent: a second RegisterClass fails with ERROR_CLASS_ALREADY_EXISTS and the class
-       stays registered, so CreateWindowEx works regardless -- no need to track first-call state. */
     SecureZeroMemory(&wc, sizeof(wc));
     wc.lpfnWndProc   = WndProc;
     wc.hInstance     = hInstance;
     wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     wc.lpszClassName = WC_WINMAINEX;
-    RegisterClass(&wc);
+    return RegisterClass(&wc);
+}
+
+/* Creates and displays the main window. */
+static BOOL InitInstance(HINSTANCE hInstance, int nCmdShow, const STARTUPINFO* psi)
+{
+    HMONITOR hMon;
+    HWND     hwnd;
+    BOOL     fHasShellData;
 
     hwnd = CreateWindowEx(0,
-                           WC_WINMAINEX,
-                           WMX_WND_TITLE,
-                           WS_OVERLAPPEDWINDOW,
-                           CW_USEDEFAULT,
-                           CW_USEDEFAULT,
-                           CW_USEDEFAULT,
-                           CW_USEDEFAULT,
-                           GetDesktopWindow(),
-                           NULL,
-                           hInstance,
-                           NULL);
+                          WC_WINMAINEX,
+                          WMX_WND_TITLE,
+                          WS_OVERLAPPEDWINDOW,
+                          CW_USEDEFAULT,
+                          CW_USEDEFAULT,
+                          CW_USEDEFAULT,
+                          CW_USEDEFAULT,
+                          GetDesktopWindow(),
+                          NULL,
+                          hInstance,
+                          NULL);
     if (!hwnd)
     {
-        return;
+        return FALSE;
     }
 
     fHasShellData = !!(STARTF_HASSHELLDATA & psi->dwFlags);
@@ -123,6 +110,14 @@ static void ShowGui(const STARTUPINFO* psi)
     CenterOnMonitor(hwnd, hMon);
     ShowWindow(hwnd, nCmdShow);
     SetForegroundWindow(hwnd);
+
+    /* A COM-server (shell DelegateExecute) activation only needs the window shown; WinBaseX pumps
+       messages for the embedding, so the client must not run its own loop. */
+    if (IsWinBaseXComServer())
+    {
+        return FALSE;
+    }
+    return TRUE;
 }
 
 const WINBASEX_REGISTRATION_PROPERTIES WinBaseXRegistration = {
@@ -155,13 +150,13 @@ int WINAPI _tWinMainEx(_In_ HINSTANCE          hInstance,
 {
     MSG msg;
 
-    UNREFERENCED_PARAMETER(hInstance);
     UNREFERENCED_PARAMETER(hPrevInstance);
     UNREFERENCED_PARAMETER(lpCmdLine);
-    UNREFERENCED_PARAMETER(nShowCmd);
 
-    ShowGui(lpStartupInfo);
-    if (IsWinBaseXComServer())
+    /* RegisterClass returns 0 on a repeated activation (ERROR_CLASS_ALREADY_EXISTS); harmless --
+       the class stays registered, so InitInstance's CreateWindowEx succeeds regardless. */
+    MyRegisterClass(hInstance);
+    if (!InitInstance(hInstance, nShowCmd, lpStartupInfo))
     {
         return 0;
     }

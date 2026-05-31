@@ -48,6 +48,16 @@ extern const WINBASEX_REGISTRATION_PROPERTIESW WinBaseXRegistrationW;
 #define WinBaseXRegistration WinBaseXRegistrationA
 #endif
 
+/*
+ * WinMainEx product identity. Defined in the shared header so the client references one definition;
+ * the library still receives the registration strings as data (WinBaseXRegistration), never by
+ * referencing these macros.
+ */
+#define WC_WINMAINEX      TEXT("WinMainEx")
+#define WMX_WND_TITLE     TEXT("WinMainEx")
+#define WMX_FRIENDLY_NAME TEXT("WinMainEx")
+#define WMX_LIST_KEY      TEXT("Software\\WinMainEx\\Launched")
+
 BOOL WINAPI IsWinBaseXComServer(void);
 
 int WINAPI WinMainEx(_In_ HINSTANCE hInstance,
