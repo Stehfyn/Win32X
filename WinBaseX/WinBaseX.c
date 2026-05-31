@@ -444,15 +444,15 @@ static HRESULT STDMETHODCALLTYPE ExecuteCommand_Execute(IExecuteCommand* pThis)
     RETURN_VALUE_IF(WBX_CMD_CCH < cchNeeded, E_FAIL);
 
     pszWrite    = pState->szCmdBuf;
-    (*pszWrite) = TEXT('"');
+    (*pszWrite) = '"';
     pszWrite++;
     (void)lstrcpyn(pszWrite, szPath, cchPath + 1);
     pszWrite    += cchPath;
-    (*pszWrite)  = TEXT('"');
+    (*pszWrite)  = '"';
     pszWrite++;
     if (fHasParams)
     {
-        (*pszWrite) = TEXT(' ');
+        (*pszWrite) = ' ';
         pszWrite++;
         (void)lstrcpyn(pszWrite, pObj->params, cchParams + 1);
         pszWrite += cchParams;

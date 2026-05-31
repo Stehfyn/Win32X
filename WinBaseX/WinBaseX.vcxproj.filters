@@ -23,7 +23,10 @@
     <ClCompile Include="WinUserX.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="processenvx.c">
+    <ClCompile Include="processenvxA.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="processenvxW.c">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
@@ -47,6 +50,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="WinBaseXText.inl">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="processenvxText.inl">
       <Filter>Source Files</Filter>
     </ClInclude>
   </ItemGroup>

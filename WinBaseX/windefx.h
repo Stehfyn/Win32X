@@ -12,6 +12,14 @@
 #define IsZero(x)         (0 == (x))
 #define IsNonZero(x)      (0 != (x))
 
+/* Character-class predicates -- the dual of the sign predicates above, a named test instead of an
+   open-coded comparison. Bare ASCII literals: a char constant is an int, both sides promote to int,
+   and ASCII values coincide narrow/wide -- so these compare identically for CHAR or WCHAR operands. */
+#define IsWhiteSpace(c)  ((' ' == (c)) || ('\t' == (c)) || ('\n' == (c)) || ('\r' == (c)))
+#define IsValidChar(c)   (' ' <= (c))
+#define IsDigit(c)       (('0' <= (c)) && ((c) <= '9'))
+#define IsAlpha(c)       ((('a' <= (c)) && ((c) <= 'z')) || (('A' <= (c)) && ((c) <= 'Z')))
+
 /* Absolute value of a signed integer expression. */
 #define ABS(x) (IsNegative(x) ? -(x) : (x))
 

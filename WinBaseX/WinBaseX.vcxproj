@@ -89,13 +89,15 @@
     <ClCompile Include="WinBaseXStartupA.c" />
     <ClCompile Include="WinBaseXStartupW.c" />
     <ClCompile Include="WinUserX.c" />
-    <ClCompile Include="processenvx.c" />
+    <ClCompile Include="processenvxA.c" />
+    <ClCompile Include="processenvxW.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="WinBaseX.h" />
     <ClInclude Include="WinBaseXText.inl" />
     <ClInclude Include="WinUserX.h" />
     <ClInclude Include="processenvx.h" />
+    <ClInclude Include="processenvxText.inl" />
     <ClInclude Include="windefx.h" />
     <ClInclude Include="result.h" />
     <ClInclude Include="delayimpx.h" />
