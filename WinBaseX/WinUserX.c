@@ -112,8 +112,8 @@ BOOL WINAPI CalculateWindowStartupPosition(_In_ const SIZE* pDefaultSize, _Out_ 
         nOffsetX = (nWorkWidth  - size.cx) / 2;
         nOffsetY = (nWorkHeight - size.cy) / 2;
 
-        fOffsetXNonNeg = (0 <= nOffsetX);
-        fOffsetYNonNeg = (0 <= nOffsetY);
+        fOffsetXNonNeg = IsNonNegative(nOffsetX);
+        fOffsetYNonNeg = IsNonNegative(nOffsetY);
         nOffsetX       = nOffsetX & (LONG)(0u - (DWORD)fOffsetXNonNeg);
         nOffsetY       = nOffsetY & (LONG)(0u - (DWORD)fOffsetYNonNeg);
 

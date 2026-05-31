@@ -23,6 +23,79 @@ LPSTR  WINAPI GetCommandLineArgumentA(_In_ LPCSTR pszArgument);
 #define GetCommandLineArgument GetCommandLineArgumentA
 #endif
 
+/*
+ * GetCommandLineArguments -- the argument tail of the process command line: GetCommandLine with the
+ * argv[0] token (quoted or bare) and the whitespace after it skipped. Returns a pointer within the
+ * command line; never NULL (an empty string when there are no arguments). Defined here, so each
+ * includer's compile fixes the charset (static, internal to each translation unit).
+ */
+static LPWSTR GetCommandLineArgumentsW(void)
+{
+    LPWSTR pszCmd;
+
+    pszCmd = GetCommandLineW();
+    if (L'"' == (*pszCmd))
+    {
+        pszCmd++;
+        while ((*pszCmd) && (L'"' != (*pszCmd)))
+        {
+            pszCmd++;
+        }
+        if (L'"' == (*pszCmd))
+        {
+            pszCmd++;
+        }
+    }
+    else
+    {
+        while ((*pszCmd) && (L' ' < (*pszCmd)))
+        {
+            pszCmd++;
+        }
+    }
+    while ((L' ' == (*pszCmd)) || (L'\t' == (*pszCmd)))
+    {
+        pszCmd++;
+    }
+    return pszCmd;
+}
+
+static LPSTR GetCommandLineArgumentsA(void)
+{
+    LPSTR pszCmd;
+
+    pszCmd = GetCommandLineA();
+    if ('"' == (*pszCmd))
+    {
+        pszCmd++;
+        while ((*pszCmd) && ('"' != (*pszCmd)))
+        {
+            pszCmd++;
+        }
+        if ('"' == (*pszCmd))
+        {
+            pszCmd++;
+        }
+    }
+    else
+    {
+        while ((*pszCmd) && (' ' < (*pszCmd)))
+        {
+            pszCmd++;
+        }
+    }
+    while ((' ' == (*pszCmd)) || ('\t' == (*pszCmd)))
+    {
+        pszCmd++;
+    }
+    return pszCmd;
+}
+#ifdef UNICODE
+#define GetCommandLineArguments GetCommandLineArgumentsW
+#else
+#define GetCommandLineArguments GetCommandLineArgumentsA
+#endif
+
 #ifdef __cplusplus
 }
 #endif

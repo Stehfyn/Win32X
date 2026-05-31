@@ -7,6 +7,8 @@
  * machinery (COM server, registry, state, the wide->ANSI client bridge) lives in WinBaseX.c.
  */
 
+#include "processenvx.h"
+
 /* Implemented (wide) in WinBaseX.c. */
 BOOL StateInit(void);
 int  RunCommon(BOOL* pfProceed);
@@ -23,39 +25,7 @@ BOOL LoadRegistrationW(const WINBASEX_REGISTRATION_PROPERTIESW* lpRegistrationPr
 #define LoadRegistration LoadRegistrationA
 #endif
 
-/* Command-line tail: skip argv[0] (quoted or bare), then leading whitespace. */
-static LPTSTR CommandLineTail(void)
-{
-    LPTSTR pszCmd;
-
-    pszCmd = GetCommandLine();
-    if (TEXT('"') == (*pszCmd))
-    {
-        pszCmd++;
-        while ((*pszCmd) && (TEXT('"') != (*pszCmd)))
-        {
-            pszCmd++;
-        }
-        if (TEXT('"') == (*pszCmd))
-        {
-            pszCmd++;
-        }
-    }
-    else
-    {
-        while ((*pszCmd) && (TEXT(' ') < (*pszCmd)))
-        {
-            pszCmd++;
-        }
-    }
-    while ((TEXT(' ') == (*pszCmd)) || (TEXT('\t') == (*pszCmd)))
-    {
-        pszCmd++;
-    }
-    return pszCmd;
-}
-
-static int ShowCmd(const STARTUPINFO* psi)
+static int GetShowCmd(const STARTUPINFO* psi)
 {
     BOOL fUseShow;
 
@@ -76,5 +46,5 @@ int __cdecl WinBaseXRun(WBX_PFN_WINMAINEX pfnWinMainEx, const WINBASEX_REGISTRAT
     rc = RunCommon(&fProceed);
     RETURN_VALUE_IF_NOT(fProceed, rc);
     GetStartupInfo(&si);
-    return pfnWinMainEx(GetModuleHandle(NULL), NULL, CommandLineTail(), ShowCmd(&si), &si);
+    return pfnWinMainEx(GetModuleHandle(NULL), NULL, GetCommandLineArguments(), GetShowCmd(&si), &si);
 }

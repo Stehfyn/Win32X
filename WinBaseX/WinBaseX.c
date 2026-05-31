@@ -914,13 +914,13 @@ static void GetComTextA(LPSTR pszDst, LPCWSTR pszSrc, int cchDst)
     }
 }
 
-static int ShowCmdFromStartupW(const STARTUPINFOW* psi)
+static int GetShowCmdFromStartupW(const STARTUPINFOW* psi)
 {
     RETURN_VALUE_IF(IsFlagSet(psi->dwFlags, STARTF_USESHOWWINDOW), (int)psi->wShowWindow);
     return SW_SHOWDEFAULT;
 }
 
-static int ShowCmdFromStartupA(const STARTUPINFOA* psi)
+static int GetShowCmdFromStartupA(const STARTUPINFOA* psi)
 {
     RETURN_VALUE_IF(IsFlagSet(psi->dwFlags, STARTF_USESHOWWINDOW), (int)psi->wShowWindow);
     return SW_SHOWDEFAULT;
@@ -934,7 +934,7 @@ static int CallClientFromStartupW(LPWSTR pszCmdLine, const STARTUPINFOW* psi)
     WBX_STATE* pState;
 
     pState = GetState();
-    return pState->pfnWinMainExW(GetModuleHandleW(NULL), NULL, pszCmdLine, ShowCmdFromStartupW(psi), psi);
+    return pState->pfnWinMainExW(GetModuleHandleW(NULL), NULL, pszCmdLine, GetShowCmdFromStartupW(psi), psi);
 }
 
 static int CallClientFromStartupA(LPSTR pszCmdLine, const STARTUPINFOA* psi)
@@ -942,7 +942,7 @@ static int CallClientFromStartupA(LPSTR pszCmdLine, const STARTUPINFOA* psi)
     WBX_STATE* pState;
 
     pState = GetState();
-    return pState->pfnWinMainExA(GetModuleHandleW(NULL), NULL, pszCmdLine, ShowCmdFromStartupA(psi), psi);
+    return pState->pfnWinMainExA(GetModuleHandleW(NULL), NULL, pszCmdLine, GetShowCmdFromStartupA(psi), psi);
 }
 
 /* The generic-text WinBaseXRun (WinBaseXText.inl) stores the client it was handed; W or A is chosen

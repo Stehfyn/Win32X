@@ -3,8 +3,17 @@
 
 #include <windows.h>
 
+/* Sign predicates for a signed integer expression. The relational/equality operators already yield
+   canonical 0/1, so no cast to BOOL is needed (CONV-4.7). */
+#define IsNegative(x)     (0 >  (x))
+#define IsNonNegative(x)  (0 <= (x))
+#define IsPositive(x)     (0 <  (x))
+#define IsNonPositive(x)  (0 >= (x))
+#define IsZero(x)         (0 == (x))
+#define IsNonZero(x)      (0 != (x))
+
 /* Absolute value of a signed integer expression. */
-#define ABS(x) ((0 > (x)) ? -(x) : (x))
+#define ABS(x) (IsNegative(x) ? -(x) : (x))
 
 /* Clamp x into the inclusive range [lo, hi]. Equivalent to
    max(min(x, hi), lo) but without pulling in <windows.h>. */
