@@ -19,6 +19,12 @@
 #define IsValidChar(c)   (' ' <= (c))
 #define IsDigit(c)       (('0' <= (c)) && ((c) <= '9'))
 #define IsAlpha(c)       ((('a' <= (c)) && ((c) <= 'z')) || (('A' <= (c)) && ((c) <= 'Z')))
+#define IsSlash(c)       (('\\' == (c)) || ('/' == (c)))
+
+/* Handle predicate -- valid means non-NULL and not the INVALID_HANDLE_VALUE sentinel, covering both
+   Win32 failure conventions: NULL (CreateThread, OpenProcess, ...) and INVALID_HANDLE_VALUE
+   (CreateFile-family). */
+#define IsValidHandle(h) ((h) && (INVALID_HANDLE_VALUE != (h)))
 
 /* Absolute value of a signed integer expression. */
 #define ABS(x) (IsNegative(x) ? -(x) : (x))

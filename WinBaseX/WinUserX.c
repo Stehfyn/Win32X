@@ -22,7 +22,7 @@
 #define STARTF_HASSHELLDATA 0x00000400
 #endif
 
-#define DEFAULT_PCT_NUM 50
+#define DEFAULT_PCT_NUM 67
 #define DEFAULT_PCT_DEN 100
 
 HMONITOR WINAPI GetStartupMonitor(_In_ DWORD dwFlags)
