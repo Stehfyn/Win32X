@@ -8,55 +8,23 @@ extern "C"
 {
 #endif
 
-typedef struct _WINBASEX_REGISTRATION_PROPERTIESA
-{
-    DWORD        cb;
-    const CLSID* lpClsid;
-    LPCSTR       lpFriendlyName;
-    LPCSTR       lpLaunchHistoryKey;
-    DWORD        dwFlags;
-} WINBASEX_REGISTRATION_PROPERTIESA, *PWINBASEX_REGISTRATION_PROPERTIESA;
-
-typedef struct _WINBASEX_REGISTRATION_PROPERTIESW
-{
-    DWORD        cb;
-    const CLSID* lpClsid;
-    LPCWSTR      lpFriendlyName;
-    LPCWSTR      lpLaunchHistoryKey;
-    DWORD        dwFlags;
-} WINBASEX_REGISTRATION_PROPERTIESW, *PWINBASEX_REGISTRATION_PROPERTIESW;
-
 typedef int(WINAPI* WBX_PFN_WINMAINEXA)(HINSTANCE, HINSTANCE, LPSTR, int, const STARTUPINFOA*);
 typedef int(WINAPI* WBX_PFN_WINMAINEXW)(HINSTANCE, HINSTANCE, LPWSTR, int, const STARTUPINFOW*);
 
 #ifdef UNICODE
-typedef WINBASEX_REGISTRATION_PROPERTIESW  WINBASEX_REGISTRATION_PROPERTIES;
-typedef PWINBASEX_REGISTRATION_PROPERTIESW PWINBASEX_REGISTRATION_PROPERTIES;
 #define WBX_PFN_WINMAINEX WBX_PFN_WINMAINEXW
 #else
-typedef WINBASEX_REGISTRATION_PROPERTIESA  WINBASEX_REGISTRATION_PROPERTIES;
-typedef PWINBASEX_REGISTRATION_PROPERTIESA PWINBASEX_REGISTRATION_PROPERTIES;
 #define WBX_PFN_WINMAINEX WBX_PFN_WINMAINEXA
 #endif
 
-/* Client-supplied registration data; the startup passes &WinBaseXRegistration to WinBaseXRun. */
-extern const WINBASEX_REGISTRATION_PROPERTIESA WinBaseXRegistrationA;
-extern const WINBASEX_REGISTRATION_PROPERTIESW WinBaseXRegistrationW;
-#ifdef UNICODE
-#define WinBaseXRegistration WinBaseXRegistrationW
-#else
-#define WinBaseXRegistration WinBaseXRegistrationA
-#endif
-
 /*
- * WinMainEx product identity. Defined in the shared header so the client references one definition;
- * the library still receives the registration strings as data (WinBaseXRegistration), never by
- * referencing these macros.
+ * Identity of the single, machine-wide exefile DelegateExecute launch broker. This is the library's
+ * identity, not the client's: there is exactly one exefile\shell\open\command\DelegateExecute slot,
+ * so one shared CLSID brokers launches for every WinBaseX-hosted exe. Declared here, defined once in
+ * WinBaseX.c alongside the interface IIDs (the project links /NODEFAULTLIB, so there is no uuid.lib;
+ * WinBaseX.c is the hand-written definition TU, in the spirit of a MIDL _i.c).
  */
-#define WC_WINMAINEX      TEXT("WinMainEx")
-#define WMX_WND_TITLE     TEXT("WinMainEx")
-#define WMX_FRIENDLY_NAME TEXT("WinMainEx")
-#define WMX_LIST_KEY      TEXT("Software\\WinMainEx\\Launched")
+extern const CLSID CLSID_WinBaseXLaunchBroker;
 
 BOOL WINAPI IsWinBaseXComServer(void);
 
@@ -88,8 +56,8 @@ int WINAPI wWinMainEx(_In_ HINSTANCE hInstance,
 #define _tWinMainEx WinMainEx
 #endif
 
-int __cdecl WinBaseXRunA(WBX_PFN_WINMAINEXA pfnWinMainEx, const WINBASEX_REGISTRATION_PROPERTIESA* lpRegistrationProperties);
-int __cdecl WinBaseXRunW(WBX_PFN_WINMAINEXW pfnWinMainEx, const WINBASEX_REGISTRATION_PROPERTIESW* lpRegistrationProperties);
+int __cdecl WinBaseXRunA(WBX_PFN_WINMAINEXA pfnWinMainEx);
+int __cdecl WinBaseXRunW(WBX_PFN_WINMAINEXW pfnWinMainEx);
 #ifdef UNICODE
 #define WinBaseXRun WinBaseXRunW
 #else

@@ -44,12 +44,12 @@
 #define STARTF_HASSHELLDATA 0x00000400
 #endif
 
-#define WBX_DEFAULT_LIST_KEY L"Software\\WinMainEx\\Launched"
+#define WBX_FRIENDLY_NAME    L"WinBaseX Launch Broker"
+#define WBX_LIST_KEY         L"Software\\WinBaseX\\Launched"
 #define WBX_CLSID_PREFIX     L"Software\\Classes\\CLSID\\"
 #define WBX_EXEFILE_CMD_KEY  L"Software\\Classes\\exefile\\shell\\open\\command"
 #define WBX_GUID_CCH         40
 #define WBX_SUBKEY_CCH       256
-#define WBX_NAME_CCH         128
 #define WBX_PARAMS_CCH       1024
 #define WBX_CMD_CCH          2048
 #define WBX_SVR_REFCOUNT     2
@@ -59,30 +59,29 @@ DEFINE_GUID(IID_IClassFactory, 0x00000001, 0x0000, 0x0000, 0xC0, 0x00, 0x00, 0x0
 DEFINE_GUID(IID_IExecuteCommand, 0x7F9185B0, 0xCB92, 0x43C5, 0x80, 0xA9, 0x92, 0x27, 0x7A, 0x4F, 0x7B, 0x54);
 DEFINE_GUID(IID_IObjectWithSelection, 0x1C9CD5BB, 0x98E9, 0x4491, 0xA6, 0x0F, 0x31, 0xAA, 0xCC, 0x72, 0xB8, 0x3C);
 
+/* The library's own coclass: the exefile DelegateExecute launch broker. Declared extern const CLSID
+   in WinBaseX.h; this is its single definition site (Variant B). */
+DEFINE_GUID(CLSID_WinBaseXLaunchBroker, 0xE5F1A9C2, 0x8B7D, 0x4E3F, 0xA1, 0x5C, 0x9D, 0x2E, 0x7B, 0x6F, 0x4A, 0x83);
+
 typedef struct ClassFactory
 {
     const IClassFactoryVtbl* vtbl;
 } ClassFactory;
 
-/* All mutable/config state. One heap instance per process, reached via GetState() (TLS). */
+/* All mutable/per-process state, reached via GetState() (TLS). The broker's identity (CLSID, friendly
+   name, launch-history key) is compile-time library constant, not state -- see the WBX_* macros and
+   CLSID_WinBaseXLaunchBroker above. */
 typedef struct WBX_STATE
 {
-    /* client registration (loaded once) */
-    GUID               clsid;
-    LPCWSTR            pszFriendlyName;
-    LPCWSTR            pszLaunchHistoryKey;
     ClassFactory       factory;       /* embedded singleton -> no global factory */
     WBX_PFN_WINMAINEXA pfnWinMainExA; /* exactly one of A/W set per process */
     WBX_PFN_WINMAINEXW pfnWinMainExW;
     /* COM-server runtime */
     volatile LONG      nObjectCount;
-    BOOL               fRegistrationLoaded;
     BOOL               fComServer;
     /* process identity + forward scratch */
-    TCHAR              szMyPath[MAX_PATH];     /* this build's charset; GetModuleFileName fills it generic */
-    TCHAR              szCmdBuf[WBX_CMD_CCH];  /* forward command line, in this build's charset */
-    WCHAR              szFriendlyName[WBX_NAME_CCH];
-    WCHAR              szHistoryKey[MAX_PATH];
+    TCHAR              szMyPath[MAX_PATH];    /* this build's charset; GetModuleFileName fills it generic */
+    TCHAR              szCmdBuf[WBX_CMD_CCH]; /* forward command line, in this build's charset */
 } WBX_STATE;
 
 typedef struct CommandObject
@@ -161,12 +160,10 @@ BOOL WINAPI IsWinBaseXComServer(void)
 static void RecordExe(LPCWSTR pszPath)
 {
     static const WCHAR szOne[] = L"1";
-    WBX_STATE*         pState;
     HKEY               hKey;
     LONG               lr;
 
-    pState = GetState();
-    lr     = RegCreateKeyExW(HKEY_CURRENT_USER, pState->pszLaunchHistoryKey, 0, NULL, 0, KEY_WRITE, NULL, &hKey, NULL);
+    lr = RegCreateKeyExW(HKEY_CURRENT_USER, WBX_LIST_KEY, 0, NULL, 0, KEY_WRITE, NULL, &hKey, NULL);
     if (ERROR_SUCCESS == lr)
     {
         RegSetValueExW(hKey, pszPath, 0, REG_SZ, (const BYTE*)szOne, (DWORD)sizeof(szOne));
@@ -176,15 +173,13 @@ static void RecordExe(LPCWSTR pszPath)
 
 static BOOL IsExeRegistered(LPCWSTR pszPath)
 {
-    WBX_STATE* pState;
-    HKEY       hKey;
-    LONG       lrOpen;
-    LONG       lrQuery;
-    BOOL       fFound;
+    HKEY hKey;
+    LONG lrOpen;
+    LONG lrQuery;
+    BOOL fFound;
 
-    pState = GetState();
     fFound = FALSE;
-    lrOpen = RegOpenKeyExW(HKEY_CURRENT_USER, pState->pszLaunchHistoryKey, 0, KEY_QUERY_VALUE, &hKey);
+    lrOpen = RegOpenKeyExW(HKEY_CURRENT_USER, WBX_LIST_KEY, 0, KEY_QUERY_VALUE, &hKey);
     if (ERROR_SUCCESS == lrOpen)
     {
         lrQuery = RegQueryValueExW(hKey, pszPath, NULL, NULL, NULL, NULL);
@@ -629,7 +624,7 @@ static void ClsidString(WCHAR rgClsid[WBX_GUID_CCH])
 {
     int cch;
 
-    cch = StringFromGUID2(&GetState()->clsid, rgClsid, WBX_GUID_CCH);
+    cch = StringFromGUID2(&CLSID_WinBaseXLaunchBroker, rgClsid, WBX_GUID_CCH);
     if (0 == cch)
     {
         rgClsid[0] = 0;
@@ -685,7 +680,7 @@ static int Register(void)
 
     lstrcpyW(szSub, WBX_CLSID_PREFIX);
     lstrcatW(szSub, rgClsid);
-    lr = RegSetStringW(HKEY_CURRENT_USER, szSub, NULL, pState->pszFriendlyName);
+    lr = RegSetStringW(HKEY_CURRENT_USER, szSub, NULL, WBX_FRIENDLY_NAME);
     RETURN_VALUE_IF_NOT(ERROR_SUCCESS == lr, 1);
 
     lstrcpyW(szSub, WBX_CLSID_PREFIX);
@@ -759,8 +754,11 @@ static int RunComServer(void)
     hrInit             = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     RETURN_VALUE_IF(FAILED(hrInit), 1);
     dwCookie = 0;
-    hrReg    = CoRegisterClassObject(
-        &pState->clsid, (IUnknown*)&pState->factory, CLSCTX_LOCAL_SERVER, REGCLS_MULTIPLEUSE, &dwCookie);
+    hrReg    = CoRegisterClassObject(&CLSID_WinBaseXLaunchBroker,
+                                     (IUnknown*)&pState->factory,
+                                     CLSCTX_LOCAL_SERVER,
+                                     REGCLS_MULTIPLEUSE,
+                                     &dwCookie);
     if (FAILED(hrReg))
     {
         CoUninitialize();
@@ -793,54 +791,6 @@ BOOL StateInit(void)
     TlsSetValue(s_dwTlsState, pState);
     pState->factory.vtbl = &s_ClassFactoryVtbl;
     return TRUE;
-}
-
-/* W variant: the worker -- validate the (wide) registration parameter and store it into state. */
-BOOL LoadRegistrationW(const WINBASEX_REGISTRATION_PROPERTIESW* pReg)
-{
-    WBX_STATE* pState;
-
-    pState = GetState();
-    RETURN_FALSE_IF_NULL(pReg);
-    RETURN_FALSE_IF(sizeof((*pReg)) > pReg->cb);
-    RETURN_FALSE_IF_NULL(pReg->lpClsid);
-    RETURN_FALSE_IF_NULL(pReg->lpFriendlyName);
-    RETURN_FALSE_IF_NONZERO(pReg->dwFlags);
-    pState->clsid           = *pReg->lpClsid;
-    pState->pszFriendlyName = pReg->lpFriendlyName;
-    if (!pReg->lpLaunchHistoryKey)
-    {
-        pState->pszLaunchHistoryKey = WBX_DEFAULT_LIST_KEY;
-    }
-    else
-    {
-        pState->pszLaunchHistoryKey = pReg->lpLaunchHistoryKey;
-    }
-    pState->fRegistrationLoaded = TRUE;
-    return TRUE;
-}
-
-/* A variant: convert the ANSI registration parameter up to wide, then call the W variant. */
-BOOL LoadRegistrationA(const WINBASEX_REGISTRATION_PROPERTIESA* pReg)
-{
-    WBX_STATE*                        pState;
-    WINBASEX_REGISTRATION_PROPERTIESW regW;
-
-    RETURN_FALSE_IF_NULL(pReg);
-    pState = GetState();
-    SecureZeroMemory(&regW, sizeof(regW));
-    regW.cb      = (DWORD)sizeof(regW);
-    regW.lpClsid = pReg->lpClsid;
-    regW.dwFlags = pReg->dwFlags;
-    if (pReg->lpFriendlyName)
-    {
-        regW.lpFriendlyName = SafeMultiByteToWideChar(pReg->lpFriendlyName, pState->szFriendlyName, WBX_NAME_CCH);
-    }
-    if (pReg->lpLaunchHistoryKey)
-    {
-        regW.lpLaunchHistoryKey = SafeMultiByteToWideChar(pReg->lpLaunchHistoryKey, pState->szHistoryKey, MAX_PATH);
-    }
-    return LoadRegistrationW(&regW);
 }
 
 /* Shared mode dispatch (charset-independent). Sets (*pfProceed) when the caller should go on to

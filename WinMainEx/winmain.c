@@ -10,15 +10,16 @@
 #pragma comment(lib, "user32.lib")
 
 #define WIN32_LEAN_AND_MEAN
-#define INITGUID
 
 #include <windows.h>
 #include <windowsx.h>
-#include <initguid.h>
 #include "WinBaseX.h"
 #include "WinUserX.h"
 
-DEFINE_GUID(CLSID_WinMainEx, 0xE5F1A9C2, 0x8B7D, 0x4E3F, 0xA1, 0x5C, 0x9D, 0x2E, 0x7B, 0x6F, 0x4A, 0x83);
+/* Client-owned window-class name and caption -- UI identity, distinct from the WinBaseX launch
+   broker's COM identity (CLSID_WinBaseXLaunchBroker), which the library owns. */
+#define WC_WINMAINEX  TEXT("WinMainEx")
+#define WMX_WND_TITLE TEXT("WinMainEx")
 
 static ATOM             MyRegisterClass(HINSTANCE hInstance);
 static BOOL             InitInstance(HINSTANCE hInstance);
@@ -73,9 +74,6 @@ static BOOL InitInstance(HINSTANCE hInstance)
     }
     return TRUE;
 }
-
-const WINBASEX_REGISTRATION_PROPERTIES WinBaseXRegistration = {
-    sizeof(WinBaseXRegistration), &CLSID_WinMainEx, WMX_FRIENDLY_NAME, WMX_LIST_KEY, 0};
 
 static void CALLBACK OnDestroy(HWND hwnd)
 {

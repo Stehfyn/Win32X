@@ -14,15 +14,11 @@ BOOL StateInit(void);
 int  RunCommon(BOOL* pfProceed);
 void StoreClientA(WBX_PFN_WINMAINEXA pfnWinMainEx);
 void StoreClientW(WBX_PFN_WINMAINEXW pfnWinMainEx);
-BOOL LoadRegistrationA(const WINBASEX_REGISTRATION_PROPERTIESA* lpRegistrationProperties);
-BOOL LoadRegistrationW(const WINBASEX_REGISTRATION_PROPERTIESW* lpRegistrationProperties);
 
 #ifdef UNICODE
-#define StoreClient      StoreClientW
-#define LoadRegistration LoadRegistrationW
+#define StoreClient StoreClientW
 #else
-#define StoreClient      StoreClientA
-#define LoadRegistration LoadRegistrationA
+#define StoreClient StoreClientA
 #endif
 
 static int GetShowCmd(const STARTUPINFO* psi)
@@ -34,7 +30,7 @@ static int GetShowCmd(const STARTUPINFO* psi)
     return SW_SHOWDEFAULT;
 }
 
-int __cdecl WinBaseXRun(WBX_PFN_WINMAINEX pfnWinMainEx, const WINBASEX_REGISTRATION_PROPERTIES* pReg)
+int __cdecl WinBaseXRun(WBX_PFN_WINMAINEX pfnWinMainEx)
 {
     STARTUPINFO si;
     BOOL        fProceed;
@@ -42,7 +38,6 @@ int __cdecl WinBaseXRun(WBX_PFN_WINMAINEX pfnWinMainEx, const WINBASEX_REGISTRAT
 
     RETURN_VALUE_IF_NOT(StateInit(), 3);
     StoreClient(pfnWinMainEx);
-    RETURN_VALUE_IF_NOT(LoadRegistration(pReg), 3);
     rc = RunCommon(&fProceed);
     RETURN_VALUE_IF_NOT(fProceed, rc);
     GetStartupInfo(&si);

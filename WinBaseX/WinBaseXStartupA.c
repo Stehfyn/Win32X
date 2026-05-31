@@ -20,5 +20,5 @@
 
 void __cdecl WinMainCRTStartup(void)
 {
-    ExitProcess((UINT)WinBaseXRun(_tWinMainEx, &WinBaseXRegistration));
+    ExitProcess((UINT)WinBaseXRun(_tWinMainEx));
 }
