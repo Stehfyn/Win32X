@@ -53,6 +53,16 @@ public class WmxProbe {
   [DllImport("user32.dll", EntryPoint="GetMonitorInfoW")] public static extern bool GetMonitorInfo(IntPtr h, ref MI mi);
   [DllImport("user32.dll")] public static extern IntPtr GetWindowDpiAwarenessContext(IntPtr h);
   [DllImport("user32.dll")] public static extern int GetAwarenessFromDpiAwarenessContext(IntPtr c);
+  [DllImport("user32.dll")] public static extern int GetSystemMetrics(int i);
+  [DllImport("user32.dll")] public static extern IntPtr MonitorFromPoint(POINT pt, int f);
+  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int x,y; }
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] public struct SI {
+    public int cb; public IntPtr r1, desktop, title;
+    public int dwX,dwY,dwXSize,dwYSize,dwXCount,dwYCount,dwFill,dwFlags;
+    public short wShow, cbR2; public IntPtr lpR2, hIn, hOut, hErr; }
+  [StructLayout(LayoutKind.Sequential)] public struct PI { public IntPtr hp, ht; public int pid, tid; }
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] public static extern bool CreateProcessW(
+    string app, IntPtr cmd, IntPtr pa, IntPtr ta, bool inh, int flags, IntPtr env, string dir, ref SI si, out PI pi);
 }
 "@
 [void][WmxProbe]::SetProcessDpiAwarenessContext([IntPtr](-4))   # PER_MONITOR_AWARE_V2
