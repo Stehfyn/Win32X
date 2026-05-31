@@ -22,9 +22,6 @@
 #define STARTF_HASSHELLDATA 0x00000400
 #endif
 
-#define DEFAULT_PCT_NUM 67
-#define DEFAULT_PCT_DEN 100
-
 HMONITOR WINAPI GetStartupMonitor(_In_ DWORD dwFlags)
 {
     STARTUPINFO si;
@@ -51,7 +48,7 @@ HMONITOR WINAPI GetStartupMonitor(_In_ DWORD dwFlags)
 }
 
 _Success_(return != FALSE)
-BOOL WINAPI CalculateWindowStartupPosition(_In_ const SIZE* pDefaultSize, _Out_ RECT* prcOut)
+BOOL WINAPI CalculateWindowStartupPosition(_Out_ RECT* prcOut)
 {
     STARTUPINFO si;
     HMONITOR    hMonitor;
@@ -69,7 +66,6 @@ BOOL WINAPI CalculateWindowStartupPosition(_In_ const SIZE* pDefaultSize, _Out_ 
     BOOL        fOffsetXNonNeg;
     BOOL        fOffsetYNonNeg;
 
-    RETURN_FALSE_IF_NULL(pDefaultSize);
     RETURN_FALSE_IF_NULL(prcOut);
 
     SecureZeroMemory(&si, sizeof(si));
@@ -85,7 +81,10 @@ BOOL WINAPI CalculateWindowStartupPosition(_In_ const SIZE* pDefaultSize, _Out_ 
     nWorkWidth  = RECTWIDTH(mi.rcWork);
     nWorkHeight = RECTHEIGHT(mi.rcWork);
 
-    /* Extent: the launcher's STARTF_USESIZE wins; otherwise the caller's default extent applies. */
+    /* Extent: the launcher's STARTF_USESIZE wins; otherwise the window manager's own default applies --
+       three-quarters of this (launch) monitor's work area per axis, matching win32kfull!SetTiledRect.
+       The app is per-monitor DPI-aware, so mi.rcWork is the target monitor's physical work area at its
+       own DPI; the ratio is therefore taken against the monitor the window will actually appear on. */
     fUseSize = IsFlagSet(si.dwFlags, STARTF_USESIZE);
     if (fUseSize)
     {
@@ -94,7 +93,8 @@ BOOL WINAPI CalculateWindowStartupPosition(_In_ const SIZE* pDefaultSize, _Out_ 
     }
     else
     {
-        size = (*pDefaultSize);
+        size.cx = THREEQUARTERS(nWorkWidth);
+        size.cy = THREEQUARTERS(nWorkHeight);
     }
 
     /* Position: the launcher's STARTF_USEPOSITION wins; otherwise center the extent in the work area.
@@ -132,9 +132,6 @@ BOOL WINAPI ShowWindowEx(_In_ HWND hwnd, _In_ int nShowEx)
 {
     BOOL fStartup;
     BOOL fGotPos;
-    RECT rcWork;
-    BOOL fGotWork;
-    SIZE sizeDefault;
     RECT rcPos;
     int  nX;
     int  nY;
@@ -147,17 +144,12 @@ BOOL WINAPI ShowWindowEx(_In_ HWND hwnd, _In_ int nShowEx)
         return ShowWindow(hwnd, nShowEx);
     }
 
-    /* Default extent: a fraction of the primary work area. CalculateWindowStartupPosition then places
-       it on the launch monitor, honoring any STARTUPINFO size/position override. */
-    fGotPos = FALSE;
-    SecureZeroMemory(&rcWork, sizeof(rcWork));
-    fGotWork = SystemParametersInfo(SPI_GETWORKAREA, 0, &rcWork, 0);
-    if (fGotWork)
-    {
-        sizeDefault.cx = (RECTWIDTH(rcWork) * DEFAULT_PCT_NUM) / DEFAULT_PCT_DEN;
-        sizeDefault.cy = (RECTHEIGHT(rcWork) * DEFAULT_PCT_NUM) / DEFAULT_PCT_DEN;
-        fGotPos        = CalculateWindowStartupPosition(&sizeDefault, &rcPos);
-    }
+    /* Place per the launch policy: CalculateWindowStartupPosition sizes the window to three-quarters of
+       the launch monitor's work area (matching win32kfull!SetTiledRect) and positions it there,
+       honoring any STARTUPINFO size/position override. Because the app is per-monitor DPI-aware, that
+       work area is the target monitor's physical extent at its own DPI -- so the default tracks the OS
+       contract on whichever monitor the launch resolves to, not the primary. */
+    fGotPos = CalculateWindowStartupPosition(&rcPos);
 
     /* With a computed rectangle, position and show in one operation -- SWP_SHOWWINDOW shows and
        activates as it places, so CalculateWindowStartupPosition's STARTUPINFO-derived placement is

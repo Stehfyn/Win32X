@@ -33,6 +33,12 @@
    max(min(x, hi), lo) but without pulling in <windows.h>. */
 #define BOUND(x, lo, hi) (((x) < (lo)) ? (lo) : (((hi) < (x)) ? (hi) : (x)))
 
+/* Three-quarters of a dimension, rounded to nearest (the +2 is +4/2 -- round-half-up applied before
+   the integer divide). This is the Win32 window manager's default top-level window extent: a
+   CW_USEDEFAULT overlapped window is sized to (3*workarea + 2)/4 per axis, computed in
+   win32kfull!SetTiledRect (verified by disassembly, build 10.0.26100). `dim` is evaluated once. */
+#define THREEQUARTERS(dim) (((3 * (dim)) + 2) / 4)
+
 /* Bit-flag operations on an lvalue integer `obj`. `f` is the mask. */
 #define SetFlag(obj, f)     do { (obj) |=  (f); } while (0)
 #define ToggleFlag(obj, f)  do { (obj) ^=  (f); } while (0)
