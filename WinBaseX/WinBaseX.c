@@ -29,6 +29,7 @@
 #define INITGUID
 
 #include "WinBaseX.h"
+#include "windefx.h"
 #include <windowsx.h>
 #include <initguid.h>
 #include <objbase.h>
@@ -237,14 +238,14 @@ static void WbxFillStartupInfo(const CommandObject* pObj, STARTUPINFOW* psi, BOO
     psi->cb = (DWORD)sizeof((*psi));
     if (pObj->show_set)
     {
-        psi->dwFlags     |= STARTF_USESHOWWINDOW;
-        psi->wShowWindow  = (WORD)pObj->show_window;
+        SetFlag(psi->dwFlags, STARTF_USESHOWWINDOW);
+        psi->wShowWindow = (WORD)pObj->show_window;
     }
     if (fForwardChild && pObj->pos_set)
     {
-        psi->dwFlags |= STARTF_USEPOSITION;
-        psi->dwX      = (DWORD)pObj->pos.x;
-        psi->dwY      = (DWORD)pObj->pos.y;
+        SetFlag(psi->dwFlags, STARTF_USEPOSITION);
+        psi->dwX = (DWORD)pObj->pos.x;
+        psi->dwY = (DWORD)pObj->pos.y;
     }
 }
 
@@ -479,7 +480,7 @@ static HRESULT STDMETHODCALLTYPE ExecuteCommand_Execute(IExecuteCommand* pThis)
     WbxFillStartupInfo(pObj, &si, TRUE);
     if (fRegistered)
     {
-        si.dwFlags |= STARTF_FORCEOFFFEEDBACK;
+        SetFlag(si.dwFlags, STARTF_FORCEOFFFEEDBACK);
     }
 
     pszDir = NULL;
@@ -1023,7 +1024,7 @@ static int WbxCallClientFromStartup(LPWSTR pszCmdLine, const STARTUPINFOW* psi)
 
     pState    = WbxState();
     hInstance = GetModuleHandleW(NULL);
-    fUseShow  = !!(STARTF_USESHOWWINDOW & psi->dwFlags);
+    fUseShow  = IsFlagSet(psi->dwFlags, STARTF_USESHOWWINDOW);
     nShowCmd  = SW_SHOWDEFAULT;
     if (fUseShow)
     {

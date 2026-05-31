@@ -31,5 +31,8 @@
     <ClInclude Include="WinUserX.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="windefx.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>

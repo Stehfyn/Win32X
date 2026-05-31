@@ -15,6 +15,7 @@
 #endif
 
 #include "WinUserX.h"
+#include "windefx.h"
 
 #ifndef STARTF_HASSHELLDATA
 #define STARTF_HASSHELLDATA 0x00000400
@@ -36,13 +37,13 @@ HMONITOR WINAPI MonitorFromStartupInfo(_In_opt_ const STARTUPINFO* psi, _In_ DWO
         return MonitorFromPoint(pt, dwFlags);
     }
 
-    fHasShellData = !!(STARTF_HASSHELLDATA & psi->dwFlags);
+    fHasShellData = IsFlagSet(psi->dwFlags, STARTF_HASSHELLDATA);
     if (fHasShellData)
     {
         return (HMONITOR)psi->hStdOutput;
     }
 
-    fUsePosition = !!(STARTF_USEPOSITION & psi->dwFlags);
+    fUsePosition = IsFlagSet(psi->dwFlags, STARTF_USEPOSITION);
     if (fUsePosition)
     {
         pt.x = (LONG)psi->dwX;
@@ -88,11 +89,11 @@ BOOL WINAPI CalculateWindowStartupPosition(_In_ const SIZE* pDefaultSize, _Out_ 
         return FALSE;
     }
 
-    nWorkWidth  = mi.rcWork.right  - mi.rcWork.left;
-    nWorkHeight = mi.rcWork.bottom - mi.rcWork.top;
+    nWorkWidth  = RECTWIDTH(mi.rcWork);
+    nWorkHeight = RECTHEIGHT(mi.rcWork);
 
     /* Extent: the launcher's STARTF_USESIZE wins; otherwise the caller's default extent applies. */
-    fUseSize = !!(STARTF_USESIZE & si.dwFlags);
+    fUseSize = IsFlagSet(si.dwFlags, STARTF_USESIZE);
     if (fUseSize)
     {
         size.cx = (LONG)si.dwXSize;
@@ -107,7 +108,7 @@ BOOL WINAPI CalculateWindowStartupPosition(_In_ const SIZE* pDefaultSize, _Out_ 
        An over-large extent is anchored at the work origin without branching on the offset -- the mask
        is all-ones when the offset is non-negative and zero when it is negative, so a negative offset
        collapses to 0 before it reaches the output (see conventions C5045 dataflow). */
-    fUsePosition = !!(STARTF_USEPOSITION & si.dwFlags);
+    fUsePosition = IsFlagSet(si.dwFlags, STARTF_USEPOSITION);
     if (fUsePosition)
     {
         nLeft = (LONG)si.dwX;
@@ -160,8 +161,8 @@ BOOL WINAPI ShowWindowEx(_In_ HWND hwnd, _In_ int nShowEx)
     fGotWork = SystemParametersInfo(SPI_GETWORKAREA, 0, &rcWork, 0);
     if (fGotWork)
     {
-        sizeDefault.cx = ((rcWork.right - rcWork.left) * DEFAULT_PCT_NUM) / DEFAULT_PCT_DEN;
-        sizeDefault.cy = ((rcWork.bottom - rcWork.top) * DEFAULT_PCT_NUM) / DEFAULT_PCT_DEN;
+        sizeDefault.cx = (RECTWIDTH(rcWork) * DEFAULT_PCT_NUM) / DEFAULT_PCT_DEN;
+        sizeDefault.cy = (RECTHEIGHT(rcWork) * DEFAULT_PCT_NUM) / DEFAULT_PCT_DEN;
         fGotPos        = CalculateWindowStartupPosition(&sizeDefault, &rcPos);
     }
 
@@ -173,8 +174,8 @@ BOOL WINAPI ShowWindowEx(_In_ HWND hwnd, _In_ int nShowEx)
     {
         nX      = (int)rcPos.left;
         nY      = (int)rcPos.top;
-        nWidth  = (int)(rcPos.right - rcPos.left);
-        nHeight = (int)(rcPos.bottom - rcPos.top);
+        nWidth  = (int)RECTWIDTH(rcPos);
+        nHeight = (int)RECTHEIGHT(rcPos);
         SetWindowPos(hwnd, HWND_TOP, nX, nY, nWidth, nHeight, SWP_SHOWWINDOW);
     }
     else

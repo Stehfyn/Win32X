@@ -59,7 +59,7 @@ static int WbxShowCmd(const STARTUPINFO* psi)
 {
     BOOL fUseShow;
 
-    fUseShow = !!(STARTF_USESHOWWINDOW & psi->dwFlags);
+    fUseShow = IsFlagSet(psi->dwFlags, STARTF_USESHOWWINDOW);
     if (fUseShow)
     {
         return (int)psi->wShowWindow;
