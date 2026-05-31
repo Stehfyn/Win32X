@@ -31,6 +31,7 @@
 #include "WinBaseX.h"
 #include "windefx.h"
 #include "result.h"
+#include "processenvx.h"
 #include <windowsx.h>
 #include <initguid.h>
 #include <objbase.h>
@@ -155,45 +156,6 @@ BOOL WINAPI IsWinBaseXComServer(void)
     pState = GetState();
     RETURN_FALSE_IF_NULL(pState);
     return pState->fComServer;
-}
-
-/* Whole-token, case-insensitive search across the (always wide) command line. */
-static BOOL IsArg(LPCWSTR pszCmd, LPCWSTR pszTarget)
-{
-    LPCWSTR p;
-    int     cchTarget;
-    WCHAR   chPre;
-    WCHAR   chPost;
-    BOOL    fTokenStart;
-    BOOL    fMatch;
-    BOOL    fTokenEnd;
-
-    cchTarget = lstrlenW(pszTarget);
-    for (p = pszCmd; (*p); p++)
-    {
-        if (p == pszCmd)
-        {
-            chPre = L' ';
-        }
-        else
-        {
-            chPre = p[-1];
-        }
-        fTokenStart = (L' ' == chPre) || (L'"' == chPre);
-        if (!fTokenStart)
-        {
-            continue;
-        }
-        fMatch = (CSTR_EQUAL == CompareStringOrdinal(p, cchTarget, pszTarget, cchTarget, TRUE));
-        if (!fMatch)
-        {
-            continue;
-        }
-        chPost    = p[cchTarget];
-        fTokenEnd = (!chPost) || (L' ' == chPost) || (L'"' == chPost);
-        RETURN_TRUE_IF(fTokenEnd);
-    }
-    return FALSE;
 }
 
 static void RecordExe(LPCWSTR pszPath)
@@ -886,7 +848,6 @@ BOOL LoadRegistrationA(const WINBASEX_REGISTRATION_PROPERTIESA* pReg)
 int RunCommon(BOOL* pfProceed)
 {
     WBX_STATE* pState;
-    LPCWSTR    pszCmd;
     BOOL       fUnregister;
     BOOL       fEmbedding;
 
@@ -895,9 +856,8 @@ int RunCommon(BOOL* pfProceed)
 
     GetModuleFileName(NULL, pState->szMyPath, MAX_PATH);
 
-    pszCmd      = GetCommandLine();
-    fUnregister = IsArg(pszCmd, L"/unregister");
-    fEmbedding  = IsArg(pszCmd, L"-Embedding") || IsArg(pszCmd, L"/Embedding");
+    fUnregister = !!GetCommandLineArgument(TEXT("/unregister"));
+    fEmbedding  = !!GetCommandLineArgument(TEXT("-Embedding")) || !!GetCommandLineArgument(TEXT("/Embedding"));
     if (fUnregister)
     {
         return Unregister();

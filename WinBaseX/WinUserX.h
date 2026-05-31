@@ -40,8 +40,10 @@ BOOL WINAPI CalculateWindowStartupPosition(_In_ const SIZE* pDefaultSize, _Out_ 
 /*
  * ShowWindowEx -- ShowWindow extended with startup-aware commands. SWX_SHOWSTARTUP runs the full
  * first-show sequence: size to a default fraction of the work area, position via
- * CalculateWindowStartupPosition (honoring STARTUPINFO), show with SW_SHOWNORMAL, and bring to the
- * foreground. Any other nShowEx is forwarded to ShowWindow unchanged -- so a caller wanting the
+ * CalculateWindowStartupPosition (honoring STARTUPINFO), and show with an activating command
+ * (SWP_SHOWWINDOW when placed, else SW_SHOWNORMAL) -- which foregrounds a foreground-entitled launch
+ * without forcing (no SetForegroundWindow focus-steal). Any other nShowEx is forwarded to ShowWindow
+ * unchanged -- so a caller wanting the
  * STARTUPINFO show state passes SW_SHOWDEFAULT directly, the way CW_USEDEFAULT is opted into.
  * Returns the show result (TRUE when the startup sequence ran).
  */

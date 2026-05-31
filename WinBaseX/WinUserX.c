@@ -176,6 +176,9 @@ BOOL WINAPI ShowWindowEx(_In_ HWND hwnd, _In_ int nShowEx)
         ShowWindow(hwnd, SW_SHOWNORMAL);
     }
 
-    SetForegroundWindow(hwnd);
+    /* Deliberately no SetForegroundWindow: the activating show above (SWP_SHOWWINDOW / SW_SHOWNORMAL)
+       already brings a foreground-entitled launch to front. Forcing it would presume foreground rights
+       we may not hold, and would steal focus if the user has moved on since launch -- the focus-steal
+       the OS suppresses. An unentitled show flashes the taskbar instead, which is the correct cue. */
     return TRUE;
 }
