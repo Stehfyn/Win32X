@@ -26,6 +26,35 @@ static BOOL             InitInstance(HINSTANCE hInstance);
 static void    CALLBACK OnDestroy(HWND hwnd);
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
+int WINAPI _tWinMainEx(_In_ HINSTANCE          hInstance,
+                       _In_opt_ HINSTANCE      hPrevInstance,
+                       _In_ LPTSTR             lpCmdLine,
+                       _In_ int                nShowCmd,
+                       _In_ const STARTUPINFO* lpStartupInfo)
+{
+    MSG msg;
+
+    UNREFERENCED_PARAMETER(hPrevInstance);
+    UNREFERENCED_PARAMETER(lpCmdLine);
+    UNREFERENCED_PARAMETER(nShowCmd);
+    UNREFERENCED_PARAMETER(lpStartupInfo);
+
+    /* RegisterClass returns 0 on a repeated activation (ERROR_CLASS_ALREADY_EXISTS); harmless --
+       the class stays registered, so InitInstance's CreateWindowEx succeeds regardless. */
+    MyRegisterClass(hInstance);
+    if (!InitInstance(hInstance))
+    {
+        return 0;
+    }
+
+    while (0 < GetMessage(&msg, NULL, 0, 0))
+    {
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+    }
+    return 0;
+}
+
 /* Registers the window class. */
 static ATOM MyRegisterClass(HINSTANCE hInstance)
 {
@@ -92,33 +121,4 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         HANDLE_MSG(hwnd, WM_DESTROY, OnDestroy);
     }
     return DefWindowProc(hwnd, uMsg, wParam, lParam);
-}
-
-int WINAPI _tWinMainEx(_In_ HINSTANCE          hInstance,
-                       _In_opt_ HINSTANCE      hPrevInstance,
-                       _In_ LPTSTR             lpCmdLine,
-                       _In_ int                nShowCmd,
-                       _In_ const STARTUPINFO* lpStartupInfo)
-{
-    MSG msg;
-
-    UNREFERENCED_PARAMETER(hPrevInstance);
-    UNREFERENCED_PARAMETER(lpCmdLine);
-    UNREFERENCED_PARAMETER(nShowCmd);
-    UNREFERENCED_PARAMETER(lpStartupInfo);
-
-    /* RegisterClass returns 0 on a repeated activation (ERROR_CLASS_ALREADY_EXISTS); harmless --
-       the class stays registered, so InitInstance's CreateWindowEx succeeds regardless. */
-    MyRegisterClass(hInstance);
-    if (!InitInstance(hInstance))
-    {
-        return 0;
-    }
-
-    while (0 < GetMessage(&msg, NULL, 0, 0))
-    {
-        TranslateMessage(&msg);
-        DispatchMessage(&msg);
-    }
-    return 0;
 }
