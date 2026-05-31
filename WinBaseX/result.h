@@ -31,13 +31,13 @@
     } while (0)
 
 #define RETURN_VOID_IF_NOT(expr)        RETURN_VOID_IF(!(expr))
-#define RETURN_VOID_IF_NULL(ptr)        RETURN_VOID_IF(NULL == (ptr))
+#define RETURN_VOID_IF_NULL(ptr)        RETURN_VOID_IF(!(ptr))
 #define RETURN_VOID_IF_ZERO(expr)       RETURN_VOID_IF(0 == (expr))
 #define RETURN_VOID_IF_NOT_POSITIVE(v)  RETURN_VOID_IF(0 >= (v))
 #define RETURN_VOID_IF_NEGATIVE(v)      RETURN_VOID_IF(0 > (v))
 
 #define RETURN_VALUE_IF_NOT(expr, value)        RETURN_VALUE_IF(!(expr), value)
-#define RETURN_VALUE_IF_NULL(ptr, value)        RETURN_VALUE_IF(NULL == (ptr), value)
+#define RETURN_VALUE_IF_NULL(ptr, value)        RETURN_VALUE_IF(!(ptr), value)
 #define RETURN_VALUE_IF_ZERO(expr, value)       RETURN_VALUE_IF(0 == (expr), value)
 #define RETURN_VALUE_IF_NOT_POSITIVE(v, value)  RETURN_VALUE_IF(0 >= (v), value)
 #define RETURN_VALUE_IF_NEGATIVE(v, value)      RETURN_VALUE_IF(0 > (v), value)

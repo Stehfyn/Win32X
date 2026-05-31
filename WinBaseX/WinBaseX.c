@@ -282,7 +282,7 @@ static ULONG Command_Release(CommandObject* pObj)
     lRef = InterlockedDecrement(&pObj->ref);
     if (0 == lRef)
     {
-        if (NULL != pObj->selection)
+        if (pObj->selection)
         {
             IShellItemArray_Release(pObj->selection);
         }
@@ -319,7 +319,7 @@ static HRESULT STDMETHODCALLTYPE ExecuteCommand_SetParameters(IExecuteCommand* p
     CommandObject* pObj;
 
     pObj = EC_OBJ(pThis);
-    if (NULL != pszParams)
+    if (pszParams)
     {
         (void)lstrcpynW(pObj->params, pszParams, WBX_PARAMS_CCH);
     }
@@ -398,7 +398,7 @@ static HRESULT STDMETHODCALLTYPE ExecuteCommand_Execute(IExecuteCommand* pThis)
     pObj   = EC_OBJ(pThis);
     pState = pObj->pState;
 
-    if (NULL == pObj->selection)
+    if (!pObj->selection)
     {
         FillStartupInfoW(pObj, &si, FALSE);
         CallClientFromStartupW(pObj->params, &si);
@@ -410,7 +410,7 @@ static HRESULT STDMETHODCALLTYPE ExecuteCommand_Execute(IExecuteCommand* pThis)
     pszPath = NULL;
     hr      = IShellItem_GetDisplayName(pItem, SIGDN_FILESYSPATH, &pszPath);
     IShellItem_Release(pItem);
-    RETURN_VALUE_IF(FAILED(hr) || (NULL == pszPath), hr);
+    RETURN_VALUE_IF(FAILED(hr) || (!pszPath), hr);
 
     fIsSelf = (CSTR_EQUAL == CompareStringOrdinal(pszPath, -1, pState->szMyPath, -1, TRUE));
     if (fIsSelf)
@@ -548,12 +548,12 @@ static HRESULT STDMETHODCALLTYPE ObjectWithSelection_SetSelection(IObjectWithSel
     CommandObject* pObj;
 
     pObj = OWS_OBJ(pThis);
-    if (NULL != pObj->selection)
+    if (pObj->selection)
     {
         IShellItemArray_Release(pObj->selection);
     }
     pObj->selection = psia;
-    if (NULL != psia)
+    if (psia)
     {
         IShellItemArray_AddRef(psia);
     }
@@ -565,7 +565,7 @@ static HRESULT STDMETHODCALLTYPE ObjectWithSelection_GetSelection(IObjectWithSel
     CommandObject* pObj;
 
     pObj = OWS_OBJ(pThis);
-    if (NULL == pObj->selection)
+    if (!pObj->selection)
     {
         (*ppv) = NULL;
         return E_FAIL;
@@ -618,7 +618,7 @@ static HRESULT STDMETHODCALLTYPE ClassFactory_CreateInstance(IClassFactory* pThi
     UNREFERENCED_PARAMETER(pThis);
 
     (*ppv) = NULL;
-    RETURN_VALUE_IF_NOT(NULL == pOuter, CLASS_E_NOAGGREGATION);
+    RETURN_VALUE_IF_NOT(!pOuter, CLASS_E_NOAGGREGATION);
     pObj = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(CommandObject));
     RETURN_VALUE_IF_NULL(pObj, E_OUTOFMEMORY);
     pObj->vtbl_ec  = &s_ExecuteCommandVtbl;
@@ -684,7 +684,7 @@ LONG RegSetStringA(HKEY hParent, LPCSTR pszSubKey, LPCSTR pszName, LPCSTR pszVal
     (void)MultiByteToWideChar(CP_ACP, 0, pszSubKey, -1, szSubKey, WBX_SUBKEY_CCH);
     (void)MultiByteToWideChar(CP_ACP, 0, pszValue, -1, szValue, MAX_PATH);
     pszNameW = NULL;
-    if (NULL != pszName)
+    if (pszName)
     {
         szName[0] = 0;
         (void)MultiByteToWideChar(CP_ACP, 0, pszName, -1, szName, WBX_SUBKEY_CCH);
@@ -822,11 +822,11 @@ BOOL LoadRegistrationW(const WINBASEX_REGISTRATION_PROPERTIESW* pReg)
 
     pState = GetState();
     RETURN_FALSE_IF_NULL(pReg);
-    RETURN_FALSE_IF((sizeof((*pReg)) > pReg->cb) || (NULL == pReg->lpClsid) ||
-                    (NULL == pReg->lpFriendlyName) || (0 != pReg->dwFlags));
+    RETURN_FALSE_IF((sizeof((*pReg)) > pReg->cb) || (!pReg->lpClsid) ||
+                    (!pReg->lpFriendlyName) || (0 != pReg->dwFlags));
     pState->clsid           = *pReg->lpClsid;
     pState->pszFriendlyName = pReg->lpFriendlyName;
-    if (NULL == pReg->lpLaunchHistoryKey)
+    if (!pReg->lpLaunchHistoryKey)
     {
         pState->pszLaunchHistoryKey = WBX_DEFAULT_LIST_KEY;
     }
@@ -850,12 +850,12 @@ BOOL LoadRegistrationA(const WINBASEX_REGISTRATION_PROPERTIESA* pReg)
     regW.cb      = (DWORD)sizeof(regW);
     regW.lpClsid = pReg->lpClsid;
     regW.dwFlags = pReg->dwFlags;
-    if (NULL != pReg->lpFriendlyName)
+    if (pReg->lpFriendlyName)
     {
         (void)MultiByteToWideChar(CP_ACP, 0, pReg->lpFriendlyName, -1, pState->szFriendlyName, WBX_NAME_CCH);
         regW.lpFriendlyName = pState->szFriendlyName;
     }
-    if (NULL != pReg->lpLaunchHistoryKey)
+    if (pReg->lpLaunchHistoryKey)
     {
         (void)MultiByteToWideChar(CP_ACP, 0, pReg->lpLaunchHistoryKey, -1, pState->szHistoryKey, MAX_PATH);
         regW.lpLaunchHistoryKey = pState->szHistoryKey;
@@ -880,8 +880,14 @@ int RunCommon(BOOL* pfProceed)
     pszCmd      = GetCommandLine();
     fUnregister = IsArg(pszCmd, L"/unregister");
     fEmbedding  = IsArg(pszCmd, L"-Embedding") || IsArg(pszCmd, L"/Embedding");
-    RETURN_VALUE_IF(fUnregister, Unregister());
-    RETURN_VALUE_IF(fEmbedding, RunComServer());
+    if (fUnregister)
+    {
+        return Unregister();
+    }
+    if (fEmbedding)
+    {
+        return RunComServer();
+    }
     if (!IsRegistered())
     {
         Register();
@@ -967,7 +973,10 @@ static int CallClientFromStartupW(LPWSTR pszCmdLine, const STARTUPINFOW* psi)
     {
         nShowCmd = (int)psi->wShowWindow;
     }
-    RETURN_VALUE_IF(pState->fIsUnicode, pState->pfnWinMainExW(hInstance, NULL, pszCmdLine, nShowCmd, psi));
+    if (pState->fIsUnicode)
+    {
+        return pState->pfnWinMainExW(hInstance, NULL, pszCmdLine, nShowCmd, psi);
+    }
     StartupInfoWToA(psi, &siA);
     pszCmdLineA = CommandLineWToA(pszCmdLine);
     return pState->pfnWinMainExA(hInstance, NULL, pszCmdLineA, nShowCmd, &siA);
