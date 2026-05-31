@@ -37,5 +37,8 @@
     <ClInclude Include="result.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="delayimpx.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>

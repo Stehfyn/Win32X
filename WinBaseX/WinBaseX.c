@@ -63,7 +63,7 @@ typedef struct ClassFactory
     const IClassFactoryVtbl* vtbl;
 } ClassFactory;
 
-/* All mutable/config state. One heap instance per process, reached via State() (TLS). */
+/* All mutable/config state. One heap instance per process, reached via GetState() (TLS). */
 typedef struct WBX_STATE
 {
     /* client registration (loaded once) */
@@ -107,7 +107,7 @@ static DWORD s_dwTlsState = TLS_OUT_OF_INDEXES; /* the one irreducible root */
 
 /* ExecuteCommand_Execute (wide COM section) forwards a self/no-selection activation through here; the body is
    defined after the generated W/A call-client helpers exist. */
-static int   CallClientFromStartup(LPWSTR pszCmdLine, const STARTUPINFOW* psi);
+static int   CallClientFromStartupW(LPWSTR pszCmdLine, const STARTUPINFOW* psi);
 
 /* name/identifier paste used by the WinBaseXText.inl template: WBXCAT(STARTUPINFO, W) -> STARTUPINFOW,
    WBXNAME(CallClient) -> CallClient<WBXSUF>. */
@@ -127,10 +127,7 @@ _Check_return_ int __cdecl memcmp(_In_reads_bytes_(cb) const void* pvA,
     pbB = (const BYTE*)pvB;
     while (cb)
     {
-        if ((*pbA) != (*pbB))
-        {
-            return (int)(*pbA) - (int)(*pbB);
-        }
+        RETURN_VALUE_IF_NOT((*pbA) == (*pbB), (int)(*pbA) - (int)(*pbB));
         pbA++;
         pbB++;
         cb--;
@@ -138,7 +135,7 @@ _Check_return_ int __cdecl memcmp(_In_reads_bytes_(cb) const void* pvA,
     return 0;
 }
 
-static WBX_STATE* State(void)
+static WBX_STATE* GetState(void)
 {
     return (WBX_STATE*)TlsGetValue(s_dwTlsState);
 }
@@ -147,7 +144,7 @@ BOOL WINAPI IsWinBaseXComServer(void)
 {
     WBX_STATE* pState;
 
-    pState = State();
+    pState = GetState();
     RETURN_FALSE_IF_NULL(pState);
     return pState->fComServer;
 }
@@ -186,10 +183,7 @@ static BOOL IsArg(LPCWSTR pszCmd, LPCWSTR pszTarget)
         }
         chPost    = p[cchTarget];
         fTokenEnd = (!chPost) || (L' ' == chPost) || (L'"' == chPost);
-        if (fTokenEnd)
-        {
-            return TRUE;
-        }
+        RETURN_TRUE_IF(fTokenEnd);
     }
     return FALSE;
 }
@@ -201,7 +195,7 @@ static void RecordExe(LPCWSTR pszPath)
     HKEY               hKey;
     LONG               lr;
 
-    pState = State();
+    pState = GetState();
     lr     = RegCreateKeyExW(HKEY_CURRENT_USER, pState->pszLaunchHistoryKey, 0, NULL, 0, KEY_WRITE, NULL, &hKey, NULL);
     if (ERROR_SUCCESS == lr)
     {
@@ -218,7 +212,7 @@ static BOOL IsExeRegistered(LPCWSTR pszPath)
     LONG       lrQuery;
     BOOL       fFound;
 
-    pState = State();
+    pState = GetState();
     fFound = FALSE;
     lrOpen = RegOpenKeyExW(HKEY_CURRENT_USER, pState->pszLaunchHistoryKey, 0, KEY_QUERY_VALUE, &hKey);
     if (ERROR_SUCCESS == lrOpen)
@@ -230,7 +224,7 @@ static BOOL IsExeRegistered(LPCWSTR pszPath)
     return fFound;
 }
 
-static void FillStartupInfo(const CommandObject* pObj, STARTUPINFOW* psi, BOOL fForwardChild)
+static void FillStartupInfoW(const CommandObject* pObj, STARTUPINFOW* psi, BOOL fForwardChild)
 {
     SecureZeroMemory(psi, sizeof((*psi)));
     psi->cb = (DWORD)sizeof((*psi));
@@ -406,30 +400,24 @@ static HRESULT STDMETHODCALLTYPE ExecuteCommand_Execute(IExecuteCommand* pThis)
 
     if (NULL == pObj->selection)
     {
-        FillStartupInfo(pObj, &si, FALSE);
-        CallClientFromStartup(pObj->params, &si);
+        FillStartupInfoW(pObj, &si, FALSE);
+        CallClientFromStartupW(pObj->params, &si);
         return S_OK;
     }
 
     hr = IShellItemArray_GetItemAt(pObj->selection, 0, &pItem);
-    if (FAILED(hr))
-    {
-        return E_FAIL;
-    }
+    RETURN_VALUE_IF(FAILED(hr), E_FAIL);
     pszPath = NULL;
     hr      = IShellItem_GetDisplayName(pItem, SIGDN_FILESYSPATH, &pszPath);
     IShellItem_Release(pItem);
-    if (FAILED(hr) || (NULL == pszPath))
-    {
-        return hr;
-    }
+    RETURN_VALUE_IF(FAILED(hr) || (NULL == pszPath), hr);
 
     fIsSelf = (CSTR_EQUAL == CompareStringOrdinal(pszPath, -1, pState->szMyPath, -1, TRUE));
     if (fIsSelf)
     {
         CoTaskMemFree(pszPath);
-        FillStartupInfo(pObj, &si, FALSE);
-        CallClientFromStartup(pObj->params, &si);
+        FillStartupInfoW(pObj, &si, FALSE);
+        CallClientFromStartupW(pObj->params, &si);
         return S_OK;
     }
 
@@ -475,7 +463,7 @@ static HRESULT STDMETHODCALLTYPE ExecuteCommand_Execute(IExecuteCommand* pThis)
     }
     (*pszWrite) = 0;
 
-    FillStartupInfo(pObj, &si, TRUE);
+    FillStartupInfoW(pObj, &si, TRUE);
     if (fRegistered)
     {
         SetFlag(si.dwFlags, STARTF_FORCEOFFFEEDBACK);
@@ -630,18 +618,12 @@ static HRESULT STDMETHODCALLTYPE ClassFactory_CreateInstance(IClassFactory* pThi
     UNREFERENCED_PARAMETER(pThis);
 
     (*ppv) = NULL;
-    if (NULL != pOuter)
-    {
-        return CLASS_E_NOAGGREGATION;
-    }
+    RETURN_VALUE_IF_NOT(NULL == pOuter, CLASS_E_NOAGGREGATION);
     pObj = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(CommandObject));
-    if (NULL == pObj)
-    {
-        return E_OUTOFMEMORY;
-    }
+    RETURN_VALUE_IF_NULL(pObj, E_OUTOFMEMORY);
     pObj->vtbl_ec  = &s_ExecuteCommandVtbl;
     pObj->vtbl_ows = &s_ObjectWithSelectionVtbl;
-    pObj->pState   = State();
+    pObj->pState   = GetState();
     pObj->ref      = 1;
     InterlockedIncrement(&pObj->pState->nObjectCount);
     hr = Command_QueryInterface(pObj, riid, ppv);
@@ -666,7 +648,7 @@ static void                    ClsidString(WCHAR rgClsid[WBX_GUID_CCH])
 {
     int cch;
 
-    cch = StringFromGUID2(&State()->clsid, rgClsid, WBX_GUID_CCH);
+    cch = StringFromGUID2(&GetState()->clsid, rgClsid, WBX_GUID_CCH);
     if (0 == cch)
     {
         rgClsid[0] = 0;
@@ -681,10 +663,7 @@ LONG RegSetStringW(HKEY hParent, LPCWSTR pszSubKey, LPCWSTR pszName, LPCWSTR psz
     DWORD cbValue;
 
     lr = RegCreateKeyExW(hParent, pszSubKey, 0, NULL, 0, KEY_WRITE, NULL, &hKey, NULL);
-    if (ERROR_SUCCESS != lr)
-    {
-        return lr;
-    }
+    RETURN_VALUE_IF_NOT(ERROR_SUCCESS == lr, lr);
     cch     = lstrlenW(pszValue);
     cbValue = (DWORD)(((size_t)cch + 1u) * sizeof(WCHAR));
     lr      = RegSetValueExW(hKey, pszName, 0, REG_SZ, (const BYTE*)pszValue, cbValue);
@@ -721,36 +700,24 @@ static int Register(void)
     WCHAR      szSub[WBX_SUBKEY_CCH];
     LONG       lr;
 
-    pState = State();
+    pState = GetState();
     ClsidString(rgClsid);
 
     lstrcpyW(szSub, WBX_CLSID_PREFIX);
     lstrcatW(szSub, rgClsid);
     lr = RegSetStringW(HKEY_CURRENT_USER, szSub, NULL, pState->pszFriendlyName);
-    if (ERROR_SUCCESS != lr)
-    {
-        return 1;
-    }
+    RETURN_VALUE_IF_NOT(ERROR_SUCCESS == lr, 1);
 
     lstrcpyW(szSub, WBX_CLSID_PREFIX);
     lstrcatW(szSub, rgClsid);
     lstrcatW(szSub, L"\\LocalServer32");
     lr = RegSetStringW(HKEY_CURRENT_USER, szSub, NULL, pState->szMyPath);
-    if (ERROR_SUCCESS != lr)
-    {
-        return 1;
-    }
+    RETURN_VALUE_IF_NOT(ERROR_SUCCESS == lr, 1);
 
     lr = RegSetStringW(HKEY_CURRENT_USER, WBX_EXEFILE_CMD_KEY, NULL, L"\"%1\" %*");
-    if (ERROR_SUCCESS != lr)
-    {
-        return 1;
-    }
+    RETURN_VALUE_IF_NOT(ERROR_SUCCESS == lr, 1);
     lr = RegSetStringW(HKEY_CURRENT_USER, WBX_EXEFILE_CMD_KEY, L"DelegateExecute", rgClsid);
-    if (ERROR_SUCCESS != lr)
-    {
-        return 1;
-    }
+    RETURN_VALUE_IF_NOT(ERROR_SUCCESS == lr, 1);
 
     SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, NULL, NULL);
     return 0;
@@ -794,7 +761,7 @@ static BOOL IsRegistered(void)
     lstrcatW(szSub, rgClsid);
     lstrcatW(szSub, L"\\LocalServer32");
     lrOpen = RegOpenKeyExW(HKEY_CURRENT_USER, szSub, 0, KEY_READ, &hKey);
-    RETURN_FALSE_IF(ERROR_SUCCESS != lrOpen);
+    RETURN_FALSE_IF_NOT(ERROR_SUCCESS == lrOpen);
     RegCloseKey(hKey);
     return TRUE;
 }
@@ -807,13 +774,10 @@ static int RunComServer(void)
     HRESULT    hrReg;
     DWORD      dwCookie;
 
-    pState             = State();
+    pState             = GetState();
     pState->fComServer = TRUE;
     hrInit             = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-    if (FAILED(hrInit))
-    {
-        return 1;
-    }
+    RETURN_VALUE_IF(FAILED(hrInit), 1);
     dwCookie = 0;
     hrReg    = CoRegisterClassObject(
         &pState->clsid, (IUnknown*)&pState->factory, CLSCTX_LOCAL_SERVER, REGCLS_MULTIPLEUSE, &dwCookie);
@@ -856,7 +820,7 @@ BOOL LoadRegistrationW(const WINBASEX_REGISTRATION_PROPERTIESW* pReg)
 {
     WBX_STATE* pState;
 
-    pState = State();
+    pState = GetState();
     RETURN_FALSE_IF_NULL(pReg);
     RETURN_FALSE_IF((sizeof((*pReg)) > pReg->cb) || (NULL == pReg->lpClsid) ||
                     (NULL == pReg->lpFriendlyName) || (0 != pReg->dwFlags));
@@ -881,7 +845,7 @@ BOOL LoadRegistrationA(const WINBASEX_REGISTRATION_PROPERTIESA* pReg)
     WINBASEX_REGISTRATION_PROPERTIESW regW;
 
     RETURN_FALSE_IF_NULL(pReg);
-    pState = State();
+    pState = GetState();
     SecureZeroMemory(&regW, sizeof(regW));
     regW.cb      = (DWORD)sizeof(regW);
     regW.lpClsid = pReg->lpClsid;
@@ -909,21 +873,15 @@ int RunCommon(BOOL* pfProceed)
     BOOL       fEmbedding;
 
     (*pfProceed) = FALSE;
-    pState       = State();
+    pState       = GetState();
 
     GetModuleFileName(NULL, pState->szMyPath, MAX_PATH);
 
     pszCmd      = GetCommandLine();
     fUnregister = IsArg(pszCmd, L"/unregister");
     fEmbedding  = IsArg(pszCmd, L"-Embedding") || IsArg(pszCmd, L"/Embedding");
-    if (fUnregister)
-    {
-        return Unregister();
-    }
-    if (fEmbedding)
-    {
-        return RunComServer();
-    }
+    RETURN_VALUE_IF(fUnregister, Unregister());
+    RETURN_VALUE_IF(fEmbedding, RunComServer());
     if (!IsRegistered())
     {
         Register();
@@ -942,7 +900,7 @@ LPSTR SafeWideCharToMultiByte(_In_opt_ LPCWSTR pszW, _Out_writes_(cchBufA) LPSTR
 
     RETURN_NULL_IF_NULL(pszW);
     cchWritten = WideCharToMultiByte(CP_ACP, 0, pszW, -1, pszBufA, cchBufA, NULL, NULL);
-    RETURN_NULL_IF(0 == cchWritten);
+    RETURN_NULL_IF_ZERO(cchWritten);
     return pszBufA;
 }
 
@@ -953,7 +911,7 @@ static void StartupInfoWToA(const STARTUPINFOW* psiW, STARTUPINFOA* psiA)
 {
     WBX_STATE* pState;
 
-    pState = State();
+    pState = GetState();
     SecureZeroMemory(psiA, sizeof((*psiA)));
     psiA->cb              = (DWORD)sizeof((*psiA));
     psiA->lpReserved      = NULL;
@@ -980,7 +938,7 @@ static LPSTR CommandLineWToA(LPCWSTR pszCmdLine)
     WBX_STATE* pState;
     int        cch;
 
-    pState               = State();
+    pState               = GetState();
     pState->szCmdBufA[0] = 0;
     cch                  = WideCharToMultiByte(CP_ACP, 0, pszCmdLine, -1, pState->szCmdBufA, WBX_CMD_CCH, NULL, NULL);
     if (0 == cch)
@@ -992,7 +950,7 @@ static LPSTR CommandLineWToA(LPCWSTR pszCmdLine)
 
 /* COM self-activation is always wide: call the wide client directly, or convert the wide command
    line + STARTUPINFO down to ANSI for an ANSI client. */
-static int CallClientFromStartup(LPWSTR pszCmdLine, const STARTUPINFOW* psi)
+static int CallClientFromStartupW(LPWSTR pszCmdLine, const STARTUPINFOW* psi)
 {
     WBX_STATE*   pState;
     HINSTANCE    hInstance;
@@ -1001,7 +959,7 @@ static int CallClientFromStartup(LPWSTR pszCmdLine, const STARTUPINFOW* psi)
     STARTUPINFOA siA;
     LPSTR        pszCmdLineA;
 
-    pState    = State();
+    pState    = GetState();
     hInstance = GetModuleHandleW(NULL);
     fUseShow  = IsFlagSet(psi->dwFlags, STARTF_USESHOWWINDOW);
     nShowCmd  = SW_SHOWDEFAULT;
@@ -1009,10 +967,7 @@ static int CallClientFromStartup(LPWSTR pszCmdLine, const STARTUPINFOW* psi)
     {
         nShowCmd = (int)psi->wShowWindow;
     }
-    if (pState->fIsUnicode)
-    {
-        return pState->pfnWinMainExW(hInstance, NULL, pszCmdLine, nShowCmd, psi);
-    }
+    RETURN_VALUE_IF(pState->fIsUnicode, pState->pfnWinMainExW(hInstance, NULL, pszCmdLine, nShowCmd, psi));
     StartupInfoWToA(psi, &siA);
     pszCmdLineA = CommandLineWToA(pszCmdLine);
     return pState->pfnWinMainExA(hInstance, NULL, pszCmdLineA, nShowCmd, &siA);
@@ -1024,7 +979,7 @@ void StoreClientW(WBX_PFN_WINMAINEXW pfnWinMainEx)
 {
     WBX_STATE* pState;
 
-    pState                = State();
+    pState                = GetState();
     pState->pfnWinMainExW = pfnWinMainEx;
     pState->fIsUnicode    = TRUE;
 }
@@ -1033,7 +988,7 @@ void StoreClientA(WBX_PFN_WINMAINEXA pfnWinMainEx)
 {
     WBX_STATE* pState;
 
-    pState                = State();
+    pState                = GetState();
     pState->pfnWinMainExA = pfnWinMainEx;
     pState->fIsUnicode    = FALSE;
 }

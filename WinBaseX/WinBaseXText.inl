@@ -60,10 +60,7 @@ static int ShowCmd(const STARTUPINFO* psi)
     BOOL fUseShow;
 
     fUseShow = IsFlagSet(psi->dwFlags, STARTF_USESHOWWINDOW);
-    if (fUseShow)
-    {
-        return (int)psi->wShowWindow;
-    }
+    RETURN_VALUE_IF(fUseShow, (int)psi->wShowWindow);
     return SW_SHOWDEFAULT;
 }
 

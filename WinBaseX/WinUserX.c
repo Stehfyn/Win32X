@@ -33,16 +33,10 @@ HMONITOR WINAPI MonitorFromStartupInfo(_In_opt_ const STARTUPINFO* psi, _In_ DWO
 
     pt.x = 0;
     pt.y = 0;
-    if (NULL == psi)
-    {
-        return MonitorFromPoint(pt, dwFlags);
-    }
+    RETURN_VALUE_IF_NULL(psi, MonitorFromPoint(pt, dwFlags));
 
     fHasShellData = IsFlagSet(psi->dwFlags, STARTF_HASSHELLDATA);
-    if (fHasShellData)
-    {
-        return (HMONITOR)psi->hStdOutput;
-    }
+    RETURN_VALUE_IF(fHasShellData, (HMONITOR)psi->hStdOutput);
 
     fUsePosition = IsFlagSet(psi->dwFlags, STARTF_USEPOSITION);
     if (fUsePosition)
@@ -145,10 +139,7 @@ BOOL WINAPI ShowWindowEx(_In_ HWND hwnd, _In_ int nShowEx)
     int  nHeight;
 
     fStartup = (SWX_SHOWSTARTUP == nShowEx);
-    if (!fStartup)
-    {
-        return ShowWindow(hwnd, nShowEx);
-    }
+    RETURN_VALUE_IF_NOT(fStartup, ShowWindow(hwnd, nShowEx));
 
     /* Default extent: a fraction of the primary work area. CalculateWindowStartupPosition then places
        it on the launch monitor, honoring any STARTUPINFO size/position override. */
