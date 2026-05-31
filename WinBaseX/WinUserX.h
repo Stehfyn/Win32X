@@ -51,6 +51,18 @@ BOOL WINAPI CalculateWindowStartupPosition(_In_ const SIZE* pDefaultSize, _Out_ 
  */
 BOOL WINAPI ShowWindowEx(_In_ HWND hwnd, _In_ int nShowEx);
 
+/*
+ * ErrorMessageBox -- MessageBox preset for error reporting: MB_ICONERROR | MB_OK. Owner, message,
+ * and caption are caller-supplied; only the icon/buttons are fixed. Returns the MessageBox result.
+ */
+int WINAPI ErrorMessageBoxW(_In_opt_ HWND hwnd, _In_ LPCWSTR pszText, _In_ LPCWSTR pszCaption);
+int WINAPI ErrorMessageBoxA(_In_opt_ HWND hwnd, _In_ LPCSTR pszText, _In_ LPCSTR pszCaption);
+#ifdef UNICODE
+#define ErrorMessageBox ErrorMessageBoxW
+#else
+#define ErrorMessageBox ErrorMessageBoxA
+#endif
+
 #ifdef __cplusplus
 }
 #endif

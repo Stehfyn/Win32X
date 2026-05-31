@@ -182,3 +182,13 @@ BOOL WINAPI ShowWindowEx(_In_ HWND hwnd, _In_ int nShowEx)
        the OS suppresses. An unentitled show flashes the taskbar instead, which is the correct cue. */
     return TRUE;
 }
+
+int WINAPI ErrorMessageBoxW(_In_opt_ HWND hwnd, _In_ LPCWSTR pszText, _In_ LPCWSTR pszCaption)
+{
+    return MessageBoxW(hwnd, pszText, pszCaption, MB_ICONERROR | MB_OK);
+}
+
+int WINAPI ErrorMessageBoxA(_In_opt_ HWND hwnd, _In_ LPCSTR pszText, _In_ LPCSTR pszCaption)
+{
+    return MessageBoxA(hwnd, pszText, pszCaption, MB_ICONERROR | MB_OK);
+}
