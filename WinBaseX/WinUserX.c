@@ -25,27 +25,27 @@
 #define DEFAULT_PCT_NUM 50
 #define DEFAULT_PCT_DEN 100
 
-HMONITOR WINAPI MonitorFromStartupInfo(_In_opt_ const STARTUPINFO* psi, _In_ DWORD dwFlags)
+HMONITOR WINAPI GetStartupMonitor(_In_ DWORD dwFlags)
 {
-    POINT pt;
-    BOOL  fHasShellData;
-    BOOL  fUsePosition;
+    STARTUPINFO si;
+    POINT       pt;
+    BOOL        fHasShellData;
+    BOOL        fUsePosition;
+
+    SecureZeroMemory(&si, sizeof(si));
+    GetStartupInfo(&si);
 
     pt.x = 0;
     pt.y = 0;
-    if (!psi)
-    {
-        return MonitorFromPoint(pt, dwFlags);
-    }
 
-    fHasShellData = IsFlagSet(psi->dwFlags, STARTF_HASSHELLDATA);
-    RETURN_VALUE_IF(fHasShellData, (HMONITOR)psi->hStdOutput);
+    fHasShellData = IsFlagSet(si.dwFlags, STARTF_HASSHELLDATA);
+    RETURN_VALUE_IF(fHasShellData, (HMONITOR)si.hStdOutput);
 
-    fUsePosition = IsFlagSet(psi->dwFlags, STARTF_USEPOSITION);
+    fUsePosition = IsFlagSet(si.dwFlags, STARTF_USEPOSITION);
     if (fUsePosition)
     {
-        pt.x = (LONG)psi->dwX;
-        pt.y = (LONG)psi->dwY;
+        pt.x = (LONG)si.dwX;
+        pt.y = (LONG)si.dwY;
     }
     return MonitorFromPoint(pt, dwFlags);
 }
@@ -75,7 +75,7 @@ BOOL WINAPI CalculateWindowStartupPosition(_In_ const SIZE* pDefaultSize, _Out_ 
     SecureZeroMemory(&si, sizeof(si));
     GetStartupInfo(&si);
 
-    hMonitor = MonitorFromStartupInfo(&si, MONITOR_DEFAULTTOPRIMARY);
+    hMonitor = GetStartupMonitor(MONITOR_DEFAULTTOPRIMARY);
 
     SecureZeroMemory(&mi, sizeof(mi));
     mi.cbSize = (DWORD)sizeof(mi);

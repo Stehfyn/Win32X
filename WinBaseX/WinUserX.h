@@ -15,18 +15,20 @@ extern "C"
 #define SWX_SHOWSTARTUP 0x00010000
 
 /*
- * MonitorFromStartupInfo -- resolve the monitor a launch targets, from its STARTUPINFO. Sibling to
- * MonitorFromWindow/MonitorFromPoint/MonitorFromRect: when the shell passes a monitor through
- * STARTF_HASSHELLDATA (hStdOutput), that monitor is returned; otherwise a STARTF_USEPOSITION launch
- * resolves through its dwX/dwY point and any other launch resolves through the origin. dwFlags is the
- * MONITOR_DEFAULTTO* fallback used for the point-based cases. psi may be NULL (treated as the origin).
+ * GetStartupMonitor -- resolve the monitor this process's launch targets, read from its own
+ * STARTUPINFO via GetStartupInfo. When the shell passes a monitor through STARTF_HASSHELLDATA
+ * (hStdOutput), that monitor is returned; otherwise a STARTF_USEPOSITION launch resolves through its
+ * dwX/dwY point and any other launch through the origin. dwFlags is the MONITOR_DEFAULTTO* fallback
+ * for the point-based cases. Unlike the SDK MonitorFrom* family it takes no charset-bearing argument
+ * -- the STARTUPINFO is fetched internally and only its charset-neutral fields are read -- so it needs
+ * no A/W split.
  */
-HMONITOR WINAPI MonitorFromStartupInfo(_In_opt_ const STARTUPINFO* psi, _In_ DWORD dwFlags);
+HMONITOR WINAPI GetStartupMonitor(_In_ DWORD dwFlags);
 
 /*
  * CalculateWindowStartupPosition -- compute where this process's top-level window should first appear
  * at launch. It reads the process STARTUPINFO itself via GetStartupInfo, resolves the target monitor
- * with MonitorFromStartupInfo, and places within that monitor's work area. The launcher wins where it
+ * with GetStartupMonitor, and places within that monitor's work area. The launcher wins where it
  * speaks: STARTF_USESIZE supplies the extent (dwXSize/dwYSize) and STARTF_USEPOSITION the top-left
  * (dwX/dwY). Where it is silent the extent defaults to *pDefaultSize and the position defaults to
  * centering that extent within the work area. The result is written to *prcOut.
