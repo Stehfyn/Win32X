@@ -30,18 +30,23 @@ HMONITOR WINAPI GetStartupMonitor(_In_ DWORD dwFlags);
  * at launch. It reads the process STARTUPINFO itself via GetStartupInfo, resolves the target monitor
  * with GetStartupMonitor, and places within that monitor's work area. The launcher wins where it
  * speaks: STARTF_USESIZE supplies the extent (dwXSize/dwYSize) and STARTF_USEPOSITION the top-left
- * (dwX/dwY). Where it is silent the extent defaults to *pDefaultSize and the position defaults to
- * centering that extent within the work area. The result is written to *prcOut.
+ * (dwX/dwY). Where it is silent the extent defaults to three-quarters of that monitor's work area per
+ * axis -- the window manager's own CW_USEDEFAULT sizing (win32kfull!SetTiledRect) -- and the position
+ * defaults to centering that extent within the work area. The result is written to *prcOut.
+ *
+ * The ratio is taken against the resolved monitor's work area as GetMonitorInfo reports it; in a
+ * per-monitor DPI-aware process that is the target monitor's physical extent at its own DPI, so the
+ * default matches the OS on whichever monitor the launch resolves to.
  *
  * Returns FALSE -- leaving *prcOut untouched -- on a NULL argument or when the resolved monitor
  * yields no work area.
  */
 _Success_(return != FALSE)
-BOOL WINAPI CalculateWindowStartupPosition(_In_ const SIZE* pDefaultSize, _Out_ RECT* prcOut);
+BOOL WINAPI CalculateWindowStartupPosition(_Out_ RECT* prcOut);
 
 /*
  * ShowWindowEx -- ShowWindow extended with startup-aware commands. SWX_SHOWSTARTUP runs the full
- * first-show sequence: size to a default fraction of the work area, position via
+ * first-show sequence: size to three-quarters of the launch monitor's work area and position, both via
  * CalculateWindowStartupPosition (honoring STARTUPINFO), and show with an activating command
  * (SWP_SHOWWINDOW when placed, else SW_SHOWNORMAL) -- which foregrounds a foreground-entitled launch
  * without forcing (no SetForegroundWindow focus-steal). Any other nShowEx is forwarded to ShowWindow
