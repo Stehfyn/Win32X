@@ -18,54 +18,12 @@
 #include "WinBaseX.h"
 #include "WinUserX.h"
 
-#define WMX_PCT_NUM       50
-#define WMX_PCT_DENOM     100
-
 DEFINE_GUID(CLSID_WinMainEx, 0xE5F1A9C2, 0x8B7D, 0x4E3F, 0xA1, 0x5C, 0x9D, 0x2E, 0x7B, 0x6F, 0x4A, 0x83);
 
-static void             PlaceStartupWindow(HWND hwnd);
 static ATOM             MyRegisterClass(HINSTANCE hInstance);
-static BOOL             InitInstance(HINSTANCE hInstance, int nCmdShow);
+static BOOL             InitInstance(HINSTANCE hInstance);
 static void    CALLBACK OnDestroy(HWND hwnd);
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
-
-static void PlaceStartupWindow(HWND hwnd)
-{
-    RECT rcWork;
-    BOOL fGotWork;
-    SIZE sizeDefault;
-    RECT rcPos;
-    BOOL fGotPos;
-    int  nX;
-    int  nY;
-    int  nWidth;
-    int  nHeight;
-
-    /* This client's default-extent policy: 50% of the primary work area. CalculateWindowStartupPosition
-       resolves the launch monitor, honors any launcher-specified STARTUPINFO position/size, and
-       otherwise centers this default extent on the work area. */
-    SecureZeroMemory(&rcWork, sizeof(rcWork));
-    fGotWork = SystemParametersInfo(SPI_GETWORKAREA, 0, &rcWork, 0);
-    if (!fGotWork)
-    {
-        return;
-    }
-
-    sizeDefault.cx = (rcWork.right - rcWork.left) * WMX_PCT_NUM / WMX_PCT_DENOM;
-    sizeDefault.cy = (rcWork.bottom - rcWork.top) * WMX_PCT_NUM / WMX_PCT_DENOM;
-
-    fGotPos = CalculateWindowStartupPosition(&sizeDefault, &rcPos);
-    if (!fGotPos)
-    {
-        return;
-    }
-
-    nX      = (int)rcPos.left;
-    nY      = (int)rcPos.top;
-    nWidth  = (int)(rcPos.right - rcPos.left);
-    nHeight = (int)(rcPos.bottom - rcPos.top);
-    SetWindowPos(hwnd, HWND_DESKTOP, nX, nY, nWidth, nHeight, SWP_NOZORDER | SWP_NOACTIVATE);
-}
 
 /* Registers the window class. */
 static ATOM MyRegisterClass(HINSTANCE hInstance)
@@ -78,11 +36,12 @@ static ATOM MyRegisterClass(HINSTANCE hInstance)
     wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     wc.lpszClassName = WC_WINMAINEX;
+
     return RegisterClass(&wc);
 }
 
 /* Creates and displays the main window. */
-static BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
+static BOOL InitInstance(HINSTANCE hInstance)
 {
     HWND hwnd;
 
@@ -94,7 +53,7 @@ static BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
                           CW_USEDEFAULT,
                           CW_USEDEFAULT,
                           CW_USEDEFAULT,
-                          GetDesktopWindow(),
+                          NULL,
                           NULL,
                           hInstance,
                           NULL);
@@ -103,9 +62,8 @@ static BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
         return FALSE;
     }
 
-    PlaceStartupWindow(hwnd);
-    ShowWindow(hwnd, nCmdShow);
-    SetForegroundWindow(hwnd);
+    ShowWindowEx(hwnd, SWX_SHOWSTARTUP);
+    UpdateWindow(hwnd);
 
     /* A COM-server (shell DelegateExecute) activation only needs the window shown; WinBaseX pumps
        messages for the embedding, so the client must not run its own loop. */
@@ -148,12 +106,13 @@ int WINAPI _tWinMainEx(_In_ HINSTANCE          hInstance,
 
     UNREFERENCED_PARAMETER(hPrevInstance);
     UNREFERENCED_PARAMETER(lpCmdLine);
+    UNREFERENCED_PARAMETER(nShowCmd);
     UNREFERENCED_PARAMETER(lpStartupInfo);
 
     /* RegisterClass returns 0 on a repeated activation (ERROR_CLASS_ALREADY_EXISTS); harmless --
        the class stays registered, so InitInstance's CreateWindowEx succeeds regardless. */
     MyRegisterClass(hInstance);
-    if (!InitInstance(hInstance, nShowCmd))
+    if (!InitInstance(hInstance))
     {
         return 0;
     }

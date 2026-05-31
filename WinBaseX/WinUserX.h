@@ -9,6 +9,12 @@ extern "C"
 #endif
 
 /*
+ * SWX_SHOWSTARTUP -- a ShowWindowEx command (kept clear of the SW_* range so plain SW_* values pass
+ * through unchanged): place the window per the launch policy, then show and foreground it.
+ */
+#define SWX_SHOWSTARTUP 0x00010000
+
+/*
  * MonitorFromStartupInfo -- resolve the monitor a launch targets, from its STARTUPINFO. Sibling to
  * MonitorFromWindow/MonitorFromPoint/MonitorFromRect: when the shell passes a monitor through
  * STARTF_HASSHELLDATA (hStdOutput), that monitor is returned; otherwise a STARTF_USEPOSITION launch
@@ -30,6 +36,15 @@ HMONITOR WINAPI MonitorFromStartupInfo(_In_opt_ const STARTUPINFO* psi, _In_ DWO
  */
 _Success_(return != FALSE)
 BOOL WINAPI CalculateWindowStartupPosition(_In_ const SIZE* pDefaultSize, _Out_ RECT* prcOut);
+
+/*
+ * ShowWindowEx -- ShowWindow extended with startup-aware commands. SWX_SHOWSTARTUP runs the full
+ * first-show sequence: size to a default fraction of the work area, position via
+ * CalculateWindowStartupPosition (honoring STARTUPINFO), show with SW_SHOWDEFAULT (which adopts the
+ * STARTUPINFO show state), and bring to the foreground. Any other nShowEx is forwarded to ShowWindow
+ * unchanged. Returns the show result (TRUE when the startup sequence ran).
+ */
+BOOL WINAPI ShowWindowEx(_In_ HWND hwnd, _In_ int nShowEx);
 
 #ifdef __cplusplus
 }

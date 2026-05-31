@@ -1,6 +1,6 @@
 /*
  * WinUserX.c -- charset-agnostic window-placement helpers complementing WinUser's window APIs:
- * launch-monitor resolution and startup-rectangle policy, no CRT dependency.
+ * launch-monitor resolution, startup-rectangle policy, and the startup show sequence. No CRT.
  */
 
 #pragma runtime_checks("", off)
@@ -19,6 +19,9 @@
 #ifndef STARTF_HASSHELLDATA
 #define STARTF_HASSHELLDATA 0x00000400
 #endif
+
+#define SWX_STARTUP_PCT_NUM   50
+#define SWX_STARTUP_PCT_DENOM 100
 
 HMONITOR WINAPI MonitorFromStartupInfo(_In_opt_ const STARTUPINFO* psi, _In_ DWORD dwFlags)
 {
@@ -128,5 +131,48 @@ BOOL WINAPI CalculateWindowStartupPosition(_In_ const SIZE* pDefaultSize, _Out_ 
     prcOut->top    = nTop;
     prcOut->right  = nLeft + size.cx;
     prcOut->bottom = nTop  + size.cy;
+    return TRUE;
+}
+
+BOOL WINAPI ShowWindowEx(_In_ HWND hwnd, _In_ int nShowEx)
+{
+    BOOL fStartup;
+    RECT rcWork;
+    BOOL fGotWork;
+    SIZE sizeDefault;
+    RECT rcPos;
+    BOOL fGotPos;
+    int  nX;
+    int  nY;
+    int  nWidth;
+    int  nHeight;
+
+    fStartup = (SWX_SHOWSTARTUP == nShowEx);
+    if (!fStartup)
+    {
+        return ShowWindow(hwnd, nShowEx);
+    }
+
+    /* Default extent: a fraction of the primary work area. CalculateWindowStartupPosition then places
+       it on the launch monitor, honoring any STARTUPINFO size/position override. */
+    SecureZeroMemory(&rcWork, sizeof(rcWork));
+    fGotWork = SystemParametersInfo(SPI_GETWORKAREA, 0, &rcWork, 0);
+    if (fGotWork)
+    {
+        sizeDefault.cx = (rcWork.right - rcWork.left) * SWX_STARTUP_PCT_NUM / SWX_STARTUP_PCT_DENOM;
+        sizeDefault.cy = (rcWork.bottom - rcWork.top) * SWX_STARTUP_PCT_NUM / SWX_STARTUP_PCT_DENOM;
+        fGotPos        = CalculateWindowStartupPosition(&sizeDefault, &rcPos);
+        if (fGotPos)
+        {
+            nX      = (int)rcPos.left;
+            nY      = (int)rcPos.top;
+            nWidth  = (int)(rcPos.right - rcPos.left);
+            nHeight = (int)(rcPos.bottom - rcPos.top);
+            SetWindowPos(hwnd, HWND_DESKTOP, nX, nY, nWidth, nHeight, SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }
+
+    ShowWindow(hwnd, SW_SHOWDEFAULT);
+    SetForegroundWindow(hwnd);
     return TRUE;
 }
