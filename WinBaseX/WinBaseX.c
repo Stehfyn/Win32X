@@ -77,15 +77,11 @@ typedef struct WBX_STATE
     volatile LONG      nObjectCount;
     BOOL               fRegistrationLoaded;
     BOOL               fComServer;
-    BOOL               fIsUnicode;
     /* process identity + forward scratch */
-    WCHAR              szMyPath[MAX_PATH];
-    WCHAR              szCmdBuf[WBX_CMD_CCH];  /* wide forward command line (COM path) */
+    TCHAR              szMyPath[MAX_PATH];     /* this build's charset; GetModuleFileName fills it generic */
+    TCHAR              szCmdBuf[WBX_CMD_CCH];  /* forward command line, in this build's charset */
     WCHAR              szFriendlyName[WBX_NAME_CCH];
     WCHAR              szHistoryKey[MAX_PATH];
-    CHAR               szCmdBufA[WBX_CMD_CCH]; /* ANSI client command line (W->A bridge) */
-    CHAR               szDesktopA[MAX_PATH];   /* ANSI STARTUPINFO.lpDesktop (W->A bridge) */
-    CHAR               szTitleA[MAX_PATH];     /* ANSI STARTUPINFO.lpTitle   (W->A bridge) */
 } WBX_STATE;
 
 typedef struct CommandObject
@@ -99,17 +95,33 @@ typedef struct CommandObject
     int                             show_window;
     BOOL                            show_set;
     BOOL                            pos_set;
-    WCHAR                           params[WBX_PARAMS_CCH];
-    WCHAR                           directory[MAX_PATH];
+    TCHAR                           params[WBX_PARAMS_CCH];
+    TCHAR                           directory[MAX_PATH];
 } CommandObject;
 
 static DWORD s_dwTlsState = TLS_OUT_OF_INDEXES; /* the one irreducible root */
 
-/* ExecuteCommand_Execute (wide COM section) forwards a self/no-selection activation through here; the
-   bodies are defined after the wide->ANSI bridge helpers exist. The call site picks W or A by the
-   registered client variant (fIsUnicode) -- the client's build charset is irrelevant at this layer. */
-static int   CallClientFromStartupW(LPWSTR pszCmdLine, const STARTUPINFOW* psi);
-static int   CallClientFromStartupA(LPWSTR pszCmdLine, const STARTUPINFOW* psi);
+/* Generic-text leaves: each forwards to its matching client. CallClientFromStartup resolves to one of
+   them by this build's charset -- no runtime fork. Both are always defined (like CreateWindowA/W). */
+static int CallClientFromStartupW(LPWSTR pszCmdLine, const STARTUPINFOW* psi);
+static int CallClientFromStartupA(LPSTR pszCmdLine, const STARTUPINFOA* psi);
+#ifdef UNICODE
+#define CallClientFromStartup CallClientFromStartupW
+#else
+#define CallClientFromStartup CallClientFromStartupA
+#endif
+
+/* The IExecuteCommand ABI hands strings in fixed-wide LPCWSTR (so does IShellItem::GetDisplayName).
+   Read one into a generic-text buffer: GetComTextW copies wide, GetComTextA narrows to ANSI --
+   concrete on each side, never a "convert to TCHAR." GetComText resolves by this build's charset;
+   both leaves always defined, like CreateWindowA/W. */
+static void GetComTextW(LPWSTR pszDst, LPCWSTR pszSrc, int cchDst);
+static void GetComTextA(LPSTR pszDst, LPCWSTR pszSrc, int cchDst);
+#ifdef UNICODE
+#define GetComText GetComTextW
+#else
+#define GetComText GetComTextA
+#endif
 
 #pragma function(memcmp)
 _Check_return_ int __cdecl memcmp(_In_reads_bytes_(cb) const void* pvA,
@@ -237,6 +249,29 @@ static void FillStartupInfoW(const CommandObject* pObj, STARTUPINFOW* psi, BOOL 
     }
 }
 
+static void FillStartupInfoA(const CommandObject* pObj, STARTUPINFOA* psi, BOOL fForwardChild)
+{
+    SecureZeroMemory(psi, sizeof((*psi)));
+    psi->cb = (DWORD)sizeof((*psi));
+    if (pObj->show_set)
+    {
+        SetFlag(psi->dwFlags, STARTF_USESHOWWINDOW);
+        psi->wShowWindow = (WORD)pObj->show_window;
+    }
+    if (fForwardChild && pObj->pos_set)
+    {
+        SetFlag(psi->dwFlags, STARTF_USEPOSITION);
+        psi->dwX = (DWORD)pObj->pos.x;
+        psi->dwY = (DWORD)pObj->pos.y;
+    }
+}
+
+#ifdef UNICODE
+#define FillStartupInfo FillStartupInfoW
+#else
+#define FillStartupInfo FillStartupInfoA
+#endif
+
 #define EC_OBJ(p)  ((CommandObject*)((BYTE*)(p) - offsetof(CommandObject, vtbl_ec)))
 #define OWS_OBJ(p) ((CommandObject*)((BYTE*)(p) - offsetof(CommandObject, vtbl_ows)))
 
@@ -317,7 +352,7 @@ static HRESULT STDMETHODCALLTYPE ExecuteCommand_SetParameters(IExecuteCommand* p
     pObj = EC_OBJ(pThis);
     if (pszParams)
     {
-        (void)lstrcpynW(pObj->params, pszParams, WBX_PARAMS_CCH);
+        GetComText(pObj->params, pszParams, WBX_PARAMS_CCH);
     }
     else
     {
@@ -360,7 +395,7 @@ static HRESULT STDMETHODCALLTYPE ExecuteCommand_SetDirectory(IExecuteCommand* pT
     pObj = EC_OBJ(pThis);
     if (pszDir)
     {
-        (void)lstrcpynW(pObj->directory, pszDir, MAX_PATH);
+        GetComText(pObj->directory, pszDir, MAX_PATH);
     }
     else
     {
@@ -375,11 +410,12 @@ static HRESULT STDMETHODCALLTYPE ExecuteCommand_Execute(IExecuteCommand* pThis)
     WBX_STATE*          pState;
     IShellItem*         pItem;
     LPWSTR              pszPath;
-    LPWSTR              pszWrite;
-    LPCWSTR             pszDir;
-    STARTUPINFOW        si;
+    LPTSTR              pszWrite;
+    LPCTSTR             pszDir;
+    TCHAR               szPath[MAX_PATH];
+    STARTUPINFO         si;
     PROCESS_INFORMATION pi;
-    SHELLEXECUTEINFOW   sei;
+    SHELLEXECUTEINFO    sei;
     HRESULT             hr;
     HRESULT             rc;
     DWORD               dwErr;
@@ -396,15 +432,8 @@ static HRESULT STDMETHODCALLTYPE ExecuteCommand_Execute(IExecuteCommand* pThis)
 
     if (!pObj->selection)
     {
-        FillStartupInfoW(pObj, &si, FALSE);
-        if (pState->fIsUnicode)
-        {
-            CallClientFromStartupW(pObj->params, &si);
-        }
-        else
-        {
-            CallClientFromStartupA(pObj->params, &si);
-        }
+        FillStartupInfo(pObj, &si, FALSE);
+        CallClientFromStartup(pObj->params, &si);
         return S_OK;
     }
 
@@ -413,21 +442,19 @@ static HRESULT STDMETHODCALLTYPE ExecuteCommand_Execute(IExecuteCommand* pThis)
     pszPath = NULL;
     hr      = IShellItem_GetDisplayName(pItem, SIGDN_FILESYSPATH, &pszPath);
     IShellItem_Release(pItem);
-    RETURN_VALUE_IF(FAILED(hr) || (!pszPath), hr);
+    RETURN_VALUE_IF(FAILED(hr), hr);
+    RETURN_VALUE_IF_NULL(pszPath, hr);
 
-    fIsSelf = (CSTR_EQUAL == CompareStringOrdinal(pszPath, -1, pState->szMyPath, -1, TRUE));
+    /* IShellItem hands back a wide display name; narrow it to this build's charset once, then work
+       generic from here. */
+    GetComText(szPath, pszPath, MAX_PATH);
+
+    fIsSelf = (0 == lstrcmpi(szPath, pState->szMyPath));
     if (fIsSelf)
     {
         CoTaskMemFree(pszPath);
-        FillStartupInfoW(pObj, &si, FALSE);
-        if (pState->fIsUnicode)
-        {
-            CallClientFromStartupW(pObj->params, &si);
-        }
-        else
-        {
-            CallClientFromStartupA(pObj->params, &si);
-        }
+        FillStartupInfo(pObj, &si, FALSE);
+        CallClientFromStartup(pObj->params, &si);
         return S_OK;
     }
 
@@ -436,44 +463,41 @@ static HRESULT STDMETHODCALLTYPE ExecuteCommand_Execute(IExecuteCommand* pThis)
     {
         RecordExe(pszPath);
     }
+    CoTaskMemFree(pszPath);
 
     /* Build "<path>" [params] into szCmdBuf, bounded so an over-long path/params declines the
        forward rather than overflowing into adjacent state. */
-    cchPath    = lstrlenW(pszPath);
+    cchPath    = lstrlen(szPath);
     fHasParams = !!pObj->params[0];
     cchParams  = 0;
     if (fHasParams)
     {
-        cchParams = lstrlenW(pObj->params);
+        cchParams = lstrlen(pObj->params);
     }
     cchNeeded = cchPath + 3; /* two quotes + nul */
     if (fHasParams)
     {
         cchNeeded += cchParams + 1; /* space + params */
     }
-    if (WBX_CMD_CCH < cchNeeded)
-    {
-        CoTaskMemFree(pszPath);
-        return E_FAIL;
-    }
+    RETURN_VALUE_IF(WBX_CMD_CCH < cchNeeded, E_FAIL);
 
     pszWrite    = pState->szCmdBuf;
-    (*pszWrite) = L'"';
+    (*pszWrite) = TEXT('"');
     pszWrite++;
-    (void)lstrcpynW(pszWrite, pszPath, cchPath + 1);
+    (void)lstrcpyn(pszWrite, szPath, cchPath + 1);
     pszWrite    += cchPath;
-    (*pszWrite)  = L'"';
+    (*pszWrite)  = TEXT('"');
     pszWrite++;
     if (fHasParams)
     {
-        (*pszWrite) = L' ';
+        (*pszWrite) = TEXT(' ');
         pszWrite++;
-        (void)lstrcpynW(pszWrite, pObj->params, cchParams + 1);
+        (void)lstrcpyn(pszWrite, pObj->params, cchParams + 1);
         pszWrite += cchParams;
     }
     (*pszWrite) = 0;
 
-    FillStartupInfoW(pObj, &si, TRUE);
+    FillStartupInfo(pObj, &si, TRUE);
     if (fRegistered)
     {
         SetFlag(si.dwFlags, STARTF_FORCEOFFFEEDBACK);
@@ -485,48 +509,33 @@ static HRESULT STDMETHODCALLTYPE ExecuteCommand_Execute(IExecuteCommand* pThis)
         pszDir = pObj->directory;
     }
 
-    fCreated = CreateProcessW(NULL, pState->szCmdBuf, NULL, NULL, FALSE, 0, NULL, pszDir, &si, &pi);
+    fCreated = CreateProcess(NULL, pState->szCmdBuf, NULL, NULL, FALSE, 0, NULL, pszDir, &si, &pi);
     if (fCreated)
     {
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
-        rc = S_OK;
+        return S_OK;
     }
-    else
+
+    dwErr = GetLastError();
+    RETURN_VALUE_IF(ERROR_ELEVATION_REQUIRED != dwErr, HRESULT_FROM_WIN32(dwErr));
+
+    SecureZeroMemory(&sei, sizeof(sei));
+    sei.cbSize      = (DWORD)sizeof(sei);
+    sei.fMask       = SEE_MASK_FLAG_NO_UI;
+    sei.lpVerb      = TEXT("runas");
+    sei.lpFile      = szPath;
+    sei.lpDirectory = pszDir;
+    sei.nShow       = SW_SHOWNORMAL;
+    if (pObj->params[0])
     {
-        dwErr = GetLastError();
-        if (ERROR_ELEVATION_REQUIRED == dwErr)
-        {
-            SecureZeroMemory(&sei, sizeof(sei));
-            sei.cbSize      = (DWORD)sizeof(sei);
-            sei.fMask       = SEE_MASK_FLAG_NO_UI;
-            sei.lpVerb      = L"runas";
-            sei.lpFile      = pszPath;
-            sei.lpDirectory = pszDir;
-            sei.nShow       = SW_SHOWNORMAL;
-            if (pObj->params[0])
-            {
-                sei.lpParameters = pObj->params;
-            }
-            if (pObj->show_set)
-            {
-                sei.nShow = pObj->show_window;
-            }
-            if (ShellExecuteExW(&sei))
-            {
-                rc = S_OK;
-            }
-            else
-            {
-                rc = HRESULT_FROM_WIN32(GetLastError());
-            }
-        }
-        else
-        {
-            rc = HRESULT_FROM_WIN32(dwErr);
-        }
+        sei.lpParameters = pObj->params;
     }
-    CoTaskMemFree(pszPath);
+    if (pObj->show_set)
+    {
+        sei.nShow = pObj->show_window;
+    }
+    rc = ShellExecuteEx(&sei) ? S_OK : HRESULT_FROM_WIN32(GetLastError());
     return rc;
 }
 
@@ -589,7 +598,7 @@ static const IObjectWithSelectionVtbl s_ObjectWithSelectionVtbl = { ObjectWithSe
                                                                     ObjectWithSelection_SetSelection,
                                                                     ObjectWithSelection_GetSelection };
 
-static HRESULT STDMETHODCALLTYPE      ClassFactory_QueryInterface(IClassFactory* pThis, REFIID riid, void** ppv)
+static HRESULT STDMETHODCALLTYPE ClassFactory_QueryInterface(IClassFactory* pThis, REFIID riid, void** ppv)
 {
     BOOL fUnknown;
     BOOL fFactory;
@@ -654,7 +663,7 @@ static const IClassFactoryVtbl s_ClassFactoryVtbl = { ClassFactory_QueryInterfac
                                                       ClassFactory_CreateInstance,
                                                       ClassFactory_LockServer };
 
-static void                    ClsidString(WCHAR rgClsid[WBX_GUID_CCH])
+static void ClsidString(WCHAR rgClsid[WBX_GUID_CCH])
 {
     int cch;
 
@@ -691,14 +700,13 @@ LONG RegSetStringA(HKEY hParent, LPCSTR pszSubKey, LPCSTR pszName, LPCSTR pszVal
 
     szSubKey[0] = 0;
     szValue[0]  = 0;
-    (void)MultiByteToWideChar(CP_ACP, 0, pszSubKey, -1, szSubKey, WBX_SUBKEY_CCH);
-    (void)MultiByteToWideChar(CP_ACP, 0, pszValue, -1, szValue, MAX_PATH);
+    (void)SafeMultiByteToWideChar(pszSubKey, szSubKey, WBX_SUBKEY_CCH);
+    (void)SafeMultiByteToWideChar(pszValue, szValue, MAX_PATH);
     pszNameW = NULL;
     if (pszName)
     {
         szName[0] = 0;
-        (void)MultiByteToWideChar(CP_ACP, 0, pszName, -1, szName, WBX_SUBKEY_CCH);
-        pszNameW = szName;
+        pszNameW = SafeMultiByteToWideChar(pszName, szName, WBX_SUBKEY_CCH);
     }
     return RegSetStringW(hParent, szSubKey, pszNameW, szValue);
 }
@@ -832,8 +840,10 @@ BOOL LoadRegistrationW(const WINBASEX_REGISTRATION_PROPERTIESW* pReg)
 
     pState = GetState();
     RETURN_FALSE_IF_NULL(pReg);
-    RETURN_FALSE_IF((sizeof((*pReg)) > pReg->cb) || (!pReg->lpClsid) ||
-                    (!pReg->lpFriendlyName) || (0 != pReg->dwFlags));
+    RETURN_FALSE_IF(sizeof((*pReg)) > pReg->cb);
+    RETURN_FALSE_IF_NULL(pReg->lpClsid);
+    RETURN_FALSE_IF_NULL(pReg->lpFriendlyName);
+    RETURN_FALSE_IF_NONZERO(pReg->dwFlags);
     pState->clsid           = *pReg->lpClsid;
     pState->pszFriendlyName = pReg->lpFriendlyName;
     if (!pReg->lpLaunchHistoryKey)
@@ -862,13 +872,11 @@ BOOL LoadRegistrationA(const WINBASEX_REGISTRATION_PROPERTIESA* pReg)
     regW.dwFlags = pReg->dwFlags;
     if (pReg->lpFriendlyName)
     {
-        (void)MultiByteToWideChar(CP_ACP, 0, pReg->lpFriendlyName, -1, pState->szFriendlyName, WBX_NAME_CCH);
-        regW.lpFriendlyName = pState->szFriendlyName;
+        regW.lpFriendlyName = SafeMultiByteToWideChar(pReg->lpFriendlyName, pState->szFriendlyName, WBX_NAME_CCH);
     }
     if (pReg->lpLaunchHistoryKey)
     {
-        (void)MultiByteToWideChar(CP_ACP, 0, pReg->lpLaunchHistoryKey, -1, pState->szHistoryKey, MAX_PATH);
-        regW.lpLaunchHistoryKey = pState->szHistoryKey;
+        regW.lpLaunchHistoryKey = SafeMultiByteToWideChar(pReg->lpLaunchHistoryKey, pState->szHistoryKey, MAX_PATH);
     }
     return LoadRegistrationW(&regW);
 }
@@ -920,48 +928,30 @@ LPSTR SafeWideCharToMultiByte(_In_opt_ LPCWSTR pszW, _Out_writes_(cchBufA) LPSTR
     return pszBufA;
 }
 
-/* STARTUPINFOA and STARTUPINFOW share an identical binary layout; the only members that genuinely
-   differ are the LPWSTR strings, which must be charset-converted. Scalars/handles copy across, the
-   CRT lpReserved2 block is charset-neutral, and lpReserved stays NULL (reserved). */
-static void StartupInfoWToA(const STARTUPINFOW* psiW, STARTUPINFOA* psiA)
+/* Bounded ANSI->wide conversion into pszBufW; returns the buffer, or NULL for a NULL/unconvertible
+   source. Symmetric with SafeWideCharToMultiByte; public so clients can reuse it. */
+_Success_(return != NULL)
+LPWSTR SafeMultiByteToWideChar(_In_opt_ LPCSTR pszA, _Out_writes_(cchBufW) LPWSTR pszBufW, _In_ int cchBufW)
 {
-    WBX_STATE* pState;
+    int cchWritten;
 
-    pState = GetState();
-    SecureZeroMemory(psiA, sizeof((*psiA)));
-    psiA->cb              = (DWORD)sizeof((*psiA));
-    psiA->lpReserved      = NULL;
-    psiA->lpDesktop       = SafeWideCharToMultiByte(psiW->lpDesktop, pState->szDesktopA, ARRAYSIZE(pState->szDesktopA));
-    psiA->lpTitle         = SafeWideCharToMultiByte(psiW->lpTitle, pState->szTitleA, ARRAYSIZE(pState->szTitleA));
-    psiA->dwX             = psiW->dwX;
-    psiA->dwY             = psiW->dwY;
-    psiA->dwXSize         = psiW->dwXSize;
-    psiA->dwYSize         = psiW->dwYSize;
-    psiA->dwXCountChars   = psiW->dwXCountChars;
-    psiA->dwYCountChars   = psiW->dwYCountChars;
-    psiA->dwFillAttribute = psiW->dwFillAttribute;
-    psiA->dwFlags         = psiW->dwFlags;
-    psiA->wShowWindow     = psiW->wShowWindow;
-    psiA->cbReserved2     = psiW->cbReserved2;
-    psiA->lpReserved2     = psiW->lpReserved2;
-    psiA->hStdInput       = psiW->hStdInput;
-    psiA->hStdOutput      = psiW->hStdOutput;
-    psiA->hStdError       = psiW->hStdError;
+    RETURN_NULL_IF_NULL(pszA);
+    cchWritten = MultiByteToWideChar(CP_ACP, 0, pszA, -1, pszBufW, cchBufW);
+    RETURN_NULL_IF_ZERO(cchWritten);
+    return pszBufW;
 }
 
-static LPSTR CommandLineWToA(LPCWSTR pszCmdLine)
+static void GetComTextW(LPWSTR pszDst, LPCWSTR pszSrc, int cchDst)
 {
-    WBX_STATE* pState;
-    int        cch;
+    (void)lstrcpynW(pszDst, pszSrc, cchDst);
+}
 
-    pState               = GetState();
-    pState->szCmdBufA[0] = 0;
-    cch                  = WideCharToMultiByte(CP_ACP, 0, pszCmdLine, -1, pState->szCmdBufA, WBX_CMD_CCH, NULL, NULL);
-    if (0 == cch)
+static void GetComTextA(LPSTR pszDst, LPCWSTR pszSrc, int cchDst)
+{
+    if (!SafeWideCharToMultiByte(pszSrc, pszDst, cchDst))
     {
-        pState->szCmdBufA[0] = 0;
+        pszDst[0] = 0;
     }
-    return pState->szCmdBufA;
 }
 
 static int ShowCmdFromStartupW(const STARTUPINFOW* psi)
@@ -970,9 +960,15 @@ static int ShowCmdFromStartupW(const STARTUPINFOW* psi)
     return SW_SHOWDEFAULT;
 }
 
-/* COM self-activation is always wide. Two honest leaves: W hands the wide command line + STARTUPINFO to
-   the wide client unchanged; A marshals them down to ANSI for an ANSI client. The COM call site picks
-   by the registered variant (fIsUnicode); the client's build charset is irrelevant at this layer. */
+static int ShowCmdFromStartupA(const STARTUPINFOA* psi)
+{
+    RETURN_VALUE_IF(IsFlagSet(psi->dwFlags, STARTF_USESHOWWINDOW), (int)psi->wShowWindow);
+    return SW_SHOWDEFAULT;
+}
+
+/* Generic-text leaves, both always defined (like CreateWindowA/W). Each is a pure pass-through to its
+   matching client -- no conversion, no fork. CallClientFromStartup resolves to one at compile time;
+   the call site already holds data in this build's charset. */
 static int CallClientFromStartupW(LPWSTR pszCmdLine, const STARTUPINFOW* psi)
 {
     WBX_STATE* pState;
@@ -981,16 +977,12 @@ static int CallClientFromStartupW(LPWSTR pszCmdLine, const STARTUPINFOW* psi)
     return pState->pfnWinMainExW(GetModuleHandleW(NULL), NULL, pszCmdLine, ShowCmdFromStartupW(psi), psi);
 }
 
-static int CallClientFromStartupA(LPWSTR pszCmdLine, const STARTUPINFOW* psi)
+static int CallClientFromStartupA(LPSTR pszCmdLine, const STARTUPINFOA* psi)
 {
-    WBX_STATE*   pState;
-    STARTUPINFOA siA;
-    LPSTR        pszCmdLineA;
+    WBX_STATE* pState;
 
-    pState      = GetState();
-    StartupInfoWToA(psi, &siA);
-    pszCmdLineA = CommandLineWToA(pszCmdLine);
-    return pState->pfnWinMainExA(GetModuleHandleW(NULL), NULL, pszCmdLineA, ShowCmdFromStartupW(psi), &siA);
+    pState = GetState();
+    return pState->pfnWinMainExA(GetModuleHandleW(NULL), NULL, pszCmdLine, ShowCmdFromStartupA(psi), psi);
 }
 
 /* The generic-text WinBaseXRun (WinBaseXText.inl) stores the client it was handed; W or A is chosen
@@ -1001,7 +993,6 @@ void StoreClientW(WBX_PFN_WINMAINEXW pfnWinMainEx)
 
     pState                = GetState();
     pState->pfnWinMainExW = pfnWinMainEx;
-    pState->fIsUnicode    = TRUE;
 }
 
 void StoreClientA(WBX_PFN_WINMAINEXA pfnWinMainEx)
@@ -1010,5 +1001,4 @@ void StoreClientA(WBX_PFN_WINMAINEXA pfnWinMainEx)
 
     pState                = GetState();
     pState->pfnWinMainExA = pfnWinMainEx;
-    pState->fIsUnicode    = FALSE;
 }

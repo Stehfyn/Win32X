@@ -65,6 +65,11 @@ BOOL WINAPI IsWinBaseXComServer(void);
 _Success_(return != NULL)
 LPSTR SafeWideCharToMultiByte(_In_opt_ LPCWSTR pszW, _Out_writes_(cchBufA) LPSTR pszBufA, _In_ int cchBufA);
 
+/* Bounded ANSI->wide conversion into pszBufW (cchBufW chars). Returns pszBufW, or NULL for a NULL or
+   unconvertible source. */
+_Success_(return != NULL)
+LPWSTR SafeMultiByteToWideChar(_In_opt_ LPCSTR pszA, _Out_writes_(cchBufW) LPWSTR pszBufW, _In_ int cchBufW);
+
 int WINAPI WinMainEx(_In_ HINSTANCE hInstance,
                      _In_opt_ HINSTANCE hPrevInstance,
                      _In_ LPSTR lpCmdLine,
