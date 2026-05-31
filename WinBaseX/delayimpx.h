@@ -39,18 +39,18 @@
             PFN_##_WrapperName pfn;                                                                          \
         } u = {0};                                                                                           \
                                                                                                              \
-        if (NULL == s_pfn)                                                                                   \
+        if (!s_pfn)                                                                                   \
         {                                                                                                    \
-            if (NULL == (_hInst))                                                                            \
+            if (!(_hInst))                                                                            \
             {                                                                                                \
                 (_hInst) = LoadLibrary(_DllName);                                                            \
             }                                                                                                \
-            if (NULL == (_hInst))                                                                            \
+            if (!(_hInst))                                                                            \
             {                                                                                                \
                 return (_ErrVal);                                                                            \
             }                                                                                                \
             u.fp = GetProcAddress((_hInst), #_ExportName);                                                   \
-            if (NULL == u.fp)                                                                                \
+            if (!u.fp)                                                                                \
             {                                                                                                \
                 return (_ErrVal);                                                                            \
             }                                                                                                \
@@ -81,15 +81,15 @@
             PFN_##_WrapperName pfn;                                                                 \
         } u = {0};                                                                                  \
                                                                                                     \
-        if (NULL == s_pfn)                                                                          \
+        if (!s_pfn)                                                                          \
         {                                                                                           \
             hMod = GetModuleHandle(_DllName);                                                       \
-            if (NULL == hMod)                                                                       \
+            if (!hMod)                                                                       \
             {                                                                                       \
                 return (_Fallback);                                                                 \
             }                                                                                       \
             u.fp = GetProcAddress(hMod, #_ExportName);                                              \
-            if (NULL == u.fp)                                                                       \
+            if (!u.fp)                                                                       \
             {                                                                                       \
                 return (_Fallback);                                                                 \
             }                                                                                       \

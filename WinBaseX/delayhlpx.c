@@ -44,10 +44,10 @@ FARPROC WINAPI __delayLoadHelper2(PCImgDelayDescr pidd, FARPROC* ppfnIATEntry)
     phmod  = (HMODULE*)RvaToPtr(pidd->rvaHmod);
 
     hmod = *phmod;
-    if (NULL == hmod)
+    if (!hmod)
     {
         hmod = LoadLibraryA(pszDll);
-        if (NULL == hmod)
+        if (!hmod)
         {
             return NULL;
         }
