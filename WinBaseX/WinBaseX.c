@@ -105,15 +105,11 @@ typedef struct CommandObject
 
 static DWORD s_dwTlsState = TLS_OUT_OF_INDEXES; /* the one irreducible root */
 
-/* ExecuteCommand_Execute (wide COM section) forwards a self/no-selection activation through here; the body is
-   defined after the generated W/A call-client helpers exist. */
+/* ExecuteCommand_Execute (wide COM section) forwards a self/no-selection activation through here; the
+   bodies are defined after the wide->ANSI bridge helpers exist. The call site picks W or A by the
+   registered client variant (fIsUnicode) -- the client's build charset is irrelevant at this layer. */
 static int   CallClientFromStartupW(LPWSTR pszCmdLine, const STARTUPINFOW* psi);
-
-/* name/identifier paste used by the WinBaseXText.inl template: WBXCAT(STARTUPINFO, W) -> STARTUPINFOW,
-   WBXNAME(CallClient) -> CallClient<WBXSUF>. */
-#define WBXCAT2(a, b) a##b
-#define WBXCAT(a, b)  WBXCAT2(a, b)
-#define WBXNAME(base) WBXCAT(base, WBXSUF)
+static int   CallClientFromStartupA(LPWSTR pszCmdLine, const STARTUPINFOW* psi);
 
 #pragma function(memcmp)
 _Check_return_ int __cdecl memcmp(_In_reads_bytes_(cb) const void* pvA,
@@ -401,7 +397,14 @@ static HRESULT STDMETHODCALLTYPE ExecuteCommand_Execute(IExecuteCommand* pThis)
     if (!pObj->selection)
     {
         FillStartupInfoW(pObj, &si, FALSE);
-        CallClientFromStartupW(pObj->params, &si);
+        if (pState->fIsUnicode)
+        {
+            CallClientFromStartupW(pObj->params, &si);
+        }
+        else
+        {
+            CallClientFromStartupA(pObj->params, &si);
+        }
         return S_OK;
     }
 
@@ -417,7 +420,14 @@ static HRESULT STDMETHODCALLTYPE ExecuteCommand_Execute(IExecuteCommand* pThis)
     {
         CoTaskMemFree(pszPath);
         FillStartupInfoW(pObj, &si, FALSE);
-        CallClientFromStartupW(pObj->params, &si);
+        if (pState->fIsUnicode)
+        {
+            CallClientFromStartupW(pObj->params, &si);
+        }
+        else
+        {
+            CallClientFromStartupA(pObj->params, &si);
+        }
         return S_OK;
     }
 
@@ -954,32 +964,33 @@ static LPSTR CommandLineWToA(LPCWSTR pszCmdLine)
     return pState->szCmdBufA;
 }
 
-/* COM self-activation is always wide: call the wide client directly, or convert the wide command
-   line + STARTUPINFO down to ANSI for an ANSI client. */
+static int ShowCmdFromStartupW(const STARTUPINFOW* psi)
+{
+    RETURN_VALUE_IF(IsFlagSet(psi->dwFlags, STARTF_USESHOWWINDOW), (int)psi->wShowWindow);
+    return SW_SHOWDEFAULT;
+}
+
+/* COM self-activation is always wide. Two honest leaves: W hands the wide command line + STARTUPINFO to
+   the wide client unchanged; A marshals them down to ANSI for an ANSI client. The COM call site picks
+   by the registered variant (fIsUnicode); the client's build charset is irrelevant at this layer. */
 static int CallClientFromStartupW(LPWSTR pszCmdLine, const STARTUPINFOW* psi)
 {
+    WBX_STATE* pState;
+
+    pState = GetState();
+    return pState->pfnWinMainExW(GetModuleHandleW(NULL), NULL, pszCmdLine, ShowCmdFromStartupW(psi), psi);
+}
+
+static int CallClientFromStartupA(LPWSTR pszCmdLine, const STARTUPINFOW* psi)
+{
     WBX_STATE*   pState;
-    HINSTANCE    hInstance;
-    int          nShowCmd;
-    BOOL         fUseShow;
     STARTUPINFOA siA;
     LPSTR        pszCmdLineA;
 
-    pState    = GetState();
-    hInstance = GetModuleHandleW(NULL);
-    fUseShow  = IsFlagSet(psi->dwFlags, STARTF_USESHOWWINDOW);
-    nShowCmd  = SW_SHOWDEFAULT;
-    if (fUseShow)
-    {
-        nShowCmd = (int)psi->wShowWindow;
-    }
-    if (pState->fIsUnicode)
-    {
-        return pState->pfnWinMainExW(hInstance, NULL, pszCmdLine, nShowCmd, psi);
-    }
+    pState      = GetState();
     StartupInfoWToA(psi, &siA);
     pszCmdLineA = CommandLineWToA(pszCmdLine);
-    return pState->pfnWinMainExA(hInstance, NULL, pszCmdLineA, nShowCmd, &siA);
+    return pState->pfnWinMainExA(GetModuleHandleW(NULL), NULL, pszCmdLineA, ShowCmdFromStartupW(psi), &siA);
 }
 
 /* The generic-text WinBaseXRun (WinBaseXText.inl) stores the client it was handed; W or A is chosen
