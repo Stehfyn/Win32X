@@ -22,7 +22,7 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ItemDefinitionGroup>
     <ClCompile>
-      <AdditionalIncludeDirectories>..\WinBaseX;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\Win32X;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <CompileAs>CompileAsC</CompileAs>
       <WarningLevel>Level3</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
@@ -43,7 +43,7 @@
     <ClInclude Include="tests.inl" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\WinBaseX\WinBaseX.vcxproj">
+    <ProjectReference Include="..\Win32X\Win32X.vcxproj">
       <Project>{27df9d4e-60cf-460e-9b29-3a78da8239d5}</Project>
     </ProjectReference>
   </ItemGroup>

@@ -26,8 +26,6 @@ typedef int(WINAPI* WBX_PFN_WINMAINEXW)(HINSTANCE, HINSTANCE, LPWSTR, int, const
  */
 extern const CLSID CLSID_WinBaseXLaunchBroker;
 
-BOOL WINAPI IsWinBaseXComServer(void);
-
 /* Bounded wide->ANSI conversion into pszBufA (cchBufA chars). Returns pszBufA, or NULL for a NULL or
    unconvertible source. */
 _Success_(return != NULL)

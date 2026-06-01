@@ -12,14 +12,6 @@
 /* Implemented (wide) in WinBaseX.c. */
 BOOL StateInit(void);
 int  RunCommon(BOOL* pfProceed);
-void StoreClientA(WBX_PFN_WINMAINEXA pfnWinMainEx);
-void StoreClientW(WBX_PFN_WINMAINEXW pfnWinMainEx);
-
-#ifdef UNICODE
-#define StoreClient StoreClientW
-#else
-#define StoreClient StoreClientA
-#endif
 
 static int GetShowCmd(const STARTUPINFO* psi)
 {
@@ -37,7 +29,6 @@ int __cdecl WinBaseXRun(WBX_PFN_WINMAINEX pfnWinMainEx)
     int         rc;
 
     RETURN_VALUE_IF_NOT(StateInit(), 3);
-    StoreClient(pfnWinMainEx);
     rc = RunCommon(&fProceed);
     RETURN_VALUE_IF_NOT(fProceed, rc);
     GetStartupInfo(&si);

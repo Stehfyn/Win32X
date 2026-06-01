@@ -20,8 +20,8 @@
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "shell32.lib")
 
-/* Every non-kernel32 system DLL is delay-loaded (see <DelayLoadDLLs> in WinMainEx.vcxproj -- /DELAYLOAD
-   is not honored as an embedded #pragma comment(linker) directive, only as a real link option), so it
+/* Every non-kernel32 system DLL is delay-loaded by the linking application (via /DELAYLOAD link options
+   -- not honored as an embedded #pragma comment(linker) directive, only as a real link option), so it
    leaves the load-time (auto-load) import directory and binds on first call instead. The import libs
    above still supply the call stubs; delay-load just moves the descriptor to the delay-import table.
    This keeps guaranteed/colliding funcs statically referenced (no per-function thunk) while reducing the
@@ -83,11 +83,8 @@ typedef struct ClassFactory
 typedef struct WBX_STATE
 {
     ClassFactory       factory;       /* embedded singleton -> no global factory */
-    WBX_PFN_WINMAINEXA pfnWinMainExA; /* exactly one of A/W set per process */
-    WBX_PFN_WINMAINEXW pfnWinMainExW;
     /* COM-server runtime */
     volatile LONG      nObjectCount;
-    BOOL               fComServer;
     /* process identity + forward scratch */
     TCHAR              szMyPath[MAX_PATH];    /* this build's charset; GetModuleFileName fills it generic */
     TCHAR              szCmdBuf[WBX_CMD_CCH]; /* forward command line, in this build's charset */
@@ -109,16 +106,6 @@ typedef struct CommandObject
 } CommandObject;
 
 static DWORD s_dwTlsState = TLS_OUT_OF_INDEXES; /* the one irreducible root */
-
-/* Generic-text leaves: each forwards to its matching client. CallClientFromStartup resolves to one of
-   them by this build's charset -- no runtime fork. Both are always defined (like CreateWindowA/W). */
-static int CallClientFromStartupW(LPWSTR pszCmdLine, const STARTUPINFOW* psi);
-static int CallClientFromStartupA(LPSTR pszCmdLine, const STARTUPINFOA* psi);
-#ifdef UNICODE
-#define CallClientFromStartup CallClientFromStartupW
-#else
-#define CallClientFromStartup CallClientFromStartupA
-#endif
 
 /* The IExecuteCommand ABI hands strings in fixed-wide LPCWSTR (so does IShellItem::GetDisplayName).
    Read one into a generic-text buffer: GetComTextW copies wide, GetComTextA narrows to ANSI --
@@ -155,15 +142,6 @@ _Check_return_ int __cdecl memcmp(_In_reads_bytes_(cb) const void* pvA,
 static WBX_STATE* GetState(void)
 {
     return (WBX_STATE*)TlsGetValue(s_dwTlsState);
-}
-
-BOOL WINAPI IsWinBaseXComServer(void)
-{
-    WBX_STATE* pState;
-
-    pState = GetState();
-    RETURN_FALSE_IF_NULL(pState);
-    return pState->fComServer;
 }
 
 static void RecordExe(LPCWSTR pszPath)
@@ -283,7 +261,12 @@ static ULONG Command_Release(CommandObject* pObj)
         {
             IShellItemArray_Release(pObj->selection);
         }
-        InterlockedDecrement(&pObj->pState->nObjectCount);
+        /* Last broker object gone: the transient launch is done, so end RunComServer's pump. Release
+           arrives on the STA pump thread, so PostQuitMessage targets the right queue. */
+        if (0 == InterlockedDecrement(&pObj->pState->nObjectCount))
+        {
+            PostQuitMessage(0);
+        }
         HeapFree(GetProcessHeap(), 0, pObj);
     }
     return (ULONG)lRef;
@@ -370,13 +353,80 @@ static HRESULT STDMETHODCALLTYPE ExecuteCommand_SetDirectory(IExecuteCommand* pT
     return S_OK;
 }
 
+/* Build "<path>" [params] into pState->szCmdBuf, bounded so an over-long path/params declines the
+   launch rather than overflowing into adjacent state. */
+static BOOL BuildLaunchCommand(WBX_STATE* pState, LPCTSTR pszPath, LPCTSTR pszParams)
+{
+    LPTSTR pszWrite;
+    int    cchPath;
+    int    cchParams;
+    int    cchNeeded;
+    BOOL   fHasParams;
+
+    cchPath    = lstrlen(pszPath);
+    fHasParams = !!(pszParams && pszParams[0]);
+    cchParams  = 0;
+    if (fHasParams)
+    {
+        cchParams = lstrlen(pszParams);
+    }
+    cchNeeded = cchPath + 3; /* two quotes + nul */
+    if (fHasParams)
+    {
+        cchNeeded += cchParams + 1; /* space + params */
+    }
+    RETURN_FALSE_IF(WBX_CMD_CCH < cchNeeded);
+
+    pszWrite    = pState->szCmdBuf;
+    (*pszWrite) = '"';
+    pszWrite++;
+    (void)lstrcpyn(pszWrite, pszPath, cchPath + 1);
+    pszWrite    += cchPath;
+    (*pszWrite)  = '"';
+    pszWrite++;
+    if (fHasParams)
+    {
+        (*pszWrite) = ' ';
+        pszWrite++;
+        (void)lstrcpyn(pszWrite, pszParams, cchParams + 1);
+        pszWrite += cchParams;
+    }
+    (*pszWrite) = 0;
+    return TRUE;
+}
+
+/* Re-launch this exe as a fresh, normal (non-embedded) process. CreateProcess on the image path
+   bypasses the exefile DelegateExecute hook, so the spawned instance re-enters WinBaseXRun on the
+   direct path and runs its own _tWinMainEx pump -- the broker never hosts the window itself. */
+static HRESULT LaunchSelf(WBX_STATE* pState, const CommandObject* pObj)
+{
+    STARTUPINFO         si;
+    PROCESS_INFORMATION pi;
+    LPCTSTR             pszDir;
+    BOOL                fCreated;
+
+    RETURN_VALUE_IF_NOT(BuildLaunchCommand(pState, pState->szMyPath, pObj->params), E_FAIL);
+    FillStartupInfo(pObj, &si, FALSE);
+    SetFlag(si.dwFlags, STARTF_FORCEOFFFEEDBACK);
+
+    pszDir = NULL;
+    if (pObj->directory[0])
+    {
+        pszDir = pObj->directory;
+    }
+    fCreated = CreateProcess(NULL, pState->szCmdBuf, NULL, NULL, FALSE, 0, NULL, pszDir, &si, &pi);
+    RETURN_VALUE_IF_NOT(fCreated, HRESULT_FROM_WIN32(GetLastError()));
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return S_OK;
+}
+
 static HRESULT STDMETHODCALLTYPE ExecuteCommand_Execute(IExecuteCommand* pThis)
 {
     CommandObject*      pObj;
     WBX_STATE*          pState;
     IShellItem*         pItem;
     LPWSTR              pszPath;
-    LPTSTR              pszWrite;
     LPCTSTR             pszDir;
     TCHAR               szPath[MAX_PATH];
     STARTUPINFO         si;
@@ -385,22 +435,15 @@ static HRESULT STDMETHODCALLTYPE ExecuteCommand_Execute(IExecuteCommand* pThis)
     HRESULT             hr;
     HRESULT             rc;
     DWORD               dwErr;
-    int                 cchPath;
-    int                 cchParams;
-    int                 cchNeeded;
     BOOL                fIsSelf;
     BOOL                fRegistered;
-    BOOL                fHasParams;
-    BOOL                fCreated;
 
     pObj   = EC_OBJ(pThis);
     pState = pObj->pState;
 
     if (!pObj->selection)
     {
-        FillStartupInfo(pObj, &si, FALSE);
-        CallClientFromStartup(pObj->params, &si);
-        return S_OK;
+        return LaunchSelf(pState, pObj);
     }
 
     hr = IShellItemArray_GetItemAt(pObj->selection, 0, &pItem);
@@ -419,9 +462,7 @@ static HRESULT STDMETHODCALLTYPE ExecuteCommand_Execute(IExecuteCommand* pThis)
     if (fIsSelf)
     {
         CoTaskMemFree(pszPath);
-        FillStartupInfo(pObj, &si, FALSE);
-        CallClientFromStartup(pObj->params, &si);
-        return S_OK;
+        return LaunchSelf(pState, pObj);
     }
 
     fRegistered = IsExeRegistered(pszPath);
@@ -431,37 +472,7 @@ static HRESULT STDMETHODCALLTYPE ExecuteCommand_Execute(IExecuteCommand* pThis)
     }
     CoTaskMemFree(pszPath);
 
-    /* Build "<path>" [params] into szCmdBuf, bounded so an over-long path/params declines the
-       forward rather than overflowing into adjacent state. */
-    cchPath    = lstrlen(szPath);
-    fHasParams = !!pObj->params[0];
-    cchParams  = 0;
-    if (fHasParams)
-    {
-        cchParams = lstrlen(pObj->params);
-    }
-    cchNeeded = cchPath + 3; /* two quotes + nul */
-    if (fHasParams)
-    {
-        cchNeeded += cchParams + 1; /* space + params */
-    }
-    RETURN_VALUE_IF(WBX_CMD_CCH < cchNeeded, E_FAIL);
-
-    pszWrite    = pState->szCmdBuf;
-    (*pszWrite) = '"';
-    pszWrite++;
-    (void)lstrcpyn(pszWrite, szPath, cchPath + 1);
-    pszWrite    += cchPath;
-    (*pszWrite)  = '"';
-    pszWrite++;
-    if (fHasParams)
-    {
-        (*pszWrite) = ' ';
-        pszWrite++;
-        (void)lstrcpyn(pszWrite, pObj->params, cchParams + 1);
-        pszWrite += cchParams;
-    }
-    (*pszWrite) = 0;
+    RETURN_VALUE_IF_NOT(BuildLaunchCommand(pState, szPath, pObj->params), E_FAIL);
 
     FillStartupInfo(pObj, &si, TRUE);
     if (fRegistered)
@@ -475,8 +486,7 @@ static HRESULT STDMETHODCALLTYPE ExecuteCommand_Execute(IExecuteCommand* pThis)
         pszDir = pObj->directory;
     }
 
-    fCreated = CreateProcess(NULL, pState->szCmdBuf, NULL, NULL, FALSE, 0, NULL, pszDir, &si, &pi);
-    if (fCreated)
+    if (CreateProcess(NULL, pState->szCmdBuf, NULL, NULL, FALSE, 0, NULL, pszDir, &si, &pi))
     {
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
@@ -758,9 +768,8 @@ static int RunComServer(void)
     HRESULT    hrReg;
     DWORD      dwCookie;
 
-    pState             = GetState();
-    pState->fComServer = TRUE;
-    hrInit             = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    pState = GetState();
+    hrInit = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     RETURN_VALUE_IF(FAILED(hrInit), 1);
     dwCookie = 0;
     hrReg    = CoRegisterClassObject(&CLSID_WinBaseXLaunchBroker,
@@ -873,51 +882,3 @@ static void GetComTextA(LPSTR pszDst, LPCWSTR pszSrc, int cchDst)
     }
 }
 
-static int GetShowCmdFromStartupW(const STARTUPINFOW* psi)
-{
-    RETURN_VALUE_IF(IsFlagSet(psi->dwFlags, STARTF_USESHOWWINDOW), (int)psi->wShowWindow);
-    return SW_SHOWDEFAULT;
-}
-
-static int GetShowCmdFromStartupA(const STARTUPINFOA* psi)
-{
-    RETURN_VALUE_IF(IsFlagSet(psi->dwFlags, STARTF_USESHOWWINDOW), (int)psi->wShowWindow);
-    return SW_SHOWDEFAULT;
-}
-
-/* Generic-text leaves, both always defined (like CreateWindowA/W). Each is a pure pass-through to its
-   matching client -- no conversion, no fork. CallClientFromStartup resolves to one at compile time;
-   the call site already holds data in this build's charset. */
-static int CallClientFromStartupW(LPWSTR pszCmdLine, const STARTUPINFOW* psi)
-{
-    WBX_STATE* pState;
-
-    pState = GetState();
-    return pState->pfnWinMainExW(GetModuleHandleW(NULL), NULL, pszCmdLine, GetShowCmdFromStartupW(psi), psi);
-}
-
-static int CallClientFromStartupA(LPSTR pszCmdLine, const STARTUPINFOA* psi)
-{
-    WBX_STATE* pState;
-
-    pState = GetState();
-    return pState->pfnWinMainExA(GetModuleHandleW(NULL), NULL, pszCmdLine, GetShowCmdFromStartupA(psi), psi);
-}
-
-/* The generic-text WinBaseXRun (WinBaseXText.inl) stores the client it was handed; W or A is chosen
-   by the charset that TU was compiled as. */
-void StoreClientW(WBX_PFN_WINMAINEXW pfnWinMainEx)
-{
-    WBX_STATE* pState;
-
-    pState                = GetState();
-    pState->pfnWinMainExW = pfnWinMainEx;
-}
-
-void StoreClientA(WBX_PFN_WINMAINEXA pfnWinMainEx)
-{
-    WBX_STATE* pState;
-
-    pState                = GetState();
-    pState->pfnWinMainExA = pfnWinMainEx;
-}

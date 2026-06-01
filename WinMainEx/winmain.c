@@ -13,8 +13,7 @@
 
 #include <windows.h>
 #include <windowsx.h>
-#include "WinBaseX.h"
-#include "WinUserX.h"
+#include "win32x.h"
 
 /* Client-owned window-class name and caption -- UI identity, distinct from the WinBaseX launch
    broker's COM identity (CLSID_WinBaseXLaunchBroker), which the library owns. */
@@ -39,8 +38,10 @@ int WINAPI _tWinMainEx(_In_ HINSTANCE          hInstance,
     UNREFERENCED_PARAMETER(nShowCmd);
     UNREFERENCED_PARAMETER(lpStartupInfo);
 
-    /* RegisterClass returns 0 on a repeated activation (ERROR_CLASS_ALREADY_EXISTS); harmless --
-       the class stays registered, so InitInstance's CreateWindowEx succeeds regardless. */
+    /* A plain CRT-style WinMain: register the class (RegisterClass returns 0 on a repeated activation
+       -- ERROR_CLASS_ALREADY_EXISTS, harmless), bring the window up, run the message pump, return.
+       The launch broker never calls in here -- a DelegateExecute activation spawns a fresh process
+       that re-enters on the direct path -- so there is no launch mode to branch on. */
     MyRegisterClass(hInstance);
     if (!InitInstance(hInstance))
     {
@@ -94,13 +95,6 @@ static BOOL InitInstance(HINSTANCE hInstance)
 
     ShowWindowEx(hwnd, SWX_SHOWSTARTUP);
     UpdateWindow(hwnd);
-
-    /* A COM-server (shell DelegateExecute) activation only needs the window shown; WinBaseX pumps
-       messages for the embedding, so the client must not run its own loop. */
-    if (IsWinBaseXComServer())
-    {
-        return FALSE;
-    }
     return TRUE;
 }
 
@@ -108,10 +102,9 @@ static void CALLBACK OnDestroy(HWND hwnd)
 {
     UNREFERENCED_PARAMETER(hwnd);
 
-    if (!IsWinBaseXComServer())
-    {
-        PostQuitMessage(0);
-    }
+    /* Ends whichever pump is running -- WinBaseXRun's on a direct launch, RunComServer's under a
+       DelegateExecute embedding. A transient COM launch dies with its window; that is correct. */
+    PostQuitMessage(0);
 }
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)

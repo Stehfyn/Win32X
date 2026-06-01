@@ -40,6 +40,9 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="win32x.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="WinBaseX.h">
       <Filter>Header Files</Filter>
     </ClInclude>

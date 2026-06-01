@@ -19,10 +19,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <shlwapi.h>
-#include "WinBaseX.h"
-#include "WinUserX.h"
-#include "ShellScalingApiX.h"
-#include "windefx.h"
+#include "win32x.h"
 
 #ifndef DPI_AWARENESS_CONTEXT_UNAWARE
 #define DPI_AWARENESS_CONTEXT_UNAWARE ((DPI_AWARENESS_CONTEXT)-1)

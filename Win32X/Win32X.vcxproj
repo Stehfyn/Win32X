@@ -22,7 +22,7 @@
     <VCProjectVersion>18.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
     <ProjectGuid>{27df9d4e-60cf-460e-9b29-3a78da8239d5}</ProjectGuid>
-    <RootNamespace>WinBaseX</RootNamespace>
+    <RootNamespace>Win32X</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
@@ -96,6 +96,7 @@
     <ClCompile Include="processenvxW.c" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="win32x.h" />
     <ClInclude Include="WinBaseX.h" />
     <ClInclude Include="WinBaseXText.inl" />
     <ClInclude Include="WinUserX.h" />
