@@ -85,6 +85,7 @@ typedef struct WBX_STATE
     ClassFactory       factory;       /* embedded singleton -> no global factory */
     /* COM-server runtime */
     volatile LONG      nObjectCount;
+    LONG               _reserved;     /* explicit tail-alignment pad (heap-zeroed); no implicit padding */
     /* process identity + forward scratch */
     TCHAR              szMyPath[MAX_PATH];    /* this build's charset; GetModuleFileName fills it generic */
     TCHAR              szCmdBuf[WBX_CMD_CCH]; /* forward command line, in this build's charset */
@@ -111,7 +112,7 @@ static DWORD s_dwTlsState = TLS_OUT_OF_INDEXES; /* the one irreducible root */
    Read one into a generic-text buffer: GetComTextW copies wide, GetComTextA narrows to ANSI --
    concrete on each side, never a "convert to TCHAR." GetComText resolves by this build's charset;
    both leaves always defined, like CreateWindowA/W. */
-static void GetComTextW(LPWSTR pszDst, LPCWSTR pszSrc, int cchDst);
+static FORCEINLINE void GetComTextW(LPWSTR pszDst, LPCWSTR pszSrc, int cchDst);
 static void GetComTextA(LPSTR pszDst, LPCWSTR pszSrc, int cchDst);
 #ifdef UNICODE
 #define GetComText GetComTextW
@@ -120,7 +121,7 @@ static void GetComTextA(LPSTR pszDst, LPCWSTR pszSrc, int cchDst);
 #endif
 
 #pragma function(memcmp)
-_Check_return_ int __cdecl memcmp(_In_reads_bytes_(cb) const void* pvA,
+_Check_return_ DECLSPEC_NOINLINE int __cdecl memcmp(_In_reads_bytes_(cb) const void* pvA,
                                   _In_reads_bytes_(cb) const void* pvB,
                                   _In_ size_t                      cb)
 {
@@ -139,12 +140,12 @@ _Check_return_ int __cdecl memcmp(_In_reads_bytes_(cb) const void* pvA,
     return 0;
 }
 
-static WBX_STATE* GetState(void)
+static FORCEINLINE WBX_STATE* GetState(void)
 {
     return (WBX_STATE*)TlsGetValue(s_dwTlsState);
 }
 
-static void RecordExe(LPCWSTR pszPath)
+static FORCEINLINE void RecordExe(LPCWSTR pszPath)
 {
     static const WCHAR szOne[] = L"1";
     HKEY               hKey;
@@ -158,7 +159,7 @@ static void RecordExe(LPCWSTR pszPath)
     }
 }
 
-static BOOL IsExeRegistered(LPCWSTR pszPath)
+static FORCEINLINE BOOL IsExeRegistered(LPCWSTR pszPath)
 {
     HKEY hKey;
     LONG lrOpen;
@@ -176,7 +177,7 @@ static BOOL IsExeRegistered(LPCWSTR pszPath)
     return fFound;
 }
 
-static void FillStartupInfoW(const CommandObject* pObj, STARTUPINFOW* psi, BOOL fForwardChild)
+static FORCEINLINE void FillStartupInfoW(const CommandObject* pObj, STARTUPINFOW* psi, BOOL fForwardChild)
 {
     SecureZeroMemory(psi, sizeof((*psi)));
     psi->cb = (DWORD)sizeof((*psi));
@@ -219,7 +220,7 @@ static void FillStartupInfoA(const CommandObject* pObj, STARTUPINFOA* psi, BOOL 
 #define EC_OBJ(p)  ((CommandObject*)((BYTE*)(p) - offsetof(CommandObject, vtbl_ec)))
 #define OWS_OBJ(p) ((CommandObject*)((BYTE*)(p) - offsetof(CommandObject, vtbl_ows)))
 
-static HRESULT Command_QueryInterface(CommandObject* pObj, REFIID riid, void** ppv)
+static FORCEINLINE HRESULT Command_QueryInterface(CommandObject* pObj, REFIID riid, void** ppv)
 {
     BOOL fUnknown;
     BOOL fExecute;
@@ -245,12 +246,12 @@ static HRESULT Command_QueryInterface(CommandObject* pObj, REFIID riid, void** p
     return S_OK;
 }
 
-static ULONG Command_AddRef(CommandObject* pObj)
+static FORCEINLINE ULONG Command_AddRef(CommandObject* pObj)
 {
     return (ULONG)InterlockedIncrement(&pObj->ref);
 }
 
-static ULONG Command_Release(CommandObject* pObj)
+static FORCEINLINE ULONG Command_Release(CommandObject* pObj)
 {
     LONG lRef;
 
@@ -355,7 +356,7 @@ static HRESULT STDMETHODCALLTYPE ExecuteCommand_SetDirectory(IExecuteCommand* pT
 
 /* Build "<path>" [params] into pState->szCmdBuf, bounded so an over-long path/params declines the
    launch rather than overflowing into adjacent state. */
-static BOOL BuildLaunchCommand(WBX_STATE* pState, LPCTSTR pszPath, LPCTSTR pszParams)
+static FORCEINLINE BOOL BuildLaunchCommand(WBX_STATE* pState, LPCTSTR pszPath, LPCTSTR pszParams)
 {
     LPTSTR pszWrite;
     int    cchPath;
@@ -639,7 +640,7 @@ static const IClassFactoryVtbl s_ClassFactoryVtbl = { ClassFactory_QueryInterfac
                                                       ClassFactory_CreateInstance,
                                                       ClassFactory_LockServer };
 
-static void ClsidString(WCHAR rgClsid[WBX_GUID_CCH])
+static FORCEINLINE void ClsidString(WCHAR rgClsid[WBX_GUID_CCH])
 {
     int cch;
 
@@ -650,7 +651,7 @@ static void ClsidString(WCHAR rgClsid[WBX_GUID_CCH])
     }
 }
 
-LONG RegSetStringW(HKEY hParent, LPCWSTR pszSubKey, LPCWSTR pszName, LPCWSTR pszValue)
+DECLSPEC_NOINLINE LONG RegSetStringW(HKEY hParent, LPCWSTR pszSubKey, LPCWSTR pszName, LPCWSTR pszValue)
 {
     HKEY  hKey;
     LONG  lr;
@@ -687,7 +688,7 @@ LONG RegSetStringA(HKEY hParent, LPCSTR pszSubKey, LPCSTR pszName, LPCSTR pszVal
     return RegSetStringW(hParent, szSubKey, pszNameW, szValue);
 }
 
-static int Register(void)
+static FORCEINLINE int Register(void)
 {
     WBX_STATE* pState;
     WCHAR      rgClsid[WBX_GUID_CCH];
@@ -717,7 +718,7 @@ static int Register(void)
     return 0;
 }
 
-static int Unregister(void)
+static FORCEINLINE int Unregister(void)
 {
     WCHAR rgClsid[WBX_GUID_CCH];
     WCHAR szSub[WBX_SUBKEY_CCH];
@@ -743,7 +744,7 @@ static int Unregister(void)
     return 0;
 }
 
-static BOOL IsRegistered(void)
+static FORCEINLINE BOOL IsRegistered(void)
 {
     WCHAR rgClsid[WBX_GUID_CCH];
     WCHAR szSub[WBX_SUBKEY_CCH];
@@ -760,7 +761,7 @@ static BOOL IsRegistered(void)
     return TRUE;
 }
 
-static int RunComServer(void)
+static FORCEINLINE int RunComServer(void)
 {
     WBX_STATE* pState;
     MSG        msg;
@@ -798,7 +799,7 @@ static int RunComServer(void)
 }
 
 /* Allocate the apartment-local state once, at the very top of the entry body. */
-BOOL StateInit(void)
+DECLSPEC_NOINLINE BOOL StateInit(void)
 {
     WBX_STATE* pState;
 
@@ -869,7 +870,7 @@ LPWSTR SafeMultiByteToWideChar(_In_opt_ LPCSTR pszA, _Out_writes_(cchBufW) LPWST
     return pszBufW;
 }
 
-static void GetComTextW(LPWSTR pszDst, LPCWSTR pszSrc, int cchDst)
+static FORCEINLINE void GetComTextW(LPWSTR pszDst, LPCWSTR pszSrc, int cchDst)
 {
     (void)lstrcpynW(pszDst, pszSrc, cchDst);
 }

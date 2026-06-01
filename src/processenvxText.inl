@@ -14,7 +14,7 @@
     (CSTR_EQUAL == CompareStringA(LOCALE_INVARIANT, NORM_IGNORECASE, (p), (cch), (arg), (cch)))
 #endif
 
-LPTSTR WINAPI GetCommandLineArguments(void)
+DECLSPEC_NOINLINE LPTSTR WINAPI GetCommandLineArguments(void)
 {
     LPTSTR pszCmd;
 
@@ -46,7 +46,7 @@ LPTSTR WINAPI GetCommandLineArguments(void)
 }
 
 /* Search the argument tail only -- never argv[0] -- so the program path can't false-match a flag. */
-LPTSTR WINAPI GetCommandLineArgument(_In_ LPCTSTR pszArgument)
+DECLSPEC_NOINLINE LPTSTR WINAPI GetCommandLineArgument(_In_ LPCTSTR pszArgument)
 {
     LPTSTR pszCmd;
     LPTSTR p;

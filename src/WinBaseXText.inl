@@ -13,7 +13,7 @@
 BOOL StateInit(void);
 int  RunCommon(BOOL* pfProceed);
 
-static int GetShowCmd(const STARTUPINFO* psi)
+static FORCEINLINE int GetShowCmd(const STARTUPINFO* psi)
 {
     BOOL fUseShow;
 

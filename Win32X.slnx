@@ -1,9 +1,0 @@
-<Solution>
-  <Configurations>
-    <Platform Name="x64" />
-    <Platform Name="Win32" />
-  </Configurations>
-  <Project Path="src/Win32X.vcxproj" Id="27df9d4e-60cf-460e-9b29-3a78da8239d5" />
-  <Project Path="examples/WinMainEx.vcxproj" Id="8a8eafed-53f9-401c-b7f2-f4b383b566ce" />
-  <Project Path="tests/Tests.vcxproj" Id="a1b2c3d4-1111-2222-3333-444455556666" />
-</Solution>

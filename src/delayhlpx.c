@@ -24,7 +24,7 @@
 /* Linker-provided image base; RVAs in the descriptor are relative to it. */
 extern IMAGE_DOS_HEADER __ImageBase;
 
-static PVOID RvaToPtr(RVA rva)
+static FORCEINLINE PVOID RvaToPtr(RVA rva)
 {
     return (PBYTE)&__ImageBase + rva;
 }

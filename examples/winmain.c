@@ -25,7 +25,7 @@ static BOOL             InitInstance(HINSTANCE hInstance);
 static void    CALLBACK OnDestroy(HWND hwnd);
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
-int WINAPI _tWinMainEx(_In_ HINSTANCE          hInstance,
+DECLSPEC_NOINLINE int WINAPI _tWinMainEx(_In_ HINSTANCE          hInstance,
                        _In_opt_ HINSTANCE      hPrevInstance,
                        _In_ LPTSTR             lpCmdLine,
                        _In_ int                nShowCmd,
@@ -57,7 +57,7 @@ int WINAPI _tWinMainEx(_In_ HINSTANCE          hInstance,
 }
 
 /* Registers the window class. */
-static ATOM MyRegisterClass(HINSTANCE hInstance)
+static FORCEINLINE ATOM MyRegisterClass(HINSTANCE hInstance)
 {
     WNDCLASS wc;
 
@@ -72,7 +72,7 @@ static ATOM MyRegisterClass(HINSTANCE hInstance)
 }
 
 /* Creates and displays the main window. */
-static BOOL InitInstance(HINSTANCE hInstance)
+static FORCEINLINE BOOL InitInstance(HINSTANCE hInstance)
 {
     HWND hwnd;
 
@@ -98,7 +98,7 @@ static BOOL InitInstance(HINSTANCE hInstance)
     return TRUE;
 }
 
-static void CALLBACK OnDestroy(HWND hwnd)
+static FORCEINLINE void CALLBACK OnDestroy(HWND hwnd)
 {
     UNREFERENCED_PARAMETER(hwnd);
 

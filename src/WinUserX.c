@@ -26,7 +26,7 @@
 /* user32 DPI *Ex wrapper bodies (declared in WinUserX.h); instantiated here, once. */
 #include "WinUserXThunks.inl"
 
-HMONITOR WINAPI GetStartupMonitor(_In_ DWORD dwFlags)
+DECLSPEC_NOINLINE HMONITOR WINAPI GetStartupMonitor(_In_ DWORD dwFlags)
 {
     STARTUPINFO si;
     POINT       pt;
@@ -52,7 +52,7 @@ HMONITOR WINAPI GetStartupMonitor(_In_ DWORD dwFlags)
 }
 
 _Success_(return != FALSE)
-BOOL WINAPI CalculateWindowStartupPosition(_Out_ RECT* prcOut)
+DECLSPEC_NOINLINE BOOL WINAPI CalculateWindowStartupPosition(_Out_ RECT* prcOut)
 {
     STARTUPINFO si;
     HMONITOR    hMonitor;
@@ -133,7 +133,7 @@ BOOL WINAPI CalculateWindowStartupPosition(_Out_ RECT* prcOut)
     return TRUE;
 }
 
-BOOL WINAPI ShowWindowEx(_In_ HWND hwnd, _In_ int nShowEx)
+DECLSPEC_NOINLINE BOOL WINAPI ShowWindowEx(_In_ HWND hwnd, _In_ int nShowEx)
 {
     BOOL                  fStartup;
     BOOL                  fGotPos;
