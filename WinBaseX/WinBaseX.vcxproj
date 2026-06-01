@@ -90,6 +90,7 @@
     <ClCompile Include="WinBaseXStartupW.c" />
     <ClCompile Include="WinUserX.c" />
     <ClCompile Include="ShellScalingApiX.c" />
+    <ClCompile Include="versionhelpersx.c" />
     <ClCompile Include="delayhlpx.c" />
     <ClCompile Include="processenvxA.c" />
     <ClCompile Include="processenvxW.c" />
@@ -101,6 +102,8 @@
     <ClInclude Include="WinUserXThunks.inl" />
     <ClInclude Include="ShellScalingApiX.h" />
     <ClInclude Include="ShellScalingApiXThunks.inl" />
+    <ClInclude Include="versionhelpersx.h" />
+    <ClInclude Include="versionhelpersxThunks.inl" />
     <ClInclude Include="processenvx.h" />
     <ClInclude Include="processenvxText.inl" />
     <ClInclude Include="windefx.h" />

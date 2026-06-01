@@ -23,6 +23,15 @@
     <ClCompile Include="WinUserX.c">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="ShellScalingApiX.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="versionhelpersx.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="delayhlpx.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="processenvxA.c">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -37,6 +46,15 @@
     <ClInclude Include="WinUserX.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="ShellScalingApiX.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="versionhelpersx.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="processenvx.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="windefx.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -46,10 +64,16 @@
     <ClInclude Include="delayimpx.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="processenvx.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="WinBaseXText.inl">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="WinUserXThunks.inl">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ShellScalingApiXThunks.inl">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="versionhelpersxThunks.inl">
       <Filter>Source Files</Filter>
     </ClInclude>
     <ClInclude Include="processenvxText.inl">
