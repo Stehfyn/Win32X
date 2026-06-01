@@ -9,9 +9,8 @@
 #include "targetver.h"
 
 // CRT-free environment: this app links /NODEFAULTLIB. Disable the codegen that would emit calls into
-// an absent C runtime -- runtime checks (/RTC under Debug), stack probing, strict GS -- for the whole
-// translation unit, INCLUDING the inline helpers pulled in from the headers below (uxthemex.h's
-// resolver has stack buffers, which /RTC1 would instrument with _RTC_CheckStackVars).
+// an absent C runtime -- runtime checks (/RTC under Debug), stack probing, strict GS -- for this
+// translation unit and the inline helpers pulled in from the headers below.
 #pragma runtime_checks("", off)
 #pragma check_stack(off)
 #pragma strict_gs_check(off)

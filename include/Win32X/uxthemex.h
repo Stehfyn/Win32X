@@ -8,8 +8,8 @@
  * every optional function dynamically, and only reports dark mode effective when the required pieces
  * are present for the running build.
  */
-#ifndef UXH
-#define UXH
+#ifndef UXTHEMEX_H
+#define UXTHEMEX_H
 
 #include <windows.h>
 #include "windefx.h"
@@ -168,7 +168,7 @@ typedef struct THEME_STATE
     UINT                                      cDialogs;
 } THEME_STATE;
 
-static THEME_STATE g_theme;
+extern THEME_STATE g_theme;
 
 static FORCEINLINE HMODULE ThemeLoadSystemDll(LPCTSTR pszDll)
 {
@@ -195,10 +195,11 @@ static FORCEINLINE THEME_OS_POLICY ThemeClassifyPolicy(void)
     BOOL fWin10_1903OrGreater;
     BOOL fWin10_1809OrGreater;
 
-    fWindows10OrGreater  = (10u < g_theme.dwMajorVersion) ||
-                            ((10u == g_theme.dwMajorVersion) && (0u <= g_theme.dwMinorVersion));
-    fWin10_1809OrGreater = fWindows10OrGreater && (BUILD_WIN10_1809 <= g_theme.dwBuildNumber);
-    fWin10_1903OrGreater = fWindows10OrGreater && (BUILD_WIN10_1903 <= g_theme.dwBuildNumber);
+    fWindows10OrGreater  = (10u <= g_theme.dwMajorVersion);
+    fWin10_1809OrGreater = (10u < g_theme.dwMajorVersion) ||
+                            (fWindows10OrGreater && (BUILD_WIN10_1809 <= g_theme.dwBuildNumber));
+    fWin10_1903OrGreater = (10u < g_theme.dwMajorVersion) ||
+                            (fWindows10OrGreater && (BUILD_WIN10_1903 <= g_theme.dwBuildNumber));
 
     if (!fWin10_1809OrGreater)
     {
@@ -437,6 +438,12 @@ static FORCEINLINE BOOL ThemeEffectiveDarkMode(void)
     return g_theme.fEffectiveDark;
 }
 
+static FORCEINLINE BOOL ThemeIsDarkMode(void)
+{
+    ThemeResolve();
+    return g_theme.fEffectiveDark;
+}
+
 static FORCEINLINE void ThemeStartup(void)
 {
     BOOL fNeedsBufferedPaintInit;
@@ -545,7 +552,7 @@ static FORCEINLINE void ThemeRedrawRegistered(void)
         hwnd = *phwnd;
         if (IsWindow(hwnd))
         {
-            RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_UPDATENOW);
+            RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_FRAME | RDW_UPDATENOW);
         }
         ++phwnd;
         --c;
@@ -558,7 +565,7 @@ static FORCEINLINE void ThemeRedrawRegistered(void)
         hwnd = *phwnd;
         if (IsWindow(hwnd))
         {
-            RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_UPDATENOW);
+            RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_FRAME | RDW_UPDATENOW);
         }
         ++phwnd;
         --c;
@@ -658,7 +665,6 @@ static FORCEINLINE void ThemeApplyDialogTree(HWND hwnd, BOOL fDark)
     ThemeRegisterDialog(hwnd);
     ThemeApplyDialog(hwnd, fEffective);
     EnumChildWindows(hwnd, ThemeApplyControlProc, (LPARAM)fEffective);
-    RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_UPDATENOW);
 }
 
 static FORCEINLINE HBRUSH ThemeCtlColorBrush(HDC hdc, BOOL fDark)
@@ -1032,4 +1038,4 @@ static FORCEINLINE void MenuBarPaintSeam(HWND hwnd, const MENUBAR_PALETTE* pPale
     ReleaseDC(hwnd, hdc);
 }
 
-#endif /* UXH */
+#endif /* UXTHEMEX_H */

@@ -6,6 +6,7 @@ add_library(Win32X STATIC
   WinBaseXStartupW.c
   WinUserX.c
   ShellScalingApiX.c
+  uxthemex.c
   versionhelpersx.c
   delayhlpx.c
   processenvxA.c

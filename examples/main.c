@@ -223,14 +223,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         /* Owner-draw the menu bar dark -- but only in dark mode; otherwise fall through so
            DefWindowProc paints the stock light bar. */
         case WM_UAHDRAWMENU:
-            if (!g_fDark)
+            if (!ThemeIsDarkMode())
             {
                 break;
             }
             return HANDLE_WM_UAHDRAWMENU(hwnd, wParam, lParam, OnUahDrawMenu);
 
         case WM_UAHDRAWMENUITEM:
-            if (!g_fDark)
+            if (!ThemeIsDarkMode())
             {
                 break;
             }
@@ -241,7 +241,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
            feeds the DefWindowProc call (CONV-4.12 C5045-safe). */
         case WM_NCACTIVATE:
             lr = DefWindowProc(hwnd, WM_NCACTIVATE, wParam, lParam);
-            if (g_fDark)
+            if (ThemeIsDarkMode())
             {
                 MenuBarPalette(TRUE, &pal);
                 MenuBarPaintSeam(hwnd, &pal);
@@ -250,7 +250,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 
         case WM_NCPAINT:
             lr = DefWindowProc(hwnd, WM_NCPAINT, wParam, lParam);
-            if (g_fDark)
+            if (ThemeIsDarkMode())
             {
                 MenuBarPalette(TRUE, &pal);
                 MenuBarPaintSeam(hwnd, &pal);
@@ -280,9 +280,8 @@ static INT_PTR CALLBACK About(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam
             ThemeDialog(hDlg, g_fDark);
             return (INT_PTR)TRUE;
 
-        /* Freeze our own tree the instant the colour broadcast reaches us -- as early as the dialog
-           can act, independent of when the owner's WM_SETTINGCHANGE handler runs -- so no control
-           repaints stale during the gap. The owner's deferred OnThemeChanged resumes + flushes us. */
+        /* The owner coalesces the broadcast and rethemes registered windows on the next message-loop
+           turn, after the shell broadcast has returned. */
         case WM_SETTINGCHANGE:
             if (lParam && (0 == lstrcmpi((LPCTSTR)lParam, TEXT("ImmersiveColorSet"))))
             {
@@ -299,12 +298,12 @@ static INT_PTR CALLBACK About(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam
             return (INT_PTR)FALSE;
 
         case WM_ERASEBKGND:
-            return (INT_PTR)ThemeEraseBackground(hDlg, (HDC)wParam, g_fDark);
+            return (INT_PTR)ThemeEraseBackground(hDlg, (HDC)wParam, ThemeIsDarkMode());
 
         case WM_CTLCOLORDLG:
         case WM_CTLCOLORSTATIC:
         case WM_CTLCOLORBTN:
-            if (g_fDark)
+            if (ThemeIsDarkMode())
             {
                 return (INT_PTR)ThemeCtlColorBrush((HDC)wParam, TRUE);
             }
