@@ -8,7 +8,7 @@ project(Win32X
 # ---------------------------------------------------------------------------
 # Options
 # ---------------------------------------------------------------------------
-option(WIN32X_BUILD_EXAMPLES  "Build the WinMainEx example"                ON)
+option(WIN32X_BUILD_EXAMPLES  "Build the WindowsProject example"           ON)
 option(WIN32X_BUILD_TESTS     "Build the test harness"                     ON)
 option(WIN32X_ENABLE_ANALYSIS "MSVC /analyze + C++ Core Check (VS only)"   ON)
 
@@ -27,6 +27,10 @@ add_compile_definitions(UNICODE _UNICODE)
 # link /NODEFAULTLIB), so the stack-cookie machinery has no runtime to call into.
 if(MSVC)
   add_compile_options(/GS-)
+  # CMake bakes /Ob2 into the default Release flags; the per-target /Ob3 would
+  # then be a second inline-expansion level (cl warning D9025). Strip the
+  # default so /Ob3 is the sole /Ob flag in optimized builds.
+  string(REPLACE "/Ob2" "" CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE}")
 endif()
 
 # Out-of-source artifacts live under the build tree (separate per preset/arch),

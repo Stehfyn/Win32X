@@ -1,5 +1,5 @@
 /*
- * winmain.c -- sample WinBaseX client for the WinMainEx product.
+ * main.c -- sample WinBaseX client for the WindowsProject product.
  */
 
 #pragma runtime_checks("", off)
@@ -17,8 +17,8 @@
 
 /* Client-owned window-class name and caption -- UI identity, distinct from the WinBaseX launch
    broker's COM identity (CLSID_WinBaseXLaunchBroker), which the library owns. */
-#define WC_WINMAINEX  TEXT("WinMainEx")
-#define WMX_WND_TITLE TEXT("WinMainEx")
+#define WC_WINMAINEX  TEXT("WindowsProject")
+#define WMX_WND_TITLE TEXT("WindowsProject")
 
 static ATOM             MyRegisterClass(HINSTANCE hInstance);
 static BOOL             InitInstance(HINSTANCE hInstance);
