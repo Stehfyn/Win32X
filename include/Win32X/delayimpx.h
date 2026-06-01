@@ -71,7 +71,7 @@
  */
 #define DECLARE_DLL_THUNK(_DllName, _RetType, _WrapperName, _ExportName, _Args1, _Args2, _Fallback) \
     typedef _RetType(WINAPI* PFN_##_WrapperName) _Args1;                                            \
-    DECLSPEC_NOINLINE _RetType WINAPI _WrapperName _Args1                                           \
+    static FORCEINLINE _RetType WINAPI _WrapperName _Args1                                          \
     {                                                                                               \
         static PFN_##_WrapperName s_pfn;                                                            \
         HMODULE                   hMod;                                                             \

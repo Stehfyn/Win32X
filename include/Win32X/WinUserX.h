@@ -2,6 +2,7 @@
 #define WINUSERX_H
 
 #include <windows.h>
+#include "delayimpx.h"
 
 #ifdef __cplusplus
 extern "C"
@@ -62,39 +63,17 @@ BOOL WINAPI ShowWindowEx(_In_ HWND hwnd, _In_ int nShowEx);
  * Delay-bound DPI helpers (WinUser.h origin, user32.dll). Each *Ex wrapper resolves its export on first
  * use and degrades to a legacy/constant fallback, so callers need not branch on OS version (the
  * *ForDpi family and SetThreadDpiAwarenessContext are Windows 10 1607+). Signatures mirror the SDK,
- * which stays authoritative. Bodies are generated in WinUserXThunks.inl, instantiated once by
- * WinUserX.c.
+ * which stays authoritative. The wrapper bodies are generated as static FORCEINLINE just below, so
+ * every consumer inlines its own copy -- no out-of-line symbol and no automatic-inline (C4711).
+ * DECLARE_DLL_THUNK is defined in delayimpx.h (included above); SAL is omitted on the generated
+ * wrappers (macro-generated bodies cannot carry matching annotations -> C28251).
  */
-/* No SAL on these wrappers: the bodies are macro-generated (DECLARE_DLL_THUNK) and cannot carry
-   matching annotations, so annotating the declarations would trip C28251 (inconsistent annotation). */
-UINT WINAPI GetDpiForWindowEx(HWND hwnd);
-UINT WINAPI GetDpiForSystemEx(void);
-int  WINAPI GetSystemMetricsForDpiEx(int  nIndex,
-                                     UINT dpi);
-BOOL WINAPI AdjustWindowRectExForDpiEx(LPRECT lpRect,
-                                       DWORD  dwStyle,
-                                       BOOL   bMenu,
-                                       DWORD  dwExStyle,
-                                       UINT   dpi);
-/* SystemParametersInfoForDpi is charset-bearing (some SPI actions exchange ANSI vs wide buffers), so it
-   splits W/A like the SDK's SystemParametersInfo: the single SystemParametersInfoForDpi export serves
-   both, only the down-level fallback differs (SystemParametersInfoW vs ...A). */
-BOOL WINAPI SystemParametersInfoForDpiExW(UINT  uiAction,
-                                          UINT  uiParam,
-                                          PVOID pvParam,
-                                          UINT  fWinIni,
-                                          UINT  dpi);
-BOOL WINAPI SystemParametersInfoForDpiExA(UINT  uiAction,
-                                          UINT  uiParam,
-                                          PVOID pvParam,
-                                          UINT  fWinIni,
-                                          UINT  dpi);
+#include "WinUserXThunks.inl"
 #ifdef UNICODE
 #define SystemParametersInfoForDpiEx SystemParametersInfoForDpiExW
 #else
 #define SystemParametersInfoForDpiEx SystemParametersInfoForDpiExA
 #endif
-DPI_AWARENESS_CONTEXT WINAPI SetThreadDpiAwarenessContextEx(DPI_AWARENESS_CONTEXT dpiContext);
 
 /*
  * ErrorMessageBox -- MessageBox preset for error reporting: MB_ICONERROR | MB_OK. Owner, message,

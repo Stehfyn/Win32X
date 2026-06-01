@@ -2,6 +2,7 @@
 #define VERSIONHELPERSX_H
 
 #include <windows.h>
+#include "delayimpx.h"
 
 #ifdef __cplusplus
 extern "C"
@@ -30,8 +31,9 @@ extern "C"
  * OSVERSIONINFOEXW is layout-compatible with RTL_OSVERSIONINFOEXW, so it is used directly to avoid
  * winternl.h. The wrapper name is distinct from the export so the real prototype is not redefined.
  */
-/* No SAL: body is macro-generated (DECLARE_DLL_THUNK), so annotating the declaration would trip C28251. */
-LONG WINAPI RtlGetVersionEx(OSVERSIONINFOEXW* lpVersionInformation);
+/* Body generated as static FORCEINLINE here -- each consumer inlines its own copy; no out-of-line
+   symbol, no C4711. SAL omitted: the macro-generated body cannot carry matching annotations (C28251). */
+#include "versionhelpersxThunks.inl"
 
 /*
  * Core predicates. IsWindowsBuildOrGreaterEx is the full primitive (adds the build-number axis the SDK's

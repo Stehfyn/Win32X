@@ -23,9 +23,6 @@
 #define STARTF_HASSHELLDATA 0x00000400
 #endif
 
-/* user32 DPI *Ex wrapper bodies (declared in WinUserX.h); instantiated here, once. */
-#include "WinUserXThunks.inl"
-
 DECLSPEC_NOINLINE HMONITOR WINAPI GetStartupMonitor(_In_ DWORD dwFlags)
 {
     STARTUPINFO si;

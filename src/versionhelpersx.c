@@ -17,8 +17,6 @@
 #include "Win32X/versionhelpersx.h"
 #include "Win32X/delayimpx.h"
 
-/* ntdll!RtlGetVersion *Ex wrapper body (declared in versionhelpersx.h); instantiated here, once. */
-#include "versionhelpersxThunks.inl"
 
 /*
  * VersionAtLeast -- TRUE when the running OS is at least (major, minor, build, sp), compared
