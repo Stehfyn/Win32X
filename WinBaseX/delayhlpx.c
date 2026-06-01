@@ -36,14 +36,14 @@ FARPROC WINAPI __delayLoadHelper2(PCImgDelayDescr pidd, FARPROC* ppfnIATEntry)
     HMODULE               hmod;
     FARPROC*              pIAT;
     PIMAGE_THUNK_DATA     pINT;
-    PIMAGE_IMPORT_BY_NAME pName;
     size_t                index;
+    PIMAGE_IMPORT_BY_NAME pName;
     FARPROC               pfn;
 
     pszDll = (LPCSTR)RvaToPtr(pidd->rvaDLLName);
     phmod  = (HMODULE*)RvaToPtr(pidd->rvaHmod);
 
-    hmod = *phmod;
+    hmod = (*phmod);
     if (!hmod)
     {
         hmod = LoadLibraryA(pszDll);
@@ -51,7 +51,7 @@ FARPROC WINAPI __delayLoadHelper2(PCImgDelayDescr pidd, FARPROC* ppfnIATEntry)
         {
             return NULL;
         }
-        *phmod = hmod;
+        (*phmod) = hmod;
     }
 
     pIAT  = (FARPROC*)RvaToPtr(pidd->rvaIAT);
@@ -68,6 +68,6 @@ FARPROC WINAPI __delayLoadHelper2(PCImgDelayDescr pidd, FARPROC* ppfnIATEntry)
         pfn   = GetProcAddress(hmod, (LPCSTR)pName->Name);
     }
 
-    *ppfnIATEntry = pfn;
+    (*ppfnIATEntry) = pfn;
     return pfn;
 }

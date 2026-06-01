@@ -37,7 +37,7 @@
         {                                                                                                    \
             FARPROC            fp;                                                                           \
             PFN_##_WrapperName pfn;                                                                          \
-        } u = {0};                                                                                           \
+        } u;                                                                                           \
                                                                                                              \
         if (!s_pfn)                                                                                   \
         {                                                                                                    \
@@ -79,7 +79,7 @@
         {                                                                                           \
             FARPROC            fp;                                                                  \
             PFN_##_WrapperName pfn;                                                                 \
-        } u = {0};                                                                                  \
+        } u;                                                                                  \
                                                                                                     \
         if (!s_pfn)                                                                          \
         {                                                                                           \

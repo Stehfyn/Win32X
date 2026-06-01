@@ -11,6 +11,9 @@
 #define IsNonPositive(x)  (0 >= (x))
 #define IsZero(x)         (0 == (x))
 #define IsNonZero(x)      (0 != (x))
+#define IsNull(p)         (NULL == (p))
+#define IsNonNull(p)      (NULL != (p))
+#define IsEqual(a, b)     ((a) == (b))
 
 /* Character-class predicates -- the dual of the sign predicates above, a named test instead of an
    open-coded comparison. Bare ASCII literals: a char constant is an int, both sides promote to int,
