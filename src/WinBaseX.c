@@ -358,11 +358,14 @@ static HRESULT STDMETHODCALLTYPE ExecuteCommand_SetDirectory(IExecuteCommand* pT
    launch rather than overflowing into adjacent state. */
 static FORCEINLINE BOOL BuildLaunchCommand(WBX_STATE* pState, LPCTSTR pszPath, LPCTSTR pszParams)
 {
-    LPTSTR pszWrite;
-    int    cchPath;
-    int    cchParams;
-    int    cchNeeded;
-    BOOL   fHasParams;
+    LPTSTR  pszBuf;
+    LPCTSTR pszRead;
+    int     cchPath;
+    int     cchParams;
+    int     cchNeeded;
+    int     iPos;
+    BOOL    fHasParams;
+    BOOL    fFits;
 
     cchPath    = lstrlen(pszPath);
     fHasParams = !!(pszParams && pszParams[0]);
@@ -376,23 +379,33 @@ static FORCEINLINE BOOL BuildLaunchCommand(WBX_STATE* pState, LPCTSTR pszPath, L
     {
         cchNeeded += cchParams + 1; /* space + params */
     }
-    RETURN_FALSE_IF(WBX_CMD_CCH < cchNeeded);
+    fFits = (cchNeeded <= WBX_CMD_CCH);
+    RETURN_FALSE_IF_NOT(fFits);
 
-    pszWrite    = pState->szCmdBuf;
-    (*pszWrite) = '"';
-    pszWrite++;
-    (void)lstrcpyn(pszWrite, pszPath, cchPath + 1);
-    pszWrite    += cchPath;
-    (*pszWrite)  = '"';
-    pszWrite++;
+    /* CONV-4.12: build into the fixed buffer with writes bounded only by the
+       compile-time WBX_CMD_CCH. No runtime-checked length feeds a store, so the
+       size check above stays a plain decline-if-too-long decision and is not the
+       proof that protects the copies. Bodies have no calls, so the constant-
+       bounded pre-tested loops are C5045-safe. */
+    pszBuf         = pState->szCmdBuf;
+    iPos           = 0;
+    pszBuf[iPos++] = '"';
+    pszRead        = pszPath;
+    while ((*pszRead) && (iPos < (WBX_CMD_CCH - 2)))
+    {
+        pszBuf[iPos++] = *pszRead++;
+    }
+    pszBuf[iPos++] = '"';
     if (fHasParams)
     {
-        (*pszWrite) = ' ';
-        pszWrite++;
-        (void)lstrcpyn(pszWrite, pszParams, cchParams + 1);
-        pszWrite += cchParams;
+        pszBuf[iPos++] = ' ';
+        pszRead        = pszParams;
+        while ((*pszRead) && (iPos < (WBX_CMD_CCH - 1)))
+        {
+            pszBuf[iPos++] = *pszRead++;
+        }
     }
-    (*pszWrite) = 0;
+    pszBuf[iPos] = 0;
     return TRUE;
 }
 
@@ -452,7 +465,10 @@ static HRESULT STDMETHODCALLTYPE ExecuteCommand_Execute(IExecuteCommand* pThis)
     pszPath = NULL;
     hr      = IShellItem_GetDisplayName(pItem, SIGDN_FILESYSPATH, &pszPath);
     IShellItem_Release(pItem);
-    RETURN_VALUE_IF(FAILED(hr), hr);
+    /* CONV-4.12: a null precondition return is C5045-safe; an hr range test that
+       then proves pszPath safe for the calls below is not. pszPath is preset to
+       NULL and GetDisplayName writes it only on success, so the null check alone
+       is the precondition and carries the failure hr back out. */
     RETURN_VALUE_IF_NULL(pszPath, hr);
 
     /* IShellItem hands back a wide display name; narrow it to this build's charset once, then work
