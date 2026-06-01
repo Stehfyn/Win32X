@@ -14,8 +14,8 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 
-#include "versionhelpersx.h"
-#include "delayimpx.h"
+#include "Win32X/versionhelpersx.h"
+#include "Win32X/delayimpx.h"
 
 /* ntdll!RtlGetVersion *Ex wrapper body (declared in versionhelpersx.h); instantiated here, once. */
 #include "versionhelpersxThunks.inl"

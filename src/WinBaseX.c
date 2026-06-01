@@ -37,10 +37,10 @@
 #endif
 #define INITGUID
 
-#include "WinBaseX.h"
-#include "windefx.h"
+#include "Win32X/WinBaseX.h"
+#include "Win32X/windefx.h"
 #include "result.h"
-#include "processenvx.h"
+#include "Win32X/processenvx.h"
 #include <windowsx.h>
 #include <initguid.h>
 #include <objbase.h>

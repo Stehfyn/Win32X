@@ -13,7 +13,7 @@
 
 #include <windows.h>
 #include <windowsx.h>
-#include "win32x.h"
+#include "Win32X/win32x.h"
 
 /* Client-owned window-class name and caption -- UI identity, distinct from the WinBaseX launch
    broker's COM identity (CLSID_WinBaseXLaunchBroker), which the library owns. */

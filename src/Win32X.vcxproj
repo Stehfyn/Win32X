@@ -97,20 +97,20 @@
     <ClCompile Include="processenvxW.c" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="..\include\win32x.h" />
-    <ClInclude Include="..\include\WinBaseX.h" />
+    <ClInclude Include="..\include\Win32X\win32x.h" />
+    <ClInclude Include="..\include\Win32X\WinBaseX.h" />
     <ClInclude Include="WinBaseXText.inl" />
-    <ClInclude Include="..\include\WinUserX.h" />
+    <ClInclude Include="..\include\Win32X\WinUserX.h" />
     <ClInclude Include="WinUserXThunks.inl" />
-    <ClInclude Include="..\include\ShellScalingApiX.h" />
+    <ClInclude Include="..\include\Win32X\ShellScalingApiX.h" />
     <ClInclude Include="ShellScalingApiXThunks.inl" />
-    <ClInclude Include="..\include\versionhelpersx.h" />
+    <ClInclude Include="..\include\Win32X\versionhelpersx.h" />
     <ClInclude Include="versionhelpersxThunks.inl" />
-    <ClInclude Include="..\include\processenvx.h" />
+    <ClInclude Include="..\include\Win32X\processenvx.h" />
     <ClInclude Include="processenvxText.inl" />
-    <ClInclude Include="..\include\windefx.h" />
+    <ClInclude Include="..\include\Win32X\windefx.h" />
     <ClInclude Include="result.h" />
-    <ClInclude Include="..\include\delayimpx.h" />
+    <ClInclude Include="..\include\Win32X\delayimpx.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

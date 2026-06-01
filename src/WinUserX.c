@@ -14,10 +14,10 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 
-#include "WinUserX.h"
-#include "windefx.h"
+#include "Win32X/WinUserX.h"
+#include "Win32X/windefx.h"
 #include "result.h"
-#include "delayimpx.h"
+#include "Win32X/delayimpx.h"
 
 #ifndef STARTF_HASSHELLDATA
 #define STARTF_HASSHELLDATA 0x00000400

@@ -15,7 +15,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 
-#include "processenvx.h"
-#include "windefx.h"
+#include "Win32X/processenvx.h"
+#include "Win32X/windefx.h"
 #include "result.h"
 #include "processenvxText.inl" /* UNICODE undefined for this TU -> GetCommandLineArguments*A */

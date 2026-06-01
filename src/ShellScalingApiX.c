@@ -12,8 +12,8 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 
-#include "ShellScalingApiX.h"
-#include "delayimpx.h"
+#include "Win32X/ShellScalingApiX.h"
+#include "Win32X/delayimpx.h"
 
 /* Shared cached shcore.dll handle (process lifetime; never freed). */
 static HMODULE g_hShcore;

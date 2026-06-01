@@ -7,7 +7,7 @@
  * machinery (COM server, registry, state, the wide->ANSI client bridge) lives in WinBaseX.c.
  */
 
-#include "processenvx.h"
+#include "Win32X/processenvx.h"
 
 /* Implemented (wide) in WinBaseX.c. */
 BOOL StateInit(void);

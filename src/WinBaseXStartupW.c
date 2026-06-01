@@ -6,8 +6,8 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 
-#include "WinBaseX.h"
-#include "windefx.h"
+#include "Win32X/WinBaseX.h"
+#include "Win32X/windefx.h"
 #include "result.h"
 #include "WinBaseXText.inl" /* UNICODE defined for this TU -> WinBaseXRunW */
 
