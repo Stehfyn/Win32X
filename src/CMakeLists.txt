@@ -7,6 +7,7 @@ add_library(Win32X STATIC
   WinUserX.c
   ShellScalingApiX.c
   uxthemex.c
+  llmath_x86.c
   versionhelpersx.c
   delayhlpx.c
   processenvxA.c
@@ -32,6 +33,12 @@ if(MSVC)
     # intrinsics (/Oi), favor-speed (/Ot), on top of /O2 + LTCG/LTO (/GL +
     # /LTCG via INTERPROCEDURAL_OPTIMIZATION below).
     $<$<CONFIG:Release>:/Ot;/Oi;/Ob3>)
+
+  # The x86 64-bit-math helpers are functions the optimizer *introduces* references to during
+  # whole-program code generation; if the helper itself lives in a /GL module the LTCG pass can no
+  # longer satisfy that late reference (LNK1237). Keep this TU out of /GL so it is an ordinary,
+  # always-available object at link time. (Empty/no-op on x64, where these lower inline.)
+  set_source_files_properties(llmath_x86.c PROPERTIES COMPILE_OPTIONS "/GL-")
 endif()
 
 # WholeProgramOptimization=true in Release -> /GL on compile, /LTCG at link.

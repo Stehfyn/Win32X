@@ -15,11 +15,26 @@
 
 #pragma comment(lib, "kernel32.lib")
 #pragma comment(lib, "user32.lib")
+#pragma comment(lib, "gdi32.lib")
+#pragma comment(lib, "ole32.lib")
+#pragma comment(linker,                                                                                 \
+                "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' "          \
+                "version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' "        \
+                "language='*'\"")
 
 #define WIN32_LEAN_AND_MEAN
+#define COBJMACROS
 #include <windows.h>
+#include <d3d11.h>
+#include <dxgi1_2.h>
+#include <initguid.h>
+#include <mfapi.h>
+#include <mfidl.h>
+#include <mfreadwrite.h>
+#include <commctrl.h>
 #include <shlwapi.h>
 #include "Win32X/win32x.h"
+#include "Win32X/uxthemex.h"
 
 #ifndef DPI_AWARENESS_CONTEXT_UNAWARE
 #define DPI_AWARENESS_CONTEXT_UNAWARE ((DPI_AWARENESS_CONTEXT)-1)
@@ -36,17 +51,89 @@
 #define CMD_CCH                 (MAX_PATH + 16)
 #define PROBE_INSET             10
 #define LAUNCH_INSET            80
-#define WAIT_MS                 (10 * SECONDS_TO_MILLISECONDS)
+#define WAIT_MS                 (2 * SECONDS_TO_MILLISECONDS)
 #define MULTIMON_MIN            2
 #define CENTER_SLACK            1
 #define EXIT_OK                 0
 #define EXIT_FAIL               1
+#define THEME_TEST_DEFERRED_MSG (WM_APP + 91)
+#define THEME_CAPTURE_FRAMES    360u
+#define THEME_ENCODE_QUEUE_FRAMES 12u
+#define THEME_DXGI_TIMEOUT_MS   WAIT_MS
+#define THEME_DRAIN_MS          1000u
+#define THEME_RECORD_MS         WAIT_MS
 
 typedef struct
 {
     RECT rcWork;
     BOOL fFound;
 } SECOND_MON;
+
+typedef struct
+{
+    RECT  rc;
+    LONG  cx;
+    LONG  cy;
+    LONG  cbFrame;
+    BYTE* pbFrames;
+    ID3D11Texture2D** ppFrames;
+    ID3D11Texture2D** ppEncodeFrames;
+    HANDLE hEncodeReady;
+    HANDLE hEncodeStarted;
+    volatile LONG cReadyFrames;
+    volatile LONG cEncodedFrames;
+    volatile LONG fCaptureComplete;
+    BOOL  fEncodeOverflow;
+    UINT  cQueueFrames;
+    UINT  cFrames;
+    UINT  cCaptured;
+    UINT  iDroppedFrame;
+    UINT  cMaxAccumulated;
+    UINT  iFirstMixedFrame;
+    UINT  iLastMixedFrame;
+    UINT  iFirstTargetFrame;
+    UINT  iFirstIntermediateFrame;
+    UINT  uMixedMask;
+    UINT  uIntermediateMask;
+    BOOL  fDropped;
+} THEME_CAPTURE;
+
+typedef struct
+{
+    ID3D11Device*        pDevice;
+    ID3D11DeviceContext* pContext;
+    IDXGIOutputDuplication* pDup;
+    ID3D11Texture2D*     pStaging;
+    LONG                 xOutput;
+    LONG                 yOutput;
+    UINT                 cxDesktop;
+    UINT                 cyDesktop;
+    UINT                 uRefreshNumerator;
+    UINT                 uRefreshDenominator;
+} THEME_DXGI;
+
+typedef struct
+{
+    THEME_DXGI*    pDxgi;
+    THEME_CAPTURE* pCap;
+    HANDLE         hDone;
+    DWORD          dwThreadId;
+    BOOL           fOk;
+} THEME_CAPTURE_RUN;
+
+typedef struct
+{
+    THEME_DXGI*    pDxgi;
+    THEME_CAPTURE* pCap;
+    HANDLE         hDone;
+    HRESULT        hr;
+    UINT           uStage;
+    HRESULT        hrDecode;
+    DWORD          dwThreadId;
+    BOOL           fOk;
+} THEME_ENCODE_RUN;
+
+typedef void (*PFN_TEST)(void);
 
 static HANDLE g_out;
 static int    g_fail;
@@ -107,9 +194,20 @@ static void Skip(LPCTSTR pszName, LPCTSTR pszWhy)
 
 #include "tests.inl"
 
+static PFN_TEST volatile g_rgTests[] =
+{
+    T_ThreeQuarters,
+    T_Thunks,
+    T_StartupRect,
+    T_Hardening,
+    T_Position,
+    T_ThemeTransition
+};
+
 void __cdecl TestEntry(void)
 {
     BOOL fChild;
+    UINT i;
 
     g_out  = GetStdHandle(STD_OUTPUT_HANDLE);
     fChild = HasArg(TEXT("--child"));
@@ -117,11 +215,10 @@ void __cdecl TestEntry(void)
     {
         RunPositionChild();
     }
-    T_ThreeQuarters();
-    T_Thunks();
-    T_StartupRect();
-    T_Hardening();
-    T_Position();
+    for (i = 0u; i < ARRAYSIZE(g_rgTests); ++i)
+    {
+        g_rgTests[i]();
+    }
     OutF(TEXT("\n%d failed\n"), g_fail);
     ExitProcess((UINT)g_fail);
 }

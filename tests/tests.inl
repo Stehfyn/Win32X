@@ -10,6 +10,165 @@ static LRESULT CALLBACK TestWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM 
     return DefWindowProc(hwnd, uMsg, wParam, lParam);
 }
 
+static void (WINAPI* volatile pfnTestThemeStartup)(void) = ThemeStartup;
+static BOOL (WINAPI* volatile pfnTestThemeCanUseDarkMode)(void) = ThemeCanUseDarkMode;
+static BOOL (WINAPI* volatile pfnTestThemeEffectiveDarkMode)(void) = ThemeEffectiveDarkMode;
+static BOOL (WINAPI* volatile pfnTestThemeIsDarkMode)(void) = ThemeIsDarkMode;
+static HBRUSH (WINAPI* volatile pfnTestThemeBackgroundBrush)(BOOL fDark) = ThemeBackgroundBrush;
+static void (WINAPI* volatile pfnTestThemeApplyTopLevel)(HWND hwnd, BOOL fDark) = ThemeApplyTopLevel;
+static void (WINAPI* volatile pfnTestThemeApplyDialogTree)(HWND hwnd, BOOL fDark) = ThemeApplyDialogTree;
+static BOOL (WINAPI* volatile pfnTestThemeOnSettingChange)(HWND hwndPost, UINT uDeferredMsg, LPCTSTR pszSection) =
+    ThemeOnSettingChange;
+static BOOL (WINAPI* volatile pfnTestThemeOnDeferredThemeChange)(void) = ThemeOnDeferredThemeChange;
+static void (WINAPI* volatile pfnTestThemeDiagnostics)(THEME_DIAGNOSTICS* pDiag) = ThemeDiagnostics;
+static void (WINAPI* volatile pfnTestThemeUnregisterDialog)(HWND hwnd) = ThemeUnregisterDialog;
+static void (WINAPI* volatile pfnTestThemeUnregisterWindow)(HWND hwnd) = ThemeUnregisterWindow;
+
+static BOOL g_fThemeExpectedDark;
+static BOOL g_fThemeSawErase;
+static BOOL g_fThemeSawCtlStatic;
+static BOOL g_fThemeSawNcPaint;
+static BOOL g_fThemePaintMismatch;
+static DWORD g_dwThemeWorkerValue;
+static BOOL  g_fThemeWorkerWrote;
+static BOOL  g_fThemeWorkerBroadcast;
+static HANDLE g_hThemeStartEvent;
+static HWND   g_hwndThemeTop;
+static HWND   g_hwndThemeDialog;
+
+typedef HRESULT(WINAPI* PFN_CREATEDXGIFACTORY1)(REFIID riid, void** ppFactory);
+typedef HRESULT(WINAPI* PFN_D3D11CREATEDEVICE)(IDXGIAdapter*,
+                                               D3D_DRIVER_TYPE,
+                                               HMODULE,
+                                               UINT,
+                                               const D3D_FEATURE_LEVEL*,
+                                               UINT,
+                                               UINT,
+                                               ID3D11Device**,
+                                               D3D_FEATURE_LEVEL*,
+                                               ID3D11DeviceContext**);
+typedef BOOL(WINAPI* PFN_INITCOMMONCONTROLSEX)(const INITCOMMONCONTROLSEX*);
+typedef HRESULT(WINAPI* PFN_MFSTARTUP)(ULONG Version, DWORD dwFlags);
+typedef HRESULT(WINAPI* PFN_MFSHUTDOWN)(void);
+typedef HRESULT(WINAPI* PFN_MFCREATEDXGISURFACEBUFFER)(REFIID riid,
+                                                       IUnknown* punkSurface,
+                                                       UINT uSubresourceIndex,
+                                                       BOOL fBottomUpWhenLinear,
+                                                       IMFMediaBuffer** ppBuffer);
+typedef HRESULT(WINAPI* PFN_MFCREATEDXGIDEVICEMANAGER)(UINT* resetToken,
+                                                       IMFDXGIDeviceManager** ppDeviceManager);
+typedef HRESULT(WINAPI* PFN_MFCREATESAMPLE)(IMFSample** ppIMFSample);
+typedef HRESULT(WINAPI* PFN_MFCREATEATTRIBUTES)(IMFAttributes** ppMFAttributes, UINT32 cInitialSize);
+typedef HRESULT(WINAPI* PFN_MFCREATEMEDIATYPE)(IMFMediaType** ppMFType);
+typedef HRESULT(WINAPI* PFN_MFCREATESINKWRITERFROMURL)(LPCWSTR pwszOutputURL,
+                                                       IMFByteStream* pByteStream,
+                                                       IMFAttributes* pAttributes,
+                                                       IMFSinkWriter** ppSinkWriter);
+typedef HRESULT(WINAPI* PFN_MFCREATESOURCEREADERFROMURL)(LPCWSTR pwszURL,
+                                                         IMFAttributes* pAttributes,
+                                                         IMFSourceReader** ppSourceReader);
+
+typedef struct
+{
+    HMODULE                         hMfplat;
+    HMODULE                         hMfreadwrite;
+    PFN_MFSTARTUP                   pfnMFStartup;
+    PFN_MFSHUTDOWN                  pfnMFShutdown;
+    PFN_MFCREATEDXGISURFACEBUFFER   pfnMFCreateDXGISurfaceBuffer;
+    PFN_MFCREATEDXGIDEVICEMANAGER   pfnMFCreateDXGIDeviceManager;
+    PFN_MFCREATESAMPLE              pfnMFCreateSample;
+    PFN_MFCREATEATTRIBUTES          pfnMFCreateAttributes;
+    PFN_MFCREATEMEDIATYPE           pfnMFCreateMediaType;
+    PFN_MFCREATESINKWRITERFROMURL   pfnMFCreateSinkWriterFromURL;
+    PFN_MFCREATESOURCEREADERFROMURL pfnMFCreateSourceReaderFromURL;
+} THEME_TEST_MF;
+
+static THEME_TEST_MF g_mf;
+static HRESULT g_hrThemeEncode;
+static HRESULT g_hrThemeDecode;
+static HRESULT g_hrThemeCapture;
+static UINT g_uThemeCaptureStage;
+static UINT g_uThemeEncodeStage;
+
+static const GUID ThemeTestIID_IDXGIFactory1 = { 0x770aae78, 0xf26f, 0x4dba,
+                                           { 0xa8, 0x29, 0x25, 0x3c, 0x83, 0xd1, 0xb3, 0x87 } };
+static const GUID ThemeTestIID_IDXGIOutput1 = { 0x00cddea8, 0x939b, 0x4b83,
+                                           { 0xa3, 0x40, 0xa6, 0x85, 0x22, 0x66, 0x66, 0xcc } };
+static const GUID ThemeTestIID_ID3D11Texture2D = { 0x6f15aaf2, 0xd208, 0x4e89,
+                                              { 0x9a, 0xb4, 0x48, 0x95, 0x35, 0xd3, 0x4f, 0x9c } };
+static const GUID ThemeTestIID_IMF2DBuffer = { 0x7dc9d5f9, 0x9ed9, 0x44ec,
+                                           { 0x9b, 0xbf, 0x06, 0x00, 0xbb, 0x58, 0x9f, 0xbb } };
+
+static void ThemeTestRecordPaint(BOOL* pfSaw)
+{
+    *pfSaw = TRUE;
+    if (g_fThemeExpectedDark != pfnTestThemeIsDarkMode())
+    {
+        g_fThemePaintMismatch = TRUE;
+    }
+}
+
+static void ThemeTestOnUahDrawMenu(HWND hwnd, const UAHMENU* pUDM)
+{
+    MENUBAR_PALETTE pal;
+
+    MenuBarPalette(pfnTestThemeIsDarkMode(), &pal);
+    MenuBarOnDrawMenu(hwnd, pUDM, &pal);
+}
+
+static void ThemeTestOnUahDrawMenuItem(HWND hwnd, const UAHDRAWMENUITEM* pUDMI)
+{
+    MENUBAR_PALETTE pal;
+
+    MenuBarPalette(pfnTestThemeIsDarkMode(), &pal);
+    MenuBarOnDrawMenuItem(hwnd, pUDMI, &pal);
+}
+
+static LRESULT CALLBACK ThemeTestWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+    LRESULT lr;
+    MENUBAR_PALETTE pal;
+
+    if (WM_ERASEBKGND == uMsg)
+    {
+        ThemeTestRecordPaint(&g_fThemeSawErase);
+    }
+    else if (WM_CTLCOLORSTATIC == uMsg)
+    {
+        ThemeTestRecordPaint(&g_fThemeSawCtlStatic);
+    }
+    if (ThemeHandleWindowMessage(hwnd, uMsg, wParam, lParam, THEME_TEST_DEFERRED_MSG, &lr))
+    {
+        return lr;
+    }
+
+    switch (uMsg)
+    {
+        case WM_UAHDRAWMENU:
+            return HANDLE_WM_UAHDRAWMENU(hwnd, wParam, lParam, ThemeTestOnUahDrawMenu);
+
+        case WM_UAHDRAWMENUITEM:
+            return HANDLE_WM_UAHDRAWMENUITEM(hwnd, wParam, lParam, ThemeTestOnUahDrawMenuItem);
+
+        case WM_NCPAINT:
+            ThemeTestRecordPaint(&g_fThemeSawNcPaint);
+            lr = DefWindowProc(hwnd, WM_NCPAINT, wParam, lParam);
+            MenuBarPalette(pfnTestThemeIsDarkMode(), &pal);
+            MenuBarPaintSeam(hwnd, &pal);
+            return lr;
+
+        case WM_NCACTIVATE:
+            lr = DefWindowProc(hwnd, WM_NCACTIVATE, wParam, lParam);
+            MenuBarPalette(pfnTestThemeIsDarkMode(), &pal);
+            MenuBarPaintSeam(hwnd, &pal);
+            return lr;
+
+        default:
+            break;
+    }
+    return DefWindowProc(hwnd, uMsg, wParam, lParam);
+}
+
 static BOOL ShowExGivesThreeQuarters(DPI_AWARENESS_CONTEXT ambient)
 {
     WNDCLASS              wc;
@@ -27,11 +186,11 @@ static BOOL ShowExGivesThreeQuarters(DPI_AWARENESS_CONTEXT ambient)
     SecureZeroMemory(&wc, sizeof(wc));
     wc.lpfnWndProc   = TestWndProc;
     wc.hInstance     = GetModuleHandle(NULL);
-    wc.lpszClassName = TEXT("WmxTestWnd");
+    wc.lpszClassName = TEXT("TestWnd");
     RegisterClass(&wc);
 
     prev = SetThreadDpiAwarenessContextEx(ambient);
-    hwnd = CreateWindowEx(0, TEXT("WmxTestWnd"), TEXT("t"), WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
+    hwnd = CreateWindowEx(0, TEXT("TestWnd"), TEXT("t"), WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
                           CW_USEDEFAULT, CW_USEDEFAULT, NULL, NULL, wc.hInstance, NULL);
     ShowWindowEx(hwnd, SWX_SHOWSTARTUP);
     if (IsNonNull(prev))
@@ -289,4 +448,2534 @@ static void T_Position(void)
     CloseHandle(pi.hProcess);
     fLandedSecond = IsZero(dwExitCode);
     Check(fLandedSecond, TEXT("T5 physical STARTF_USEPOSITION lands the startup rect on the second monitor"));
+}
+
+static BOOL ThemeTestReadAppsUseLightTheme(DWORD* pdwValue, BOOL* pfHadValue)
+{
+    HKEY    hKey;
+    DWORD   dwType;
+    DWORD   cbValue;
+    LSTATUS lStatus;
+
+    *pdwValue  = 1u;
+    *pfHadValue = FALSE;
+    hKey = NULL;
+    lStatus = RegOpenKeyEx(HKEY_CURRENT_USER,
+                           TEXT("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
+                           0u,
+                           KEY_QUERY_VALUE,
+                           &hKey);
+    if (ERROR_FILE_NOT_FOUND == lStatus)
+    {
+        return TRUE;
+    }
+    if (ERROR_SUCCESS != lStatus)
+    {
+        return FALSE;
+    }
+
+    dwType  = 0u;
+    cbValue = (DWORD)sizeof(*pdwValue);
+    lStatus = RegQueryValueEx(hKey, TEXT("AppsUseLightTheme"), NULL, &dwType, (LPBYTE)pdwValue, &cbValue);
+    RegCloseKey(hKey);
+    if (ERROR_FILE_NOT_FOUND == lStatus)
+    {
+        return TRUE;
+    }
+    if ((ERROR_SUCCESS != lStatus) || (REG_DWORD != dwType) || ((DWORD)sizeof(*pdwValue) != cbValue))
+    {
+        return FALSE;
+    }
+
+    *pfHadValue = TRUE;
+    return TRUE;
+}
+
+static BOOL ThemeTestWriteAppsUseLightTheme(DWORD dwValue)
+{
+    HKEY    hKey;
+    DWORD   dwDisposition;
+    LSTATUS lStatus;
+
+    hKey = NULL;
+    dwDisposition = 0u;
+    lStatus = RegCreateKeyEx(HKEY_CURRENT_USER,
+                             TEXT("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
+                             0u,
+                             NULL,
+                             0u,
+                             KEY_SET_VALUE,
+                             NULL,
+                             &hKey,
+                             &dwDisposition);
+    if (ERROR_SUCCESS != lStatus)
+    {
+        return FALSE;
+    }
+    lStatus = RegSetValueEx(hKey,
+                            TEXT("AppsUseLightTheme"),
+                            0u,
+                            REG_DWORD,
+                            (const BYTE*)&dwValue,
+                            (DWORD)sizeof(dwValue));
+    RegCloseKey(hKey);
+    return ERROR_SUCCESS == lStatus;
+}
+
+static BOOL ThemeTestDeleteAppsUseLightTheme(void)
+{
+    HKEY    hKey;
+    LSTATUS lStatus;
+
+    hKey = NULL;
+    lStatus = RegOpenKeyEx(HKEY_CURRENT_USER,
+                           TEXT("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
+                           0u,
+                           KEY_SET_VALUE,
+                           &hKey);
+    if (ERROR_SUCCESS != lStatus)
+    {
+        return ERROR_FILE_NOT_FOUND == lStatus;
+    }
+    lStatus = RegDeleteValue(hKey, TEXT("AppsUseLightTheme"));
+    RegCloseKey(hKey);
+    return (ERROR_SUCCESS == lStatus) || (ERROR_FILE_NOT_FOUND == lStatus);
+}
+
+static BOOL ThemeTestRestoreAppsUseLightTheme(BOOL fHadValue, DWORD dwValue)
+{
+    if (fHadValue)
+    {
+        return ThemeTestWriteAppsUseLightTheme(dwValue);
+    }
+    return ThemeTestDeleteAppsUseLightTheme();
+}
+
+static BOOL ThemeTestBroadcastImmersiveColorSet(void)
+{
+    DWORD dwRecipients;
+    LONG  lResult;
+
+    dwRecipients = BSM_APPLICATIONS;
+    lResult = BroadcastSystemMessage(BSF_FORCEIFHUNG | BSF_NOTIMEOUTIFNOTHUNG,
+                                     &dwRecipients,
+                                     WM_SETTINGCHANGE,
+                                     0,
+                                     (LPARAM)TEXT("ImmersiveColorSet"));
+    return 0 <= lResult;
+}
+
+static BOOL ThemeTestInitCommonControls(void)
+{
+    HMODULE hComctl;
+    PFN_INITCOMMONCONTROLSEX pfnInitCommonControlsEx;
+    INITCOMMONCONTROLSEX icc;
+
+    hComctl = LoadLibrary(TEXT("comctl32.dll"));
+    if (!hComctl)
+    {
+        return FALSE;
+    }
+    pfnInitCommonControlsEx = (PFN_INITCOMMONCONTROLSEX)GetProcAddress(hComctl, "InitCommonControlsEx");
+    if (!pfnInitCommonControlsEx)
+    {
+        FreeLibrary(hComctl);
+        return FALSE;
+    }
+    icc.dwSize = (DWORD)sizeof(icc);
+    icc.dwICC = ICC_STANDARD_CLASSES;
+    return pfnInitCommonControlsEx(&icc);
+}
+
+static BOOL ThemeTestRegisterClass(LPCTSTR pszClass)
+{
+    WNDCLASS wc;
+
+    SecureZeroMemory(&wc, sizeof(wc));
+    wc.lpfnWndProc   = ThemeTestWndProc;
+    wc.hInstance     = GetModuleHandle(NULL);
+    wc.lpszClassName = pszClass;
+    wc.hbrBackground = pfnTestThemeBackgroundBrush(pfnTestThemeIsDarkMode());
+    return 0 != RegisterClass(&wc);
+}
+
+static void ThemeTestClearDeferredMessage(HWND hwnd)
+{
+    MSG msg;
+
+    while (PeekMessage(&msg, hwnd, THEME_TEST_DEFERRED_MSG, THEME_TEST_DEFERRED_MSG, PM_REMOVE))
+    {
+    }
+}
+
+static void ThemeTestPumpMessages(void)
+{
+    MSG msg;
+
+    while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE))
+    {
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+    }
+}
+
+static void ThemeTestPumpForMs(DWORD dwMs)
+{
+    LARGE_INTEGER liFreq;
+    LARGE_INTEGER liStart;
+    LARGE_INTEGER liNow;
+
+    if (!QueryPerformanceFrequency(&liFreq))
+    {
+        Sleep(dwMs);
+        return;
+    }
+    QueryPerformanceCounter(&liStart);
+    while (TRUE)
+    {
+        ThemeTestPumpMessages();
+        QueryPerformanceCounter(&liNow);
+        if (((liNow.QuadPart - liStart.QuadPart) * 1000) >= (liFreq.QuadPart * dwMs))
+        {
+            break;
+        }
+        Sleep(1u);
+    }
+}
+
+static void ThemeTestCopyBytes(BYTE* pbDst, const BYTE* pbSrc, SIZE_T cb)
+{
+    while (0u != cb)
+    {
+        *pbDst = *pbSrc;
+        ++pbDst;
+        ++pbSrc;
+        --cb;
+    }
+}
+
+static UINT ThemeTestRefreshDelayMs(void)
+{
+    DEVMODE dm;
+    DWORD   dwHz;
+    UINT    uDelay;
+
+    SecureZeroMemory(&dm, sizeof(dm));
+    dm.dmSize = (WORD)sizeof(dm);
+    dwHz = 60u;
+    if (EnumDisplaySettings(NULL, ENUM_CURRENT_SETTINGS, &dm))
+    {
+        if ((30u <= dm.dmDisplayFrequency) && (240u >= dm.dmDisplayFrequency))
+        {
+            dwHz = dm.dmDisplayFrequency;
+        }
+    }
+    uDelay = (UINT)((1000u + (dwHz - 1u)) / dwHz);
+    if (1u > uDelay)
+    {
+        uDelay = 1u;
+    }
+    return uDelay;
+}
+
+static DWORD WINAPI ThemeTestTransitionThread(LPVOID pv)
+{
+    UNREFERENCED_PARAMETER(pv);
+    WaitForSingleObject(g_hThemeStartEvent, WAIT_MS);
+    g_fThemeWorkerWrote = ThemeTestWriteAppsUseLightTheme(g_dwThemeWorkerValue);
+    if (g_fThemeWorkerWrote)
+    {
+        g_fThemeWorkerBroadcast = ThemeTestBroadcastImmersiveColorSet();
+    }
+    return 0u;
+}
+
+static BOOL ThemeTestClassifyPixel(COLORREF cr, BOOL* pfDark)
+{
+    BYTE r;
+    BYTE g;
+    BYTE b;
+    BOOL fDark;
+    BOOL fLight;
+
+    if (CLR_INVALID == cr)
+    {
+        return FALSE;
+    }
+
+    r = GetRValue(cr);
+    g = GetGValue(cr);
+    b = GetBValue(cr);
+    fDark  = (80u >= r) && (80u >= g) && (80u >= b);
+    fLight = (200u <= r) && (200u <= g) && (200u <= b);
+    if (!fDark && !fLight)
+    {
+        return FALSE;
+    }
+    *pfDark = fDark;
+    return TRUE;
+}
+
+static BOOL ThemeTestClassifyIntermediatePixel(COLORREF cr)
+{
+    BYTE r;
+    BYTE g;
+    BYTE b;
+    BYTE cMax;
+    BYTE cMin;
+
+    if (CLR_INVALID == cr)
+    {
+        return FALSE;
+    }
+
+    r = GetRValue(cr);
+    g = GetGValue(cr);
+    b = GetBValue(cr);
+    cMax = r;
+    cMin = r;
+    if (g > cMax) { cMax = g; }
+    if (b > cMax) { cMax = b; }
+    if (g < cMin) { cMin = g; }
+    if (b < cMin) { cMin = b; }
+    return (80u < cMin) && (200u > cMax) && ((cMax - cMin) <= 8u);
+}
+
+static BOOL ThemeTestSamplePoint(HWND hwnd, int x, int y, POINT* ppt)
+{
+    RECT rc;
+
+    if (!GetClientRect(hwnd, &rc))
+    {
+        return FALSE;
+    }
+    ppt->x = rc.left + x;
+    ppt->y = rc.top + y;
+    MapWindowPoints(hwnd, NULL, ppt, 1u);
+    return TRUE;
+}
+
+static BOOL ThemeTestMenuPoints(HWND hwnd, POINT* prgpt, UINT* pcpt)
+{
+    MENUBARINFO mbi;
+    LONG        y;
+    LONG        cx;
+
+    SecureZeroMemory(&mbi, sizeof(mbi));
+    mbi.cbSize = (DWORD)sizeof(mbi);
+    if (!GetMenuBarInfo(hwnd, OBJID_MENU, 0, &mbi))
+    {
+        return FALSE;
+    }
+    y = mbi.rcBar.top + ((mbi.rcBar.bottom - mbi.rcBar.top) / 2);
+    cx = mbi.rcBar.right - mbi.rcBar.left;
+    if (120 > cx)
+    {
+        return FALSE;
+    }
+    prgpt[0].x = mbi.rcBar.right - 120;
+    prgpt[0].y = y;
+    prgpt[1].x = mbi.rcBar.right - 80;
+    prgpt[1].y = y;
+    prgpt[2].x = mbi.rcBar.right - 40;
+    prgpt[2].y = y;
+    *pcpt = 3u;
+    return TRUE;
+}
+
+static BOOL ThemeTestCaptureRect(HWND hwndTop, HWND hwndDialog, RECT* prc)
+{
+    RECT rcTop;
+    RECT rcDialog;
+
+    if (!GetWindowRect(hwndTop, &rcTop) || !GetWindowRect(hwndDialog, &rcDialog))
+    {
+        return FALSE;
+    }
+    prc->left = rcTop.left;
+    prc->top = rcTop.top;
+    prc->right = rcTop.right;
+    prc->bottom = rcTop.bottom;
+    if (rcDialog.left < prc->left)
+    {
+        prc->left = rcDialog.left;
+    }
+    if (rcDialog.top < prc->top)
+    {
+        prc->top = rcDialog.top;
+    }
+    if (rcDialog.right > prc->right)
+    {
+        prc->right = rcDialog.right;
+    }
+    if (rcDialog.bottom > prc->bottom)
+    {
+        prc->bottom = rcDialog.bottom;
+    }
+    prc->left -= 8;
+    prc->top -= 8;
+    prc->right += 8;
+    prc->bottom += 8;
+    return TRUE;
+}
+
+static BOOL ThemeTestCaptureInit(THEME_CAPTURE* pCap, const RECT* prc, UINT cFrames)
+{
+    SecureZeroMemory(pCap, sizeof(*pCap));
+    pCap->rc = *prc;
+    pCap->cx = prc->right - prc->left;
+    pCap->cy = prc->bottom - prc->top;
+    pCap->cbFrame = pCap->cx * pCap->cy * 4;
+    pCap->cFrames = cFrames;
+    pCap->cQueueFrames = THEME_ENCODE_QUEUE_FRAMES;
+    pCap->ppFrames = (ID3D11Texture2D**)HeapAlloc(GetProcessHeap(),
+                                                  HEAP_ZERO_MEMORY,
+                                                  (SIZE_T)(sizeof(ID3D11Texture2D*) * pCap->cQueueFrames));
+    pCap->ppEncodeFrames = (ID3D11Texture2D**)HeapAlloc(GetProcessHeap(),
+                                                        HEAP_ZERO_MEMORY,
+                                                        (SIZE_T)(sizeof(ID3D11Texture2D*) * pCap->cFrames));
+    return IsNonNull(pCap->ppFrames) && IsNonNull(pCap->ppEncodeFrames);
+}
+
+static UINT ThemeTestNativeRecordFrameCount(const THEME_DXGI* pDxgi)
+{
+    UINT64 ullFrames;
+
+    ullFrames = ((UINT64)pDxgi->uRefreshNumerator * (UINT64)THEME_RECORD_MS);
+    ullFrames = (ullFrames + ((UINT64)pDxgi->uRefreshDenominator * 1000u) - 1u) /
+                ((UINT64)pDxgi->uRefreshDenominator * 1000u);
+    if (THEME_CAPTURE_FRAMES > ullFrames)
+    {
+        ullFrames = THEME_CAPTURE_FRAMES;
+    }
+    return (UINT)ullFrames;
+}
+
+static UINT ThemeTestExpectedNativeFrames(const THEME_DXGI* pDxgi)
+{
+    UINT64 ullFrames;
+
+    ullFrames = ((UINT64)pDxgi->uRefreshNumerator * (UINT64)THEME_RECORD_MS);
+    ullFrames = ullFrames / ((UINT64)pDxgi->uRefreshDenominator * 1000u);
+    return (UINT)ullFrames;
+}
+
+
+static void ThemeTestCaptureFree(THEME_CAPTURE* pCap)
+{
+    UINT i;
+
+    if (pCap->ppFrames)
+    {
+        for (i = 0u; i < pCap->cQueueFrames; ++i)
+        {
+            if (pCap->ppFrames[i])
+            {
+                ID3D11Texture2D_Release(pCap->ppFrames[i]);
+            }
+        }
+        HeapFree(GetProcessHeap(), 0, pCap->ppFrames);
+    }
+    if (pCap->ppEncodeFrames)
+    {
+        for (i = 0u; i < pCap->cFrames; ++i)
+        {
+            if (pCap->ppEncodeFrames[i])
+            {
+                ID3D11Texture2D_Release(pCap->ppEncodeFrames[i]);
+            }
+        }
+        HeapFree(GetProcessHeap(), 0, pCap->ppEncodeFrames);
+    }
+    if (pCap->pbFrames)
+    {
+        HeapFree(GetProcessHeap(), 0, pCap->pbFrames);
+    }
+    SecureZeroMemory(pCap, sizeof(*pCap));
+}
+
+static void ThemeTestDxgiFree(THEME_DXGI* pDxgi)
+{
+    if (pDxgi->pStaging)
+    {
+        ID3D11Texture2D_Release(pDxgi->pStaging);
+    }
+    if (pDxgi->pDup)
+    {
+        IDXGIOutputDuplication_Release(pDxgi->pDup);
+    }
+    if (pDxgi->pContext)
+    {
+        ID3D11DeviceContext_Release(pDxgi->pContext);
+    }
+    if (pDxgi->pDevice)
+    {
+        ID3D11Device_Release(pDxgi->pDevice);
+    }
+    SecureZeroMemory(pDxgi, sizeof(*pDxgi));
+}
+
+static BOOL ThemeTestDxgiInit(THEME_DXGI* pDxgi, HWND hwnd)
+{
+    HMODULE          hDxgi;
+    HMODULE          hD3d11;
+    PFN_CREATEDXGIFACTORY1 pfnCreateDXGIFactory1;
+    PFN_D3D11CREATEDEVICE pfnD3D11CreateDevice;
+    IDXGIFactory1*  pFactory;
+    IDXGIAdapter1*  pAdapter;
+    IDXGIOutput*    pOutput;
+    IDXGIOutput1*   pOutput1;
+    DXGI_OUTPUT_DESC desc;
+    DEVMODEW        dm;
+    HMONITOR        hMonitor;
+    UINT            iAdapter;
+    UINT            iOutput;
+    HRESULT         hr;
+    D3D_FEATURE_LEVEL rgLevels[3];
+    D3D_FEATURE_LEVEL levelGot;
+    BOOL            fFound;
+
+    SecureZeroMemory(pDxgi, sizeof(*pDxgi));
+    hDxgi = LoadLibrary(TEXT("dxgi.dll"));
+    hD3d11 = LoadLibrary(TEXT("d3d11.dll"));
+    if (!hDxgi || !hD3d11)
+    {
+        if (hDxgi)
+        {
+            FreeLibrary(hDxgi);
+        }
+        if (hD3d11)
+        {
+            FreeLibrary(hD3d11);
+        }
+        return FALSE;
+    }
+    pfnCreateDXGIFactory1 = (PFN_CREATEDXGIFACTORY1)GetProcAddress(hDxgi, "CreateDXGIFactory1");
+    pfnD3D11CreateDevice = (PFN_D3D11CREATEDEVICE)GetProcAddress(hD3d11, "D3D11CreateDevice");
+    if (!pfnCreateDXGIFactory1 || !pfnD3D11CreateDevice)
+    {
+        FreeLibrary(hD3d11);
+        FreeLibrary(hDxgi);
+        return FALSE;
+    }
+    rgLevels[0] = D3D_FEATURE_LEVEL_11_1;
+    rgLevels[1] = D3D_FEATURE_LEVEL_11_0;
+    rgLevels[2] = D3D_FEATURE_LEVEL_10_0;
+    hMonitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    pFactory = NULL;
+    hr = pfnCreateDXGIFactory1(&ThemeTestIID_IDXGIFactory1, (void**)&pFactory);
+    if (FAILED(hr))
+    {
+        FreeLibrary(hD3d11);
+        FreeLibrary(hDxgi);
+        return FALSE;
+    }
+
+    fFound = FALSE;
+    for (iAdapter = 0u; !fFound; ++iAdapter)
+    {
+        pAdapter = NULL;
+        if (DXGI_ERROR_NOT_FOUND == IDXGIFactory1_EnumAdapters1(pFactory, iAdapter, &pAdapter))
+        {
+            break;
+        }
+        for (iOutput = 0u; !fFound; ++iOutput)
+        {
+            pOutput = NULL;
+            if (DXGI_ERROR_NOT_FOUND == IDXGIAdapter1_EnumOutputs(pAdapter, iOutput, &pOutput))
+            {
+                break;
+            }
+            SecureZeroMemory(&desc, sizeof(desc));
+            hr = IDXGIOutput_GetDesc(pOutput, &desc);
+            if (SUCCEEDED(hr) && (desc.Monitor == hMonitor))
+            {
+                pOutput1 = NULL;
+                hr = IDXGIOutput_QueryInterface(pOutput, &ThemeTestIID_IDXGIOutput1, (void**)&pOutput1);
+                if (SUCCEEDED(hr))
+                {
+                    hr = pfnD3D11CreateDevice((IDXGIAdapter*)pAdapter,
+                                               D3D_DRIVER_TYPE_UNKNOWN,
+                                               NULL,
+                                               D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                                               rgLevels,
+                                               ARRAYSIZE(rgLevels),
+                                               D3D11_SDK_VERSION,
+                                               &pDxgi->pDevice,
+                                               &levelGot,
+                                               &pDxgi->pContext);
+                    if (SUCCEEDED(hr))
+                    {
+                        hr = IDXGIOutput1_DuplicateOutput(pOutput1, (IUnknown*)pDxgi->pDevice, &pDxgi->pDup);
+                        if (SUCCEEDED(hr))
+                        {
+                            pDxgi->xOutput = desc.DesktopCoordinates.left;
+                            pDxgi->yOutput = desc.DesktopCoordinates.top;
+                            pDxgi->cxDesktop =
+                                (UINT)(desc.DesktopCoordinates.right - desc.DesktopCoordinates.left);
+                            pDxgi->cyDesktop =
+                                (UINT)(desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top);
+                            SecureZeroMemory(&dm, sizeof(dm));
+                            dm.dmSize = (WORD)sizeof(dm);
+                            if (EnumDisplaySettingsW(desc.DeviceName, ENUM_CURRENT_SETTINGS, &dm) &&
+                                (1u <= dm.dmDisplayFrequency))
+                            {
+                                pDxgi->uRefreshNumerator = dm.dmDisplayFrequency;
+                                pDxgi->uRefreshDenominator = 1u;
+                            }
+                            else
+                            {
+                                pDxgi->uRefreshNumerator = 60u;
+                                pDxgi->uRefreshDenominator = 1u;
+                            }
+                            fFound = TRUE;
+                        }
+                    }
+                    IDXGIOutput1_Release(pOutput1);
+                }
+            }
+            IDXGIOutput_Release(pOutput);
+        }
+        IDXGIAdapter1_Release(pAdapter);
+    }
+    IDXGIFactory1_Release(pFactory);
+    if (!fFound)
+    {
+        ThemeTestDxgiFree(pDxgi);
+        FreeLibrary(hD3d11);
+        FreeLibrary(hDxgi);
+    }
+    return fFound;
+}
+
+static BOOL ThemeTestDxgiEnsureStaging(THEME_DXGI* pDxgi, ID3D11Texture2D* pTex)
+{
+    D3D11_TEXTURE2D_DESC desc;
+
+    if (pDxgi->pStaging)
+    {
+        return TRUE;
+    }
+    ID3D11Texture2D_GetDesc(pTex, &desc);
+    desc.BindFlags = 0u;
+    desc.MiscFlags = 0u;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    desc.Usage = D3D11_USAGE_STAGING;
+    return SUCCEEDED(ID3D11Device_CreateTexture2D(pDxgi->pDevice, &desc, NULL, &pDxgi->pStaging));
+}
+
+static BOOL ThemeTestDxgiCopyFrame(THEME_DXGI* pDxgi, THEME_CAPTURE* pCap, ID3D11Texture2D* pTex, UINT iFrame)
+{
+    D3D11_BOX box;
+    LONG xSrcLong;
+    LONG ySrcLong;
+    LONG cEncoded;
+    UINT xSrc;
+    UINT ySrc;
+    UINT iSlot;
+
+    xSrcLong = pCap->rc.left - pDxgi->xOutput;
+    ySrcLong = pCap->rc.top - pDxgi->yOutput;
+    if ((0 > xSrcLong) || (0 > ySrcLong))
+    {
+        return FALSE;
+    }
+    xSrc = (UINT)xSrcLong;
+    ySrc = (UINT)ySrcLong;
+    if (((UINT)pCap->cx + xSrc) > pDxgi->cxDesktop || (((UINT)pCap->cy + ySrc) > pDxgi->cyDesktop))
+    {
+        return FALSE;
+    }
+
+    cEncoded = InterlockedCompareExchange(&pCap->cEncodedFrames, 0, 0);
+    /* The encoder consumes pCap->ppEncodeFrames[iFrame] -- a distinct persistent slot per frame,
+     * cFrames deep -- not the small staging ring, so a slow encoder can never cause the capture to
+     * overwrite an unencoded frame. Bound real-time lag by that persistent depth (a transient
+     * scheduling stall is not a dropped frame); the ring index below still wraps at cQueueFrames. */
+    if (((LONG)iFrame - cEncoded) >= (LONG)pCap->cFrames)
+    {
+        pCap->fEncodeOverflow = TRUE;
+    }
+    iSlot = iFrame % pCap->cQueueFrames;
+    if (!pCap->ppFrames[iSlot])
+    {
+        return FALSE;
+    }
+    box.left = xSrc;
+    box.top = ySrc;
+    box.front = 0u;
+    box.right = xSrc + (UINT)pCap->cx;
+    box.bottom = ySrc + (UINT)pCap->cy;
+    box.back = 1u;
+    ID3D11DeviceContext_CopySubresourceRegion(pDxgi->pContext,
+                                              (ID3D11Resource*)pCap->ppFrames[iSlot],
+                                              0u,
+                                              0u,
+                                              0u,
+                                              0u,
+                                              (ID3D11Resource*)pTex,
+                                              0u,
+                                              &box);
+    ID3D11DeviceContext_CopyResource(pDxgi->pContext,
+                                     (ID3D11Resource*)pCap->ppEncodeFrames[iFrame],
+                                     (ID3D11Resource*)pCap->ppFrames[iSlot]);
+    ID3D11DeviceContext_Flush(pDxgi->pContext);
+    pCap->cCaptured = iFrame + 1u;
+    InterlockedExchange(&pCap->cReadyFrames, (LONG)(iFrame + 1u));
+    if (pCap->hEncodeReady)
+    {
+        SetEvent(pCap->hEncodeReady);
+    }
+    return TRUE;
+}
+
+static BOOL ThemeTestDxgiRepeatFrame(THEME_DXGI* pDxgi, THEME_CAPTURE* pCap, UINT iFrame)
+{
+    LONG cEncoded;
+    UINT iSlot;
+    UINT iPrevSlot;
+
+    if (0u == iFrame)
+    {
+        return FALSE;
+    }
+    cEncoded = InterlockedCompareExchange(&pCap->cEncodedFrames, 0, 0);
+    /* The encoder consumes pCap->ppEncodeFrames[iFrame] -- a distinct persistent slot per frame,
+     * cFrames deep -- not the small staging ring, so a slow encoder can never cause the capture to
+     * overwrite an unencoded frame. Bound real-time lag by that persistent depth (a transient
+     * scheduling stall is not a dropped frame); the ring index below still wraps at cQueueFrames. */
+    if (((LONG)iFrame - cEncoded) >= (LONG)pCap->cFrames)
+    {
+        pCap->fEncodeOverflow = TRUE;
+    }
+    iSlot = iFrame % pCap->cQueueFrames;
+    iPrevSlot = (iFrame - 1u) % pCap->cQueueFrames;
+    if (!pCap->ppFrames[iSlot] || !pCap->ppFrames[iPrevSlot])
+    {
+        return FALSE;
+    }
+    ID3D11DeviceContext_CopyResource(pDxgi->pContext,
+                                     (ID3D11Resource*)pCap->ppFrames[iSlot],
+                                     (ID3D11Resource*)pCap->ppFrames[iPrevSlot]);
+    ID3D11DeviceContext_CopyResource(pDxgi->pContext,
+                                     (ID3D11Resource*)pCap->ppEncodeFrames[iFrame],
+                                     (ID3D11Resource*)pCap->ppFrames[iSlot]);
+    ID3D11DeviceContext_Flush(pDxgi->pContext);
+    pCap->cCaptured = iFrame + 1u;
+    InterlockedExchange(&pCap->cReadyFrames, (LONG)(iFrame + 1u));
+    if (pCap->hEncodeReady)
+    {
+        SetEvent(pCap->hEncodeReady);
+    }
+    return TRUE;
+}
+
+static BOOL ThemeTestAllocateFrameQueue(THEME_DXGI* pDxgi, THEME_CAPTURE* pCap)
+{
+    D3D11_TEXTURE2D_DESC desc;
+    UINT i;
+
+    SecureZeroMemory(&desc, sizeof(desc));
+    desc.Width = (UINT)pCap->cx;
+    desc.Height = (UINT)pCap->cy;
+    desc.MipLevels = 1u;
+    desc.ArraySize = 1u;
+    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    desc.SampleDesc.Count = 1u;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    for (i = 0u; i < pCap->cQueueFrames; ++i)
+    {
+        if (FAILED(ID3D11Device_CreateTexture2D(pDxgi->pDevice, &desc, NULL, &pCap->ppFrames[i])))
+        {
+            return FALSE;
+        }
+    }
+    for (i = 0u; i < pCap->cFrames; ++i)
+    {
+        if (FAILED(ID3D11Device_CreateTexture2D(pDxgi->pDevice, &desc, NULL, &pCap->ppEncodeFrames[i])))
+        {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+static BOOL ThemeTestFramePixel(const THEME_CAPTURE* pCap, UINT iFrame, POINT ptScreen, COLORREF* pcr)
+{
+    LONG  x;
+    LONG  y;
+    BYTE* pb;
+
+    x = ptScreen.x - pCap->rc.left;
+    y = ptScreen.y - pCap->rc.top;
+    if ((0 > x) || (0 > y) || (x >= pCap->cx) || (y >= pCap->cy))
+    {
+        return FALSE;
+    }
+    pb = pCap->pbFrames + (iFrame * pCap->cbFrame) + (((y * pCap->cx) + x) * 4);
+    *pcr = RGB(pb[2], pb[1], pb[0]);
+    return TRUE;
+}
+
+static void ThemeTestCountCapturedPixel(const THEME_CAPTURE* pCap,
+                                        UINT iFrame,
+                                        POINT pt,
+                                        UINT* pcDark,
+                                        UINT* pcLight,
+                                        UINT* pcClassified,
+                                        UINT* pcIntermediate)
+{
+    COLORREF cr;
+    BOOL     fDark;
+
+    if (!ThemeTestFramePixel(pCap, iFrame, pt, &cr))
+    {
+        return;
+    }
+    if (ThemeTestClassifyPixel(cr, &fDark))
+    {
+        *pcClassified = *pcClassified + 1u;
+        if (fDark)
+        {
+            *pcDark = *pcDark + 1u;
+        }
+        else
+        {
+            *pcLight = *pcLight + 1u;
+        }
+    }
+    else if (ThemeTestClassifyIntermediatePixel(cr))
+    {
+        *pcIntermediate = *pcIntermediate + 1u;
+    }
+}
+
+static UINT ThemeTestCapturedPixelMask(const THEME_CAPTURE* pCap, UINT iFrame, POINT pt)
+{
+    COLORREF cr;
+    BOOL     fDark;
+
+    if (!ThemeTestFramePixel(pCap, iFrame, pt, &cr) || !ThemeTestClassifyPixel(cr, &fDark))
+    {
+        return 0u;
+    }
+    if (fDark)
+    {
+        return 1u;
+    }
+    return 2u;
+}
+
+static UINT ThemeTestCapturedPixelIntermediateMask(const THEME_CAPTURE* pCap, UINT iFrame, POINT pt)
+{
+    COLORREF cr;
+
+    if (!ThemeTestFramePixel(pCap, iFrame, pt, &cr) || !ThemeTestClassifyIntermediatePixel(cr))
+    {
+        return 0u;
+    }
+    return 1u;
+}
+
+static void ThemeTestCountCapturedMenu(const THEME_CAPTURE* pCap,
+                                       UINT iFrame,
+                                       const POINT* prgpt,
+                                       UINT cpt,
+                                       UINT* pcDark,
+                                       UINT* pcLight,
+                                       UINT* pcClassified,
+                                       UINT* pcIntermediate)
+{
+    COLORREF cr;
+    BOOL     fDark;
+    UINT     cMenuDark;
+    UINT     cMenuLight;
+    UINT     cMenuIntermediate;
+    UINT     i;
+
+    cMenuDark = 0u;
+    cMenuLight = 0u;
+    cMenuIntermediate = 0u;
+    i = 0u;
+    while (i < cpt)
+    {
+        if (ThemeTestFramePixel(pCap, iFrame, prgpt[i], &cr))
+        {
+            if (ThemeTestClassifyPixel(cr, &fDark))
+            {
+                if (fDark) { ++cMenuDark; } else { ++cMenuLight; }
+            }
+            else if (ThemeTestClassifyIntermediatePixel(cr))
+            {
+                ++cMenuIntermediate;
+            }
+        }
+        ++i;
+    }
+    if ((cMenuDark + cMenuLight) >= 2u)
+    {
+        *pcClassified = *pcClassified + 1u;
+        if (cMenuDark > cMenuLight)
+        {
+            *pcDark = *pcDark + 1u;
+        }
+        else
+        {
+            *pcLight = *pcLight + 1u;
+        }
+    }
+    else if (2u <= cMenuIntermediate)
+    {
+        *pcIntermediate = *pcIntermediate + 1u;
+    }
+}
+
+static UINT ThemeTestCapturedMenuMask(const THEME_CAPTURE* pCap, UINT iFrame, const POINT* prgpt, UINT cpt)
+{
+    COLORREF cr;
+    BOOL     fDark;
+    UINT     cMenuDark;
+    UINT     cMenuLight;
+    UINT     i;
+
+    cMenuDark = 0u;
+    cMenuLight = 0u;
+    i = 0u;
+    while (i < cpt)
+    {
+        if (ThemeTestFramePixel(pCap, iFrame, prgpt[i], &cr) && ThemeTestClassifyPixel(cr, &fDark))
+        {
+            if (fDark) { ++cMenuDark; } else { ++cMenuLight; }
+        }
+        ++i;
+    }
+    if ((cMenuDark + cMenuLight) < 2u)
+    {
+        return 0u;
+    }
+    if (cMenuDark > cMenuLight)
+    {
+        return 1u;
+    }
+    return 2u;
+}
+
+static UINT ThemeTestCapturedMenuIntermediateMask(const THEME_CAPTURE* pCap,
+                                                 UINT iFrame,
+                                                 const POINT* prgpt,
+                                                 UINT cpt)
+{
+    COLORREF cr;
+    UINT     cMenuIntermediate;
+    UINT     i;
+
+    cMenuIntermediate = 0u;
+    i = 0u;
+    while (i < cpt)
+    {
+        if (ThemeTestFramePixel(pCap, iFrame, prgpt[i], &cr) && ThemeTestClassifyIntermediatePixel(cr))
+        {
+            ++cMenuIntermediate;
+        }
+        ++i;
+    }
+    return (2u <= cMenuIntermediate) ? 1u : 0u;
+}
+
+static void ThemeTestCountCapturedButton(const THEME_CAPTURE* pCap,
+                                         UINT iFrame,
+                                         HWND hwndButton,
+                                         UINT* pcDark,
+                                         UINT* pcLight,
+                                         UINT* pcClassified,
+                                         UINT* pcIntermediate)
+{
+    POINT pt;
+    COLORREF cr;
+    BOOL fDark;
+    UINT cButtonDark;
+    UINT cButtonLight;
+    UINT cButtonIntermediate;
+
+    cButtonDark = 0u;
+    cButtonLight = 0u;
+    cButtonIntermediate = 0u;
+    if (ThemeTestSamplePoint(hwndButton, 6, 6, &pt) &&
+        ThemeTestFramePixel(pCap, iFrame, pt, &cr))
+    {
+        if (ThemeTestClassifyPixel(cr, &fDark))
+        {
+            if (fDark) { ++cButtonDark; } else { ++cButtonLight; }
+        }
+        else if (ThemeTestClassifyIntermediatePixel(cr)) { ++cButtonIntermediate; }
+    }
+    if (ThemeTestSamplePoint(hwndButton, 74, 6, &pt) &&
+        ThemeTestFramePixel(pCap, iFrame, pt, &cr))
+    {
+        if (ThemeTestClassifyPixel(cr, &fDark))
+        {
+            if (fDark) { ++cButtonDark; } else { ++cButtonLight; }
+        }
+        else if (ThemeTestClassifyIntermediatePixel(cr)) { ++cButtonIntermediate; }
+    }
+    if (ThemeTestSamplePoint(hwndButton, 6, 18, &pt) &&
+        ThemeTestFramePixel(pCap, iFrame, pt, &cr))
+    {
+        if (ThemeTestClassifyPixel(cr, &fDark))
+        {
+            if (fDark) { ++cButtonDark; } else { ++cButtonLight; }
+        }
+        else if (ThemeTestClassifyIntermediatePixel(cr)) { ++cButtonIntermediate; }
+    }
+    if (ThemeTestSamplePoint(hwndButton, 74, 18, &pt) &&
+        ThemeTestFramePixel(pCap, iFrame, pt, &cr))
+    {
+        if (ThemeTestClassifyPixel(cr, &fDark))
+        {
+            if (fDark) { ++cButtonDark; } else { ++cButtonLight; }
+        }
+        else if (ThemeTestClassifyIntermediatePixel(cr)) { ++cButtonIntermediate; }
+    }
+    if ((cButtonDark + cButtonLight) >= 3u)
+    {
+        *pcClassified = *pcClassified + 1u;
+        if (cButtonDark > cButtonLight)
+        {
+            *pcDark = *pcDark + 1u;
+        }
+        else
+        {
+            *pcLight = *pcLight + 1u;
+        }
+    }
+    else if (cButtonIntermediate >= 3u)
+    {
+        *pcIntermediate = *pcIntermediate + 1u;
+    }
+}
+
+static UINT ThemeTestCapturedButtonMask(const THEME_CAPTURE* pCap, UINT iFrame, HWND hwndButton)
+{
+    POINT pt;
+    COLORREF cr;
+    BOOL fDark;
+    UINT cButtonDark;
+    UINT cButtonLight;
+
+    cButtonDark = 0u;
+    cButtonLight = 0u;
+    if (ThemeTestSamplePoint(hwndButton, 10, 8, &pt) &&
+        ThemeTestFramePixel(pCap, iFrame, pt, &cr) &&
+        ThemeTestClassifyPixel(cr, &fDark))
+    {
+        if (fDark) { ++cButtonDark; } else { ++cButtonLight; }
+    }
+    if (ThemeTestSamplePoint(hwndButton, 10, 16, &pt) &&
+        ThemeTestFramePixel(pCap, iFrame, pt, &cr) &&
+        ThemeTestClassifyPixel(cr, &fDark))
+    {
+        if (fDark) { ++cButtonDark; } else { ++cButtonLight; }
+    }
+    if (ThemeTestSamplePoint(hwndButton, 65, 8, &pt) &&
+        ThemeTestFramePixel(pCap, iFrame, pt, &cr) &&
+        ThemeTestClassifyPixel(cr, &fDark))
+    {
+        if (fDark) { ++cButtonDark; } else { ++cButtonLight; }
+    }
+    if (ThemeTestSamplePoint(hwndButton, 65, 16, &pt) &&
+        ThemeTestFramePixel(pCap, iFrame, pt, &cr) &&
+        ThemeTestClassifyPixel(cr, &fDark))
+    {
+        if (fDark) { ++cButtonDark; } else { ++cButtonLight; }
+    }
+    if ((cButtonDark + cButtonLight) < 3u)
+    {
+        return 0u;
+    }
+    if (cButtonDark > cButtonLight)
+    {
+        return 1u;
+    }
+    return 2u;
+}
+
+static UINT ThemeTestCapturedButtonIntermediateMask(const THEME_CAPTURE* pCap, UINT iFrame, HWND hwndButton)
+{
+    POINT pt;
+    COLORREF cr;
+    UINT cButtonIntermediate;
+
+    cButtonIntermediate = 0u;
+    if (ThemeTestSamplePoint(hwndButton, 10, 8, &pt) &&
+        ThemeTestFramePixel(pCap, iFrame, pt, &cr) &&
+        ThemeTestClassifyIntermediatePixel(cr))
+    {
+        ++cButtonIntermediate;
+    }
+    if (ThemeTestSamplePoint(hwndButton, 10, 16, &pt) &&
+        ThemeTestFramePixel(pCap, iFrame, pt, &cr) &&
+        ThemeTestClassifyIntermediatePixel(cr))
+    {
+        ++cButtonIntermediate;
+    }
+    if (ThemeTestSamplePoint(hwndButton, 65, 8, &pt) &&
+        ThemeTestFramePixel(pCap, iFrame, pt, &cr) &&
+        ThemeTestClassifyIntermediatePixel(cr))
+    {
+        ++cButtonIntermediate;
+    }
+    if (ThemeTestSamplePoint(hwndButton, 65, 16, &pt) &&
+        ThemeTestFramePixel(pCap, iFrame, pt, &cr) &&
+        ThemeTestClassifyIntermediatePixel(cr))
+    {
+        ++cButtonIntermediate;
+    }
+    return (3u <= cButtonIntermediate) ? 1u : 0u;
+}
+
+static BOOL ThemeTestAnalyzeCapturedFrames(THEME_CAPTURE* pCap,
+                                           HWND hwndTop,
+                                           HWND hwndDialog,
+                                           HWND hwndStatic,
+                                           HWND hwndButton,
+                                           BOOL fTargetDark,
+                                           BOOL* pfSawTarget,
+                                           BOOL* pfMixed,
+                                           BOOL* pfSawIntermediate)
+{
+    POINT rgMenu[3];
+    POINT ptTitle;
+    POINT ptTop;
+    POINT ptDialog;
+    POINT ptStatic;
+    UINT  cMenu;
+    UINT  i;
+    UINT  cDark;
+    UINT  cLight;
+    UINT  cClassified;
+    UINT  cIntermediate;
+    UINT  rgMasks[6];
+    UINT  j;
+    UINT  uDarkMask;
+    UINT  uLightMask;
+    RECT  rcTop;
+
+    if (!ThemeTestMenuPoints(hwndTop, rgMenu, &cMenu) ||
+        !ThemeTestSamplePoint(hwndTop, 24, 96, &ptTop) ||
+        !ThemeTestSamplePoint(hwndDialog, 180, 84, &ptDialog) ||
+        !ThemeTestSamplePoint(hwndStatic, 8, 8, &ptStatic))
+    {
+        return FALSE;
+    }
+    if (!GetWindowRect(hwndTop, &rcTop))
+    {
+        return FALSE;
+    }
+    ptTitle.x = rcTop.left + 120;
+    ptTitle.y = rcTop.top + 12;
+
+    *pfSawTarget = FALSE;
+    *pfMixed = FALSE;
+    *pfSawIntermediate = FALSE;
+    pCap->iFirstMixedFrame = 0u;
+    pCap->iLastMixedFrame = 0u;
+    pCap->iFirstTargetFrame = 0u;
+    pCap->iFirstIntermediateFrame = 0u;
+    pCap->uMixedMask = 0u;
+    pCap->uIntermediateMask = 0u;
+    for (i = 0u; i < pCap->cCaptured; ++i)
+    {
+        cDark = 0u;
+        cLight = 0u;
+        cClassified = 0u;
+        cIntermediate = 0u;
+        ThemeTestCountCapturedPixel(pCap, i, ptTitle, &cDark, &cLight, &cClassified, &cIntermediate);
+        ThemeTestCountCapturedMenu(pCap, i, rgMenu, cMenu, &cDark, &cLight, &cClassified, &cIntermediate);
+        ThemeTestCountCapturedPixel(pCap, i, ptTop, &cDark, &cLight, &cClassified, &cIntermediate);
+        ThemeTestCountCapturedPixel(pCap, i, ptDialog, &cDark, &cLight, &cClassified, &cIntermediate);
+        ThemeTestCountCapturedPixel(pCap, i, ptStatic, &cDark, &cLight, &cClassified, &cIntermediate);
+        ThemeTestCountCapturedButton(pCap, i, hwndButton, &cDark, &cLight, &cClassified, &cIntermediate);
+        if (3u <= cIntermediate)
+        {
+            *pfSawIntermediate = TRUE;
+            rgMasks[0] = ThemeTestCapturedPixelIntermediateMask(pCap, i, ptTitle);
+            rgMasks[1] = ThemeTestCapturedMenuIntermediateMask(pCap, i, rgMenu, cMenu);
+            rgMasks[2] = ThemeTestCapturedPixelIntermediateMask(pCap, i, ptTop);
+            rgMasks[3] = ThemeTestCapturedPixelIntermediateMask(pCap, i, ptDialog);
+            rgMasks[4] = ThemeTestCapturedPixelIntermediateMask(pCap, i, ptStatic);
+            rgMasks[5] = ThemeTestCapturedButtonIntermediateMask(pCap, i, hwndButton);
+            for (j = 0u; j < ARRAYSIZE(rgMasks); ++j)
+            {
+                if (rgMasks[j])
+                {
+                    pCap->uIntermediateMask |= (1u << j);
+                }
+            }
+            if (0u == pCap->iFirstIntermediateFrame)
+            {
+                pCap->iFirstIntermediateFrame = i + 1u;
+            }
+        }
+        if ((0u < cDark) && (0u < cLight))
+        {
+            *pfMixed = TRUE;
+            pCap->iLastMixedFrame = i + 1u;
+            if (0u == pCap->iFirstMixedFrame)
+            {
+                rgMasks[0] = ThemeTestCapturedPixelMask(pCap, i, ptTitle);
+                rgMasks[1] = ThemeTestCapturedMenuMask(pCap, i, rgMenu, cMenu);
+                rgMasks[2] = ThemeTestCapturedPixelMask(pCap, i, ptTop);
+                rgMasks[3] = ThemeTestCapturedPixelMask(pCap, i, ptDialog);
+                rgMasks[4] = ThemeTestCapturedPixelMask(pCap, i, ptStatic);
+                rgMasks[5] = ThemeTestCapturedButtonMask(pCap, i, hwndButton);
+                uDarkMask = 0u;
+                uLightMask = 0u;
+                for (j = 0u; j < ARRAYSIZE(rgMasks); ++j)
+                {
+                    if (1u == rgMasks[j])
+                    {
+                        uDarkMask |= (1u << j);
+                    }
+                    else if (2u == rgMasks[j])
+                    {
+                        uLightMask |= (1u << j);
+                    }
+                }
+                pCap->iFirstMixedFrame = i + 1u;
+                pCap->uMixedMask = uDarkMask | (uLightMask << 8);
+            }
+        }
+        if (3u <= cClassified)
+        {
+            if (fTargetDark && (0u == cLight) && (0u < cDark))
+            {
+                *pfSawTarget = TRUE;
+                if (0u == pCap->iFirstTargetFrame)
+                {
+                    pCap->iFirstTargetFrame = i + 1u;
+                }
+            }
+            if ((!fTargetDark) && (0u == cDark) && (0u < cLight))
+            {
+                *pfSawTarget = TRUE;
+                if (0u == pCap->iFirstTargetFrame)
+                {
+                    pCap->iFirstTargetFrame = i + 1u;
+                }
+            }
+        }
+    }
+    return TRUE;
+}
+
+static BOOL ThemeTestRecordCompositedFrames(THEME_DXGI* pDxgi, THEME_CAPTURE* pCap)
+{
+    DXGI_OUTDUPL_FRAME_INFO info;
+    IDXGIResource*          pResource;
+    ID3D11Texture2D*        pTex;
+    HRESULT                 hr;
+    UINT                    i;
+    LARGE_INTEGER           liFreq;
+    LARGE_INTEGER           liStart;
+    LARGE_INTEGER           liRecordStart;
+    LARGE_INTEGER           liNow;
+    LONGLONG                llTarget;
+
+    g_hrThemeCapture = S_OK;
+    g_uThemeCaptureStage = 1u;
+    if (!QueryPerformanceFrequency(&liFreq))
+    {
+        g_hrThemeCapture = E_FAIL;
+        return FALSE;
+    }
+    QueryPerformanceCounter(&liStart);
+
+    i = 0u;
+    while (TRUE)
+    {
+        QueryPerformanceCounter(&liNow);
+        if (((liNow.QuadPart - liStart.QuadPart) * 1000) >= (liFreq.QuadPart * THEME_DXGI_TIMEOUT_MS))
+        {
+            g_hrThemeCapture = DXGI_ERROR_WAIT_TIMEOUT;
+            g_uThemeCaptureStage = 2u;
+            return FALSE;
+        }
+        ThemeTestPumpMessages();
+        SecureZeroMemory(&info, sizeof(info));
+        pResource = NULL;
+        hr = IDXGIOutputDuplication_AcquireNextFrame(pDxgi->pDup, 1u, &info, &pResource);
+        if (DXGI_ERROR_WAIT_TIMEOUT == hr)
+        {
+            continue;
+        }
+        if (FAILED(hr))
+        {
+            g_hrThemeCapture = hr;
+            g_uThemeCaptureStage = 3u;
+            return FALSE;
+        }
+        pTex = NULL;
+        hr = IDXGIResource_QueryInterface(pResource, &ThemeTestIID_ID3D11Texture2D, (void**)&pTex);
+        if (SUCCEEDED(hr))
+        {
+            hr = ThemeTestDxgiCopyFrame(pDxgi, pCap, pTex, i) ? S_OK : E_FAIL;
+            ID3D11Texture2D_Release(pTex);
+        }
+        IDXGIResource_Release(pResource);
+        IDXGIOutputDuplication_ReleaseFrame(pDxgi->pDup);
+        if (FAILED(hr))
+        {
+            g_hrThemeCapture = hr;
+            g_uThemeCaptureStage = 4u;
+            return FALSE;
+        }
+        break;
+    }
+    /* Hold the native-cadence record window shut until the encoder finishes Media Foundation
+     * startup and is draining the queue; otherwise the first frames pile up during BeginWriting and
+     * push the capture more than the queue depth ahead of the encoder, latching fEncodeOverflow. */
+    if (pCap->hEncodeStarted)
+    {
+        (void)WaitForSingleObject(pCap->hEncodeStarted, THEME_DXGI_TIMEOUT_MS);
+    }
+    if (g_hThemeStartEvent)
+    {
+        SetEvent(g_hThemeStartEvent);
+    }
+    QueryPerformanceCounter(&liRecordStart);
+
+    for (i = 0u; i < pCap->cFrames; ++i)
+    {
+        if (0u == i)
+        {
+            continue;
+        }
+        llTarget = ((LONGLONG)i * liFreq.QuadPart * (LONGLONG)pDxgi->uRefreshDenominator) /
+                   (LONGLONG)pDxgi->uRefreshNumerator;
+        QueryPerformanceCounter(&liNow);
+        while ((liNow.QuadPart - liRecordStart.QuadPart) < llTarget)
+        {
+            Sleep(0);
+            ThemeTestPumpMessages();
+            QueryPerformanceCounter(&liNow);
+        }
+        ThemeTestPumpMessages();
+        SecureZeroMemory(&info, sizeof(info));
+        pResource = NULL;
+        hr = IDXGIOutputDuplication_AcquireNextFrame(pDxgi->pDup, 0u, &info, &pResource);
+        if (SUCCEEDED(hr))
+        {
+            if (1u < info.AccumulatedFrames)
+            {
+                pCap->fDropped = TRUE;
+                if (0u == pCap->iDroppedFrame)
+                {
+                    pCap->iDroppedFrame = i + 1u;
+                }
+            }
+            if (info.AccumulatedFrames > pCap->cMaxAccumulated)
+            {
+                pCap->cMaxAccumulated = info.AccumulatedFrames;
+            }
+            pTex = NULL;
+            hr = IDXGIResource_QueryInterface(pResource, &ThemeTestIID_ID3D11Texture2D, (void**)&pTex);
+            if (SUCCEEDED(hr))
+            {
+                hr = ThemeTestDxgiCopyFrame(pDxgi, pCap, pTex, i) ? S_OK : E_FAIL;
+                ID3D11Texture2D_Release(pTex);
+            }
+            IDXGIResource_Release(pResource);
+            IDXGIOutputDuplication_ReleaseFrame(pDxgi->pDup);
+        }
+        else if (DXGI_ERROR_WAIT_TIMEOUT != hr)
+        {
+            g_hrThemeCapture = hr;
+            g_uThemeCaptureStage = 5u;
+            return FALSE;
+        }
+        else if (!ThemeTestDxgiRepeatFrame(pDxgi, pCap, i))
+        {
+            g_hrThemeCapture = E_FAIL;
+            g_uThemeCaptureStage = 6u;
+            return FALSE;
+        }
+    }
+    ThemeTestPumpMessages();
+    return TRUE;
+}
+
+static DWORD WINAPI ThemeTestCaptureThread(LPVOID pv)
+{
+    THEME_CAPTURE_RUN* pRun;
+    int                nOldPriority;
+
+    pRun = (THEME_CAPTURE_RUN*)pv;
+    pRun->dwThreadId = GetCurrentThreadId();
+    nOldPriority = GetThreadPriority(GetCurrentThread());
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+    pRun->fOk = ThemeTestRecordCompositedFrames(pRun->pDxgi, pRun->pCap);
+    SetThreadPriority(GetCurrentThread(), nOldPriority);
+    SetEvent(pRun->hDone);
+    return pRun->fOk ? 0u : 1u;
+}
+
+static BOOL ThemeTestPumpUntilDone(HANDLE hDone, DWORD dwTimeoutMs)
+{
+    LARGE_INTEGER liFreq;
+    LARGE_INTEGER liStart;
+    LARGE_INTEGER liNow;
+    DWORD         dwWait;
+
+    if (!QueryPerformanceFrequency(&liFreq))
+    {
+        return FALSE;
+    }
+    QueryPerformanceCounter(&liStart);
+    while (TRUE)
+    {
+        ThemeTestPumpMessages();
+        dwWait = WaitForSingleObject(hDone, 1u);
+        if (WAIT_OBJECT_0 == dwWait)
+        {
+            return TRUE;
+        }
+        if (WAIT_FAILED == dwWait)
+        {
+            return FALSE;
+        }
+        QueryPerformanceCounter(&liNow);
+        if (((liNow.QuadPart - liStart.QuadPart) * 1000) >= (liFreq.QuadPart * dwTimeoutMs))
+        {
+            return FALSE;
+        }
+    }
+}
+
+static BOOL ThemeTestMaterializeCapturedFrames(THEME_DXGI* pDxgi, THEME_CAPTURE* pCap)
+{
+    D3D11_MAPPED_SUBRESOURCE map;
+    UINT i;
+    UINT y;
+    BYTE* pbDst;
+    BYTE* pbSrc;
+    SIZE_T cbTotal;
+
+    if (0u == pCap->cCaptured)
+    {
+        return FALSE;
+    }
+    cbTotal = (SIZE_T)pCap->cbFrame * pCap->cCaptured;
+    pCap->pbFrames = (BYTE*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, cbTotal);
+    if (!pCap->pbFrames)
+    {
+        return FALSE;
+    }
+    if (!ThemeTestDxgiEnsureStaging(pDxgi, pCap->ppFrames[0]))
+    {
+        return FALSE;
+    }
+    for (i = 0u; i < pCap->cCaptured; ++i)
+    {
+        ID3D11DeviceContext_CopyResource(pDxgi->pContext,
+                                         (ID3D11Resource*)pDxgi->pStaging,
+                                         (ID3D11Resource*)pCap->ppFrames[i]);
+        if (FAILED(ID3D11DeviceContext_Map(pDxgi->pContext,
+                                           (ID3D11Resource*)pDxgi->pStaging,
+                                           0u,
+                                           D3D11_MAP_READ,
+                                           0u,
+                                           &map)))
+        {
+            return FALSE;
+        }
+        pbDst = pCap->pbFrames + (i * pCap->cbFrame);
+        pbSrc = (BYTE*)map.pData;
+        for (y = 0u; y < (UINT)pCap->cy; ++y)
+        {
+            ThemeTestCopyBytes(pbDst + (y * pCap->cx * 4u), pbSrc + (y * map.RowPitch), (SIZE_T)(pCap->cx * 4u));
+        }
+        ID3D11DeviceContext_Unmap(pDxgi->pContext, (ID3D11Resource*)pDxgi->pStaging, 0u);
+    }
+    return TRUE;
+}
+
+static BOOL ThemeTestAppendPathLeafW(LPWSTR pszPath, UINT cchPath, LPCWSTR pszLeaf)
+{
+    UINT cch;
+    UINT cchLeaf;
+
+    cch = lstrlenW(pszPath);
+    while ((0u < cch) && (L'\\' != pszPath[cch - 1u]) && (L'/' != pszPath[cch - 1u]))
+    {
+        --cch;
+    }
+    pszPath[cch] = 0;
+    cchLeaf = lstrlenW(pszLeaf);
+    if ((cch + cchLeaf + 1u) > cchPath)
+    {
+        return FALSE;
+    }
+    lstrcpyW(pszPath + cch, pszLeaf);
+    return TRUE;
+}
+
+static BOOL ThemeTestMfResolve(void)
+{
+    if (g_mf.pfnMFStartup)
+    {
+        return TRUE;
+    }
+    g_mf.hMfplat = LoadLibrary(TEXT("mfplat.dll"));
+    g_mf.hMfreadwrite = LoadLibrary(TEXT("mfreadwrite.dll"));
+    if (!g_mf.hMfplat || !g_mf.hMfreadwrite)
+    {
+        return FALSE;
+    }
+    g_mf.pfnMFStartup = (PFN_MFSTARTUP)GetProcAddress(g_mf.hMfplat, "MFStartup");
+    g_mf.pfnMFShutdown = (PFN_MFSHUTDOWN)GetProcAddress(g_mf.hMfplat, "MFShutdown");
+    g_mf.pfnMFCreateDXGISurfaceBuffer =
+        (PFN_MFCREATEDXGISURFACEBUFFER)GetProcAddress(g_mf.hMfplat, "MFCreateDXGISurfaceBuffer");
+    g_mf.pfnMFCreateDXGIDeviceManager =
+        (PFN_MFCREATEDXGIDEVICEMANAGER)GetProcAddress(g_mf.hMfplat, "MFCreateDXGIDeviceManager");
+    g_mf.pfnMFCreateSample = (PFN_MFCREATESAMPLE)GetProcAddress(g_mf.hMfplat, "MFCreateSample");
+    g_mf.pfnMFCreateAttributes = (PFN_MFCREATEATTRIBUTES)GetProcAddress(g_mf.hMfplat, "MFCreateAttributes");
+    g_mf.pfnMFCreateMediaType = (PFN_MFCREATEMEDIATYPE)GetProcAddress(g_mf.hMfplat, "MFCreateMediaType");
+    g_mf.pfnMFCreateSinkWriterFromURL =
+        (PFN_MFCREATESINKWRITERFROMURL)GetProcAddress(g_mf.hMfreadwrite, "MFCreateSinkWriterFromURL");
+    g_mf.pfnMFCreateSourceReaderFromURL =
+        (PFN_MFCREATESOURCEREADERFROMURL)GetProcAddress(g_mf.hMfreadwrite, "MFCreateSourceReaderFromURL");
+    return g_mf.pfnMFStartup &&
+           g_mf.pfnMFShutdown &&
+           g_mf.pfnMFCreateDXGISurfaceBuffer &&
+           g_mf.pfnMFCreateDXGIDeviceManager &&
+           g_mf.pfnMFCreateSample &&
+           g_mf.pfnMFCreateAttributes &&
+           g_mf.pfnMFCreateMediaType &&
+           g_mf.pfnMFCreateSinkWriterFromURL &&
+           g_mf.pfnMFCreateSourceReaderFromURL;
+}
+
+static HRESULT ThemeTestSetVideoTypeCommon(IMFMediaType* pType,
+                                           REFGUID guidSubtype,
+                                           UINT cx,
+                                           UINT cy,
+                                           UINT uRefreshNumerator,
+                                           UINT uRefreshDenominator)
+{
+    HRESULT hr;
+
+    hr = IMFMediaType_SetGUID(pType, &MF_MT_MAJOR_TYPE, &MFMediaType_Video);
+    if (SUCCEEDED(hr))
+    {
+        hr = IMFMediaType_SetGUID(pType, &MF_MT_SUBTYPE, guidSubtype);
+    }
+    if (SUCCEEDED(hr))
+    {
+        hr = IMFMediaType_SetUINT64(pType, &MF_MT_FRAME_SIZE, (((UINT64)cx) << 32) | (UINT64)cy);
+    }
+    if (SUCCEEDED(hr))
+    {
+        hr = IMFMediaType_SetUINT64(
+            pType, &MF_MT_FRAME_RATE, (((UINT64)uRefreshNumerator) << 32) | (UINT64)uRefreshDenominator);
+    }
+    if (SUCCEEDED(hr))
+    {
+        hr = IMFMediaType_SetUINT64(pType, &MF_MT_PIXEL_ASPECT_RATIO, (((UINT64)1u) << 32) | (UINT64)1u);
+    }
+    if (SUCCEEDED(hr))
+    {
+        hr = IMFMediaType_SetUINT32(pType, &MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+    }
+    return hr;
+}
+
+static BOOL ThemeTestEncodeCapturedFrames(THEME_DXGI* pDxgi, THEME_CAPTURE* pCap)
+{
+    WCHAR                  szPath[MAX_PATH];
+    HRESULT                hr;
+    HRESULT                hrCo;
+    BOOL                   fCoInit;
+    UINT                   uResetToken;
+    DWORD                  dwStream;
+    LONGLONG               llTime;
+    LONGLONG               llDuration;
+    LONG                   cReady;
+    UINT                   i;
+    IMFAttributes*         pAttrs;
+    IMFDXGIDeviceManager*  pManager;
+    IMFSinkWriter*         pWriter;
+    IMFMediaType*          pOutputType;
+    IMFMediaType*          pInputType;
+    IMFSample*             pSample;
+    IMFMediaBuffer*        pBuffer;
+
+    g_uThemeEncodeStage = 1u;
+    if ((0u == pCap->cFrames) || (0u == pDxgi->uRefreshNumerator) || (0u == pDxgi->uRefreshDenominator))
+    {
+        return FALSE;
+    }
+
+    if (!GetModuleFileNameW(NULL, szPath, ARRAYSIZE(szPath)) ||
+        !ThemeTestAppendPathLeafW(szPath, ARRAYSIZE(szPath), L"T6-theme-transition.mp4"))
+    {
+        return FALSE;
+    }
+    DeleteFileW(szPath);
+
+    fCoInit = FALSE;
+    hrCo = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    if (SUCCEEDED(hrCo))
+    {
+        fCoInit = TRUE;
+    }
+    else if (RPC_E_CHANGED_MODE != hrCo)
+    {
+        return FALSE;
+    }
+
+    pAttrs = NULL;
+    pManager = NULL;
+    pWriter = NULL;
+    pOutputType = NULL;
+    pInputType = NULL;
+    if (!ThemeTestMfResolve())
+    {
+        hr = E_FAIL;
+    }
+    else
+    {
+        hr = g_mf.pfnMFStartup(MF_VERSION, MFSTARTUP_NOSOCKET);
+    }
+    if (SUCCEEDED(hr))
+    {
+        g_uThemeEncodeStage = 2u;
+        hr = g_mf.pfnMFCreateDXGIDeviceManager(&uResetToken, &pManager);
+    }
+    if (SUCCEEDED(hr))
+    {
+        g_uThemeEncodeStage = 3u;
+        hr = IMFDXGIDeviceManager_ResetDevice(pManager, (IUnknown*)pDxgi->pDevice, uResetToken);
+    }
+    if (SUCCEEDED(hr))
+    {
+        g_uThemeEncodeStage = 4u;
+        hr = g_mf.pfnMFCreateAttributes(&pAttrs, 4u);
+    }
+    if (SUCCEEDED(hr))
+    {
+        hr = IMFAttributes_SetUINT32(pAttrs, &MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
+    }
+    if (SUCCEEDED(hr))
+    {
+        hr = IMFAttributes_SetUINT32(pAttrs, &MF_SINK_WRITER_DISABLE_THROTTLING, TRUE);
+    }
+    if (SUCCEEDED(hr))
+    {
+        hr = IMFAttributes_SetUnknown(pAttrs, &MF_SINK_WRITER_D3D_MANAGER, (IUnknown*)pManager);
+    }
+    if (SUCCEEDED(hr))
+    {
+        g_uThemeEncodeStage = 8u;
+        hr = g_mf.pfnMFCreateSinkWriterFromURL(szPath, NULL, pAttrs, &pWriter);
+    }
+    if (SUCCEEDED(hr))
+    {
+        g_uThemeEncodeStage = 9u;
+        hr = g_mf.pfnMFCreateMediaType(&pOutputType);
+    }
+    if (SUCCEEDED(hr))
+    {
+        hr = ThemeTestSetVideoTypeCommon(pOutputType,
+                                         &MFVideoFormat_H264,
+                                         (UINT)pCap->cx,
+                                         (UINT)pCap->cy,
+                                         pDxgi->uRefreshNumerator,
+                                         pDxgi->uRefreshDenominator);
+    }
+    if (SUCCEEDED(hr))
+    {
+        hr = IMFMediaType_SetUINT32(pOutputType, &MF_MT_AVG_BITRATE, 12000000u);
+    }
+    if (SUCCEEDED(hr))
+    {
+        g_uThemeEncodeStage = 10u;
+        hr = IMFSinkWriter_AddStream(pWriter, pOutputType, &dwStream);
+    }
+    if (SUCCEEDED(hr))
+    {
+        g_uThemeEncodeStage = 11u;
+        hr = g_mf.pfnMFCreateMediaType(&pInputType);
+    }
+    if (SUCCEEDED(hr))
+    {
+        hr = ThemeTestSetVideoTypeCommon(pInputType,
+                                         &MFVideoFormat_RGB32,
+                                         (UINT)pCap->cx,
+                                         (UINT)pCap->cy,
+                                         pDxgi->uRefreshNumerator,
+                                         pDxgi->uRefreshDenominator);
+    }
+    if (SUCCEEDED(hr))
+    {
+        g_uThemeEncodeStage = 12u;
+        hr = IMFSinkWriter_SetInputMediaType(pWriter, dwStream, pInputType, NULL);
+    }
+    if (SUCCEEDED(hr))
+    {
+        g_uThemeEncodeStage = 13u;
+        hr = IMFSinkWriter_BeginWriting(pWriter);
+    }
+    /* Signal that Media Foundation startup is complete and the consume loop is about to run, so the
+     * capture thread can open its native-cadence record window without overrunning the encoder. */
+    if (pCap->hEncodeStarted)
+    {
+        SetEvent(pCap->hEncodeStarted);
+    }
+    llTime = 0;
+    llDuration = (10000000LL * (LONGLONG)pDxgi->uRefreshDenominator) / (LONGLONG)pDxgi->uRefreshNumerator;
+    if (0 >= llDuration)
+    {
+        hr = E_FAIL;
+    }
+    i = 0u;
+    while (SUCCEEDED(hr) && (i < pCap->cFrames))
+    {
+        cReady = InterlockedCompareExchange(&pCap->cReadyFrames, 0, 0);
+        while (SUCCEEDED(hr) && ((UINT)cReady <= i))
+        {
+            if (InterlockedCompareExchange(&pCap->fCaptureComplete, 0, 0) && ((UINT)cReady <= i))
+            {
+                i = pCap->cFrames;
+                break;
+            }
+            if (WAIT_FAILED == WaitForSingleObject(pCap->hEncodeReady, THEME_DXGI_TIMEOUT_MS))
+            {
+                hr = E_FAIL;
+            }
+            cReady = InterlockedCompareExchange(&pCap->cReadyFrames, 0, 0);
+        }
+        if (i >= pCap->cFrames)
+        {
+            break;
+        }
+        if (FAILED(hr))
+        {
+            break;
+        }
+
+        cReady = InterlockedCompareExchange(&pCap->cReadyFrames, 0, 0);
+        if ((UINT)cReady <= i)
+        {
+            continue;
+        }
+        pSample = NULL;
+        pBuffer = NULL;
+        g_uThemeEncodeStage = 20u;
+        hr = g_mf.pfnMFCreateDXGISurfaceBuffer(&ThemeTestIID_ID3D11Texture2D,
+                                               (IUnknown*)pCap->ppEncodeFrames[i],
+                                               0u,
+                                               FALSE,
+                                               &pBuffer);
+        if (SUCCEEDED(hr))
+        {
+            g_uThemeEncodeStage = 21u;
+            hr = IMFMediaBuffer_SetCurrentLength(pBuffer, (DWORD)pCap->cbFrame);
+        }
+        if (SUCCEEDED(hr))
+        {
+            hr = g_mf.pfnMFCreateSample(&pSample);
+        }
+        if (SUCCEEDED(hr))
+        {
+            hr = IMFSample_AddBuffer(pSample, pBuffer);
+        }
+        if (SUCCEEDED(hr))
+        {
+            hr = IMFSample_SetSampleTime(pSample, llTime);
+        }
+        if (SUCCEEDED(hr))
+        {
+            hr = IMFSample_SetSampleDuration(pSample, llDuration);
+        }
+        if (SUCCEEDED(hr))
+        {
+            g_uThemeEncodeStage = 25u;
+            hr = IMFSinkWriter_WriteSample(pWriter, dwStream, pSample);
+        }
+        if (pSample)
+        {
+            IMFSample_Release(pSample);
+        }
+        if (pBuffer)
+        {
+            IMFMediaBuffer_Release(pBuffer);
+        }
+        llTime += llDuration;
+        ++i;
+        InterlockedExchange(&pCap->cEncodedFrames, (LONG)i);
+    }
+    if (SUCCEEDED(hr))
+    {
+        g_uThemeEncodeStage = 30u;
+        if (i == pCap->cFrames)
+        {
+            hr = IMFSinkWriter_Finalize(pWriter);
+        }
+        else
+        {
+            hr = E_FAIL;
+        }
+    }
+
+    if (pInputType)
+    {
+        IMFMediaType_Release(pInputType);
+    }
+    if (pOutputType)
+    {
+        IMFMediaType_Release(pOutputType);
+    }
+    if (pWriter)
+    {
+        IMFSinkWriter_Release(pWriter);
+    }
+    if (pAttrs)
+    {
+        IMFAttributes_Release(pAttrs);
+    }
+    if (pManager)
+    {
+        IMFDXGIDeviceManager_Release(pManager);
+    }
+    if (g_mf.pfnMFShutdown)
+    {
+        g_mf.pfnMFShutdown();
+    }
+    if (fCoInit)
+    {
+        CoUninitialize();
+    }
+    g_hrThemeEncode = hr;
+    return SUCCEEDED(hr);
+}
+
+static DWORD WINAPI ThemeTestEncodeThread(LPVOID pv)
+{
+    THEME_ENCODE_RUN* pRun;
+    int               nOldPriority;
+
+    pRun = (THEME_ENCODE_RUN*)pv;
+    pRun->dwThreadId = GetCurrentThreadId();
+    nOldPriority = GetThreadPriority(GetCurrentThread());
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    pRun->fOk = ThemeTestEncodeCapturedFrames(pRun->pDxgi, pRun->pCap);
+    SetThreadPriority(GetCurrentThread(), nOldPriority);
+    pRun->hr = g_hrThemeEncode;
+    pRun->uStage = g_uThemeEncodeStage;
+    SetEvent(pRun->hDone);
+    return pRun->fOk ? 0u : 1u;
+}
+
+static BOOL ThemeTestDecodeCapturedVideo(THEME_DXGI* pDxgi, THEME_CAPTURE* pCap)
+{
+    WCHAR            szPath[MAX_PATH];
+    HRESULT          hr;
+    HRESULT          hrCo;
+    BOOL             fCoInit;
+    IMFAttributes*   pAttrs;
+    IMFSourceReader* pReader;
+    IMFMediaType*    pType;
+    IMFSample*       pSample;
+    IMFMediaBuffer*  pBuffer;
+    IMF2DBuffer*     p2d;
+    BYTE*            pbSrc;
+    BYTE*            pbScan0;
+    BYTE*            pbDst;
+    LONG             lPitch;
+    DWORD            dwStreamFlags;
+    DWORD            cbMaxLength;
+    DWORD            cbCurrentLength;
+    UINT             i;
+    UINT             y;
+    SIZE_T           cbTotal;
+
+    if ((0u == pCap->cCaptured) ||
+        !GetModuleFileNameW(NULL, szPath, ARRAYSIZE(szPath)) ||
+        !ThemeTestAppendPathLeafW(szPath, ARRAYSIZE(szPath), L"T6-theme-transition.mp4"))
+    {
+        return FALSE;
+    }
+
+    fCoInit = FALSE;
+    hrCo = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    if (SUCCEEDED(hrCo))
+    {
+        fCoInit = TRUE;
+    }
+    else if (RPC_E_CHANGED_MODE != hrCo)
+    {
+        return FALSE;
+    }
+
+    pAttrs = NULL;
+    pReader = NULL;
+    pType = NULL;
+    if (!ThemeTestMfResolve())
+    {
+        hr = E_FAIL;
+    }
+    else
+    {
+        hr = g_mf.pfnMFStartup(MF_VERSION, MFSTARTUP_NOSOCKET);
+    }
+    if (SUCCEEDED(hr))
+    {
+        hr = g_mf.pfnMFCreateAttributes(&pAttrs, 3u);
+    }
+    if (SUCCEEDED(hr))
+    {
+        hr = IMFAttributes_SetUINT32(pAttrs, &MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
+    }
+    if (SUCCEEDED(hr))
+    {
+        hr = IMFAttributes_SetUINT32(pAttrs, &MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE);
+    }
+    if (SUCCEEDED(hr))
+    {
+        hr = g_mf.pfnMFCreateSourceReaderFromURL(szPath, pAttrs, &pReader);
+    }
+    if (SUCCEEDED(hr))
+    {
+        hr = g_mf.pfnMFCreateMediaType(&pType);
+    }
+    if (SUCCEEDED(hr))
+    {
+        hr = IMFMediaType_SetGUID(pType, &MF_MT_MAJOR_TYPE, &MFMediaType_Video);
+    }
+    if (SUCCEEDED(hr))
+    {
+        hr = IMFMediaType_SetGUID(pType, &MF_MT_SUBTYPE, &MFVideoFormat_RGB32);
+    }
+    if (SUCCEEDED(hr))
+    {
+        hr = IMFSourceReader_SetCurrentMediaType(pReader, MF_SOURCE_READER_FIRST_VIDEO_STREAM, NULL, pType);
+    }
+    cbTotal = (SIZE_T)pCap->cbFrame * pCap->cCaptured;
+    if (SUCCEEDED(hr))
+    {
+        pCap->pbFrames = (BYTE*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, cbTotal);
+        if (!pCap->pbFrames)
+        {
+            hr = E_OUTOFMEMORY;
+        }
+    }
+
+    i = 0u;
+    while (SUCCEEDED(hr) && (i < pCap->cCaptured))
+    {
+        pSample = NULL;
+        dwStreamFlags = 0u;
+        hr = IMFSourceReader_ReadSample(pReader,
+                                        MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+                                        0u,
+                                        NULL,
+                                        &dwStreamFlags,
+                                        NULL,
+                                        &pSample);
+        if (FAILED(hr) || (dwStreamFlags & MF_SOURCE_READERF_ENDOFSTREAM))
+        {
+            break;
+        }
+        if (!pSample)
+        {
+            continue;
+        }
+        pBuffer = NULL;
+        p2d = NULL;
+        pbSrc = NULL;
+        pbScan0 = NULL;
+        cbMaxLength = 0u;
+        cbCurrentLength = 0u;
+        hr = IMFSample_ConvertToContiguousBuffer(pSample, &pBuffer);
+        if (SUCCEEDED(hr) &&
+            SUCCEEDED(IMFMediaBuffer_QueryInterface(pBuffer, &ThemeTestIID_IMF2DBuffer, (void**)&p2d)))
+        {
+            hr = IMF2DBuffer_Lock2D(p2d, &pbScan0, &lPitch);
+        }
+        else if (SUCCEEDED(hr))
+        {
+            hr = IMFMediaBuffer_Lock(pBuffer, &pbSrc, &cbMaxLength, &cbCurrentLength);
+        }
+        if (SUCCEEDED(hr))
+        {
+            if (pbScan0)
+            {
+                pbDst = pCap->pbFrames + (i * pCap->cbFrame);
+                for (y = 0u; y < (UINT)pCap->cy; ++y)
+                {
+                    ThemeTestCopyBytes(pbDst + (y * pCap->cx * 4u),
+                                       pbScan0 + ((LONG)y * lPitch),
+                                       (SIZE_T)(pCap->cx * 4u));
+                }
+                ++i;
+            }
+            else
+            {
+                if (cbCurrentLength < (DWORD)pCap->cbFrame)
+                {
+                    hr = E_FAIL;
+                }
+                else
+                {
+                    pbDst = pCap->pbFrames + (i * pCap->cbFrame);
+                    for (y = 0u; y < (UINT)pCap->cy; ++y)
+                    {
+                        ThemeTestCopyBytes(pbDst + (y * pCap->cx * 4u),
+                                           pbSrc + (y * pCap->cx * 4u),
+                                           (SIZE_T)(pCap->cx * 4u));
+                    }
+                    ++i;
+                }
+            }
+        }
+        if (pbScan0)
+        {
+            IMF2DBuffer_Unlock2D(p2d);
+        }
+        if (pbSrc)
+        {
+            IMFMediaBuffer_Unlock(pBuffer);
+        }
+        if (p2d)
+        {
+            IMF2DBuffer_Release(p2d);
+        }
+        if (pBuffer)
+        {
+            IMFMediaBuffer_Release(pBuffer);
+        }
+        IMFSample_Release(pSample);
+    }
+    if (0u == i)
+    {
+        hr = E_FAIL;
+    }
+    pCap->cCaptured = i;
+
+    if (pType)
+    {
+        IMFMediaType_Release(pType);
+    }
+    if (pReader)
+    {
+        IMFSourceReader_Release(pReader);
+    }
+    if (pAttrs)
+    {
+        IMFAttributes_Release(pAttrs);
+    }
+    if (g_mf.pfnMFShutdown)
+    {
+        g_mf.pfnMFShutdown();
+    }
+    if (fCoInit)
+    {
+        CoUninitialize();
+    }
+    g_hrThemeDecode = hr;
+    return SUCCEEDED(hr);
+}
+
+static BOOL ThemeTestDrainCompositedFrames(THEME_DXGI* pDxgi)
+{
+    DXGI_OUTDUPL_FRAME_INFO info;
+    IDXGIResource*          pResource;
+    HRESULT                 hr;
+    LARGE_INTEGER           liFreq;
+    LARGE_INTEGER           liStart;
+    LARGE_INTEGER           liNow;
+
+    if (!QueryPerformanceFrequency(&liFreq))
+    {
+        return FALSE;
+    }
+    QueryPerformanceCounter(&liStart);
+
+    while (TRUE)
+    {
+        QueryPerformanceCounter(&liNow);
+        if (((liNow.QuadPart - liStart.QuadPart) * 1000) >= (liFreq.QuadPart * THEME_DRAIN_MS))
+        {
+            return TRUE;
+        }
+        ThemeTestPumpMessages();
+        SecureZeroMemory(&info, sizeof(info));
+        pResource = NULL;
+        hr = IDXGIOutputDuplication_AcquireNextFrame(pDxgi->pDup, 1u, &info, &pResource);
+        if (DXGI_ERROR_WAIT_TIMEOUT == hr)
+        {
+            return TRUE;
+        }
+        if (FAILED(hr))
+        {
+            return FALSE;
+        }
+        if (pResource)
+        {
+            IDXGIResource_Release(pResource);
+        }
+        IDXGIOutputDuplication_ReleaseFrame(pDxgi->pDup);
+    }
+}
+
+static void T_ThemeTransition(void)
+{
+    DWORD             dwOriginalValue;
+    DWORD             dwTargetValue;
+    BOOL              fHadOriginalValue;
+    BOOL              fCanUseDarkMode;
+    BOOL              fInitialDark;
+    BOOL              fTargetDark;
+    BOOL              fReadRegistry;
+    BOOL              fStartedWorker;
+    BOOL              fCommonControls;
+    BOOL              fMadeTopClass;
+    BOOL              fMadeDialogClass;
+    BOOL              fPublished;
+    BOOL              fDiagnosticsPublished;
+    BOOL              fClassBrushPublished;
+    BOOL              fCapturedFrames;
+    BOOL              fEncodedFrames;
+    BOOL              fCaptureOffGuiThread;
+    BOOL              fEncodeOffGuiThread;
+    BOOL              fNoDroppedFrames;
+    BOOL              fSawTargetFrame;
+    BOOL              fSawIntermediateFrame;
+    BOOL              fSawMenuIntermediateFrame;
+    BOOL              fNoMixedFrames;
+    BOOL              fAnalyzedFrames;
+    BOOL              fDeferredStable;
+    BOOL              fDiagnosticsDeferred;
+    BOOL              fRestored;
+    HWND              hwndTop;
+    HWND              hwndDialog;
+    HWND              hwndStatic;
+    HWND              hwndButton;
+    HMENU             hMenu;
+    HANDLE            hThread;
+    HANDLE            hCaptureThread;
+    HANDLE            hCaptureDone;
+    HANDLE            hEncodeThread;
+    HANDLE            hEncodeDone;
+    HANDLE            hMutex;
+    DWORD             dwWait;
+    DWORD             dwGuiThreadId;
+    UINT              cCapturedFrames;
+    UINT              cExpectedFrames;
+    RECT              rcCapture;
+    RECT              rcTopCreated;
+    THEME_CAPTURE     capture;
+    THEME_CAPTURE_RUN captureRun;
+    THEME_ENCODE_RUN  encodeRun;
+    THEME_DXGI        dxgi;
+    THEME_DIAGNOSTICS diag;
+
+    hMutex = CreateMutex(NULL, FALSE, TEXT("Local\\Win32XThemeTransitionTest"));
+    if (!hMutex)
+    {
+        Skip(TEXT("T6 system theme transition contract"), TEXT("theme transition mutex cannot be created"));
+        return;
+    }
+    dwWait = WaitForSingleObject(hMutex, 0u);
+    if ((WAIT_OBJECT_0 != dwWait) && (WAIT_ABANDONED != dwWait))
+    {
+        CloseHandle(hMutex);
+        Check(FALSE, TEXT("T6 system theme transition contract is not run concurrently"));
+        return;
+    }
+
+    pfnTestThemeStartup();
+    dwGuiThreadId = GetCurrentThreadId();
+    fCanUseDarkMode = pfnTestThemeCanUseDarkMode();
+    if (!fCanUseDarkMode)
+    {
+        ReleaseMutex(hMutex);
+        CloseHandle(hMutex);
+        Skip(TEXT("T6 system theme transition contract"), TEXT("dark-mode uxtheme/DWM contract unavailable"));
+        return;
+    }
+
+    fReadRegistry = ThemeTestReadAppsUseLightTheme(&dwOriginalValue, &fHadOriginalValue);
+    if (!fReadRegistry)
+    {
+        ReleaseMutex(hMutex);
+        CloseHandle(hMutex);
+        Skip(TEXT("T6 system theme transition contract"), TEXT("AppsUseLightTheme cannot be read"));
+        return;
+    }
+
+    fInitialDark  = pfnTestThemeEffectiveDarkMode();
+    fTargetDark   = !fInitialDark;
+    OutF(TEXT("[INFO] T6 initial dark: %u\n"), fInitialDark);
+    OutF(TEXT("[INFO] T6 target dark: %u\n"), fTargetDark);
+    dwTargetValue = 1u;
+    if (fTargetDark)
+    {
+        dwTargetValue = 0u;
+    }
+    fCommonControls = ThemeTestInitCommonControls();
+    if (!fCommonControls)
+    {
+        ReleaseMutex(hMutex);
+        CloseHandle(hMutex);
+        Skip(TEXT("T6 system theme transition contract"), TEXT("common controls v6 unavailable"));
+        return;
+    }
+
+    fMadeTopClass = ThemeTestRegisterClass(TEXT("ThemeTestTop"));
+    fMadeDialogClass = ThemeTestRegisterClass(TEXT("ThemeTestDialog"));
+    hwndTop = NULL;
+    hwndDialog = NULL;
+    hwndStatic = NULL;
+    hwndButton = NULL;
+    hMenu = NULL;
+    hCaptureThread = NULL;
+    hCaptureDone = NULL;
+    hEncodeThread = NULL;
+    hEncodeDone = NULL;
+    if (fMadeTopClass && fMadeDialogClass)
+    {
+        hwndTop = CreateWindowEx(0,
+                                 TEXT("ThemeTestTop"),
+                                 TEXT("theme"),
+                                 WS_OVERLAPPEDWINDOW,
+                                 80,
+                                 80,
+                                 420,
+                                 260,
+                                 NULL,
+                                 NULL,
+                                 GetModuleHandle(NULL),
+                                 NULL);
+        hMenu = CreateMenu();
+        if (hMenu)
+        {
+            AppendMenu(hMenu, MF_STRING, 1u, TEXT("&File"));
+            SetMenu(hwndTop, hMenu);
+        }
+        SecureZeroMemory(&rcTopCreated, sizeof(rcTopCreated));
+        GetWindowRect(hwndTop, &rcTopCreated);
+        hwndDialog = CreateWindowEx(WS_EX_CONTROLPARENT,
+                                    TEXT("ThemeTestDialog"),
+                                    TEXT("theme dialog"),
+                                    WS_POPUP | WS_CAPTION | WS_SYSMENU,
+                                    rcTopCreated.left + 100,
+                                    rcTopCreated.top + 95,
+                                    260,
+                                    150,
+                                    hwndTop,
+                                    NULL,
+                                    GetModuleHandle(NULL),
+                                    NULL);
+    }
+    if (hwndDialog)
+    {
+        hwndStatic = CreateWindowEx(0,
+                                    TEXT("STATIC"),
+                                    TEXT(""),
+                                    WS_CHILD | WS_VISIBLE,
+                                    20,
+                                    20,
+                                    80,
+                                    20,
+                                    hwndDialog,
+                                    NULL,
+                                    GetModuleHandle(NULL),
+                                    NULL);
+        hwndButton = CreateWindowEx(0,
+                                    TEXT("BUTTON"),
+                                    TEXT("OK"),
+                                    WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                    20,
+                                    48,
+                                    80,
+                                    24,
+                                    hwndDialog,
+                                    NULL,
+                                    GetModuleHandle(NULL),
+                                    NULL);
+    }
+
+    if (!hwndTop || !hwndDialog || !hwndStatic || !hwndButton)
+    {
+        Check(FALSE, TEXT("T6 creates native windows for theme transition"));
+        fRestored = ThemeTestRestoreAppsUseLightTheme(fHadOriginalValue, dwOriginalValue);
+        Check(fRestored, TEXT("T6 restores AppsUseLightTheme after create failure"));
+        if (hwndButton)
+        {
+            DestroyWindow(hwndButton);
+        }
+        if (hwndStatic)
+        {
+            DestroyWindow(hwndStatic);
+        }
+        if (hwndDialog)
+        {
+            DestroyWindow(hwndDialog);
+        }
+        if (hwndTop)
+        {
+            DestroyWindow(hwndTop);
+        }
+        ReleaseMutex(hMutex);
+        CloseHandle(hMutex);
+        return;
+    }
+
+    pfnTestThemeApplyTopLevel(hwndTop, fInitialDark);
+    pfnTestThemeApplyDialogTree(hwndDialog, fInitialDark);
+    g_fThemeExpectedDark = fInitialDark;
+    ShowWindow(hwndTop, SW_SHOWNORMAL);
+    ShowWindow(hwndDialog, SW_SHOWNORMAL);
+    UpdateWindow(hwndTop);
+    UpdateWindow(hwndDialog);
+    ThemeTestPumpMessages();
+    {
+        HDC hdcProbe;
+        COLORREF crProbe;
+
+        hdcProbe = GetDC(hwndTop);
+        crProbe = CLR_INVALID;
+        if (hdcProbe)
+        {
+            crProbe = GetPixel(hdcProbe, 24, 96);
+            ReleaseDC(hwndTop, hdcProbe);
+        }
+        OutF(TEXT("[INFO] T6 initial client red: %u\n"), GetRValue(crProbe));
+        OutF(TEXT("[INFO] T6 initial client green: %u\n"), GetGValue(crProbe));
+        OutF(TEXT("[INFO] T6 initial client blue: %u\n"), GetBValue(crProbe));
+    }
+
+    g_fThemeExpectedDark  = fTargetDark;
+    g_fThemeSawErase      = FALSE;
+    g_fThemeSawCtlStatic  = FALSE;
+    g_fThemeSawNcPaint    = FALSE;
+    g_fThemePaintMismatch = FALSE;
+    g_dwThemeWorkerValue = dwTargetValue;
+    g_fThemeWorkerWrote = FALSE;
+    g_fThemeWorkerBroadcast = FALSE;
+    g_hwndThemeTop = hwndTop;
+    g_hwndThemeDialog = hwndDialog;
+    g_hThemeStartEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+    hThread = NULL;
+    if (g_hThemeStartEvent)
+    {
+        hThread = CreateThread(NULL, 0, ThemeTestTransitionThread, NULL, 0, NULL);
+    }
+    fStartedWorker = IsNonNull(hThread);
+
+    SecureZeroMemory(&capture, sizeof(capture));
+    SecureZeroMemory(&dxgi, sizeof(dxgi));
+    fCapturedFrames = FALSE;
+    fEncodedFrames = FALSE;
+    fCaptureOffGuiThread = FALSE;
+    fEncodeOffGuiThread = FALSE;
+    fNoDroppedFrames = FALSE;
+    cExpectedFrames = 0u;
+    fSawTargetFrame = FALSE;
+    fSawIntermediateFrame = FALSE;
+    fSawMenuIntermediateFrame = FALSE;
+    fNoMixedFrames = FALSE;
+    fAnalyzedFrames = FALSE;
+    if (fStartedWorker &&
+        ThemeTestCaptureRect(hwndTop, hwndDialog, &rcCapture) &&
+        ThemeTestDxgiInit(&dxgi, hwndTop) &&
+        ThemeTestCaptureInit(&capture, &rcCapture, ThemeTestNativeRecordFrameCount(&dxgi)) &&
+        ThemeTestAllocateFrameQueue(&dxgi, &capture))
+    {
+        capture.hEncodeReady = CreateEvent(NULL, FALSE, FALSE, NULL);
+        capture.hEncodeStarted = CreateEvent(NULL, TRUE, FALSE, NULL);
+        hEncodeDone = CreateEvent(NULL, TRUE, FALSE, NULL);
+        if (capture.hEncodeReady && capture.hEncodeStarted && hEncodeDone)
+        {
+            SecureZeroMemory(&encodeRun, sizeof(encodeRun));
+            encodeRun.pDxgi = &dxgi;
+            encodeRun.pCap = &capture;
+            encodeRun.hDone = hEncodeDone;
+            hEncodeThread = CreateThread(NULL, 0, ThemeTestEncodeThread, &encodeRun, 0, NULL);
+        }
+        if (TRUE)
+        {
+            hCaptureDone = CreateEvent(NULL, TRUE, FALSE, NULL);
+            if (hCaptureDone && hEncodeThread)
+            {
+                SecureZeroMemory(&captureRun, sizeof(captureRun));
+                captureRun.pDxgi = &dxgi;
+                captureRun.pCap = &capture;
+                captureRun.hDone = hCaptureDone;
+                hCaptureThread = CreateThread(NULL, 0, ThemeTestCaptureThread, &captureRun, 0, NULL);
+                if (hCaptureThread)
+                {
+                    if (ThemeTestPumpUntilDone(hCaptureDone, THEME_RECORD_MS + WAIT_MS))
+                    {
+                        fCapturedFrames = captureRun.fOk;
+                    }
+                    WaitForSingleObject(hCaptureThread, WAIT_MS);
+                    fCaptureOffGuiThread = (0u != captureRun.dwThreadId) && (captureRun.dwThreadId != dwGuiThreadId);
+                    CloseHandle(hCaptureThread);
+                    hCaptureThread = NULL;
+                }
+                CloseHandle(hCaptureDone);
+                hCaptureDone = NULL;
+            }
+        }
+        InterlockedExchange(&capture.fCaptureComplete, 1);
+        if (capture.hEncodeReady)
+        {
+            SetEvent(capture.hEncodeReady);
+        }
+        if (hEncodeThread)
+        {
+            if (ThemeTestPumpUntilDone(hEncodeDone, THEME_RECORD_MS + WAIT_MS))
+            {
+                fEncodedFrames = encodeRun.fOk;
+            }
+            WaitForSingleObject(hEncodeThread, WAIT_MS);
+            fEncodeOffGuiThread = (0u != encodeRun.dwThreadId) && (encodeRun.dwThreadId != dwGuiThreadId);
+            CloseHandle(hEncodeThread);
+            hEncodeThread = NULL;
+        }
+        if (hEncodeDone)
+        {
+            CloseHandle(hEncodeDone);
+            hEncodeDone = NULL;
+        }
+        if (capture.hEncodeReady)
+        {
+            CloseHandle(capture.hEncodeReady);
+            capture.hEncodeReady = NULL;
+        }
+        if (capture.hEncodeStarted)
+        {
+            CloseHandle(capture.hEncodeStarted);
+            capture.hEncodeStarted = NULL;
+        }
+        cExpectedFrames = ThemeTestExpectedNativeFrames(&dxgi);
+        if (fEncodedFrames)
+        {
+            capture.cCaptured = capture.cFrames;
+        }
+        fNoDroppedFrames = fCapturedFrames &&
+                           fEncodedFrames &&
+                           (!capture.fEncodeOverflow) &&
+                           (capture.cCaptured >= cExpectedFrames) &&
+                           (0u < cExpectedFrames);
+        fAnalyzedFrames = fCapturedFrames &&
+                          fEncodedFrames &&
+                          ThemeTestDecodeCapturedVideo(&dxgi, &capture) &&
+                          ThemeTestAnalyzeCapturedFrames(&capture,
+                                                         hwndTop,
+                                                         hwndDialog,
+                                                         hwndStatic,
+                                                         hwndButton,
+                                                         fTargetDark,
+                                                         &fSawTargetFrame,
+                                                         &fNoMixedFrames,
+                                                         &fSawIntermediateFrame);
+        fNoMixedFrames = fAnalyzedFrames &&
+                         fSawIntermediateFrame &&
+                         fSawTargetFrame &&
+                         (0u < capture.iFirstIntermediateFrame) &&
+                         (0u < capture.iFirstTargetFrame) &&
+                         (capture.iFirstIntermediateFrame < capture.iFirstTargetFrame);
+        fSawMenuIntermediateFrame = fAnalyzedFrames && (0u != (capture.uIntermediateMask & (1u << 1)));
+    }
+    if (g_hThemeStartEvent && !fCapturedFrames)
+    {
+        SetEvent(g_hThemeStartEvent);
+    }
+    if (hThread)
+    {
+        WaitForSingleObject(hThread, WAIT_MS);
+        CloseHandle(hThread);
+    }
+    if (g_hThemeStartEvent)
+    {
+        CloseHandle(g_hThemeStartEvent);
+        g_hThemeStartEvent = NULL;
+    }
+    cCapturedFrames = capture.cCaptured;
+    if (0u == cExpectedFrames)
+    {
+        cExpectedFrames = cCapturedFrames;
+    }
+    fPublished = g_fThemeWorkerWrote && g_fThemeWorkerBroadcast && (fTargetDark == pfnTestThemeIsDarkMode());
+    pfnTestThemeDiagnostics(&diag);
+    fDiagnosticsPublished = (fTargetDark == diag.fRequestedDark) &&
+                            (fTargetDark == diag.fEffectiveDark);
+    fClassBrushPublished = ((HBRUSH)GetClassLongPtr(hwndTop, GCLP_HBRBACKGROUND) ==
+                            pfnTestThemeBackgroundBrush(fTargetDark));
+
+    fDeferredStable = (fTargetDark == pfnTestThemeOnDeferredThemeChange()) &&
+                      (fTargetDark == pfnTestThemeIsDarkMode());
+    pfnTestThemeDiagnostics(&diag);
+    fDiagnosticsDeferred = (fTargetDark == diag.fRequestedDark) &&
+                           (fTargetDark == diag.fEffectiveDark) &&
+                           (!diag.fPendingThemeChange);
+    ThemeTestClearDeferredMessage(hwndTop);
+
+    fRestored = ThemeTestRestoreAppsUseLightTheme(fHadOriginalValue, dwOriginalValue);
+    if (fRestored)
+    {
+        (void)pfnTestThemeOnSettingChange(hwndTop, THEME_TEST_DEFERRED_MSG, TEXT("ImmersiveColorSet"));
+        (void)pfnTestThemeOnDeferredThemeChange();
+        ThemeTestClearDeferredMessage(hwndTop);
+        ThemeTestPumpForMs(THEME_RECORD_MS);
+    }
+
+    pfnTestThemeUnregisterDialog(hwndDialog);
+    pfnTestThemeUnregisterWindow(hwndTop);
+    DestroyWindow(hwndButton);
+    DestroyWindow(hwndStatic);
+    DestroyWindow(hwndDialog);
+    DestroyWindow(hwndTop);
+
+    Check(fPublished, TEXT("T6 WM_SETTINGCHANGE publishes target ThemeIsDarkMode before deferred"));
+    Check(fDiagnosticsPublished, TEXT("T6 diagnostics show target state after broadcast"));
+    Check(fClassBrushPublished, TEXT("T6 top-level class brush switches before deferred paint"));
+    Check(fCaptureOffGuiThread, TEXT("T6 captures off the GUI thread"));
+    Check(fEncodeOffGuiThread, TEXT("T6 encodes off the GUI thread"));
+    Check(fCapturedFrames, TEXT("T6 records DXGI desktop-composited frames"));
+    Check(fEncodedFrames, TEXT("T6 encodes queued DXGI textures during capture"));
+    Check(fNoDroppedFrames, TEXT("T6 records at native monitor refresh without frame-count drops"));
+    Check(fSawIntermediateFrame, TEXT("T6 captured frames include animated intermediate colors"));
+    Check(fSawMenuIntermediateFrame, TEXT("T6 captured menubar animates in sync with client background"));
+    Check(fSawTargetFrame, TEXT("T6 captured frames reach target theme"));
+    Check(fNoMixedFrames, TEXT("T6 decoded frames settle without mixed light/dark presentation"));
+    if (!fSawTargetFrame || !fNoMixedFrames || !fSawMenuIntermediateFrame || !fNoDroppedFrames)
+    {
+        OutF(TEXT("[INFO] T6 captured frames: %u\n"), capture.cCaptured);
+        OutF(TEXT("[INFO] T6 encode overflow: %u\n"), (UINT)capture.fEncodeOverflow);
+        OutF(TEXT("[INFO] T6 expected frames: %u\n"), cExpectedFrames);
+        OutF(TEXT("[INFO] T6 capture stage: %u\n"), g_uThemeCaptureStage);
+        OutF(TEXT("[INFO] T6 capture hr: 0x%08X\n"), (int)g_hrThemeCapture);
+        OutF(TEXT("[INFO] T6 encode stage: %u\n"), encodeRun.uStage);
+        OutF(TEXT("[INFO] T6 encode hr: 0x%08X\n"), (int)encodeRun.hr);
+        OutF(TEXT("[INFO] T6 decode hr: 0x%08X\n"), (int)g_hrThemeDecode);
+        OutF(TEXT("[INFO] T6 dropped frame: %u\n"), capture.iDroppedFrame);
+        OutF(TEXT("[INFO] T6 accumulated max: %u\n"), capture.cMaxAccumulated);
+        OutF(TEXT("[INFO] T6 first mixed frame: %u\n"), capture.iFirstMixedFrame);
+        OutF(TEXT("[INFO] T6 last mixed frame: %u\n"), capture.iLastMixedFrame);
+        OutF(TEXT("[INFO] T6 first intermediate frame: %u\n"), capture.iFirstIntermediateFrame);
+        OutF(TEXT("[INFO] T6 first target frame: %u\n"), capture.iFirstTargetFrame);
+        OutF(TEXT("[INFO] T6 mixed mask: 0x%08X\n"), capture.uMixedMask);
+        OutF(TEXT("[INFO] T6 intermediate mask: 0x%08X\n"), capture.uIntermediateMask);
+    }
+    Check(fDeferredStable, TEXT("T6 deferred reconciliation preserves target state"));
+    Check(fDiagnosticsDeferred, TEXT("T6 deferred reconciliation clears pending state"));
+    Check(fRestored, TEXT("T6 restores AppsUseLightTheme"));
+    ThemeTestDxgiFree(&dxgi);
+    ThemeTestCaptureFree(&capture);
+    ReleaseMutex(hMutex);
+    CloseHandle(hMutex);
 }

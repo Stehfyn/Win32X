@@ -26,6 +26,20 @@ static BOOL             InitInstance(HINSTANCE hInstance);
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 static INT_PTR CALLBACK About(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
+static BOOL (WINAPI* volatile pfnAppThemeIsDarkMode)(void) = ThemeIsDarkMode;
+static void (WINAPI* volatile pfnAppThemeApplyDialogTree)(HWND hwnd, BOOL fDark) = ThemeApplyDialogTree;
+static void (WINAPI* volatile pfnAppThemeUnregisterWindow)(HWND hwnd) = ThemeUnregisterWindow;
+static void (WINAPI* volatile pfnAppThemeUnregisterDialog)(HWND hwnd) = ThemeUnregisterDialog;
+static BOOL (WINAPI* volatile pfnAppThemeHandleWindowMessage)(
+    HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT uDeferredMsg, LRESULT* plr) = ThemeHandleWindowMessage;
+static void (WINAPI* volatile pfnAppMenuBarPalette)(BOOL fDark, MENUBAR_PALETTE* pPalette) = MenuBarPalette;
+static void (WINAPI* volatile pfnAppMenuBarOnDrawMenu)(
+    HWND hwnd, const UAHMENU* pUDM, const MENUBAR_PALETTE* pPalette) = MenuBarOnDrawMenu;
+static void (WINAPI* volatile pfnAppMenuBarOnDrawMenuItem)(
+    HWND hwnd, const UAHDRAWMENUITEM* pUDMI, const MENUBAR_PALETTE* pPalette) = MenuBarOnDrawMenuItem;
+static void (WINAPI* volatile pfnAppMenuBarPaintSeam)(
+    HWND hwnd, const MENUBAR_PALETTE* pPalette) = MenuBarPaintSeam;
+
 DECLSPEC_NOINLINE int WINAPI _tWinMainEx(_In_ HINSTANCE          hInstance,
                                          _In_opt_ HINSTANCE      hPrevInstance,
                                          _In_ LPTSTR             lpCmdLine,
@@ -128,8 +142,8 @@ static FORCEINLINE void OnUahDrawMenu(HWND hwnd, const UAHMENU* pUDM)
 {
     MENUBAR_PALETTE pal;
 
-    MenuBarPalette(TRUE, &pal);
-    MenuBarOnDrawMenu(hwnd, pUDM, &pal);
+    pfnAppMenuBarPalette(pfnAppThemeIsDarkMode(), &pal);
+    pfnAppMenuBarOnDrawMenu(hwnd, pUDM, &pal);
 }
 
 /* WM_UAHDRAWMENUITEM: paint one bar item dark, by state. */
@@ -137,8 +151,8 @@ static FORCEINLINE void OnUahDrawMenuItem(HWND hwnd, const UAHDRAWMENUITEM* pUDM
 {
     MENUBAR_PALETTE pal;
 
-    MenuBarPalette(TRUE, &pal);
-    MenuBarOnDrawMenuItem(hwnd, pUDMI, &pal);
+    pfnAppMenuBarPalette(pfnAppThemeIsDarkMode(), &pal);
+    pfnAppMenuBarOnDrawMenuItem(hwnd, pUDMI, &pal);
 }
 
 /* WM_COMMAND: the application menu. */
@@ -160,56 +174,20 @@ static FORCEINLINE void OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT codeNoti
     FORWARD_WM_COMMAND(hwnd, id, hwndCtl, codeNotify, DefWindowProc);
 }
 
-/* WM_PAINT. The class brush already erased the client in the theme color. */
-static FORCEINLINE void OnPaint(HWND hwnd)
-{
-    PAINTSTRUCT ps;
-    HDC         hdc;
-
-    hdc = BeginPaint(hwnd, &ps);
-    UNREFERENCED_PARAMETER(hdc); /* TODO: drawing code that uses hdc goes here. */
-    EndPaint(hwnd, &ps);
-}
-
-/* WM_SETTINGCHANGE: the shell broadcasts "ImmersiveColorSet" when the light/dark setting flips. Do
-   NOT retheme here: this message arrives as the system's blocking broadcast SendMessage while the
-   theme and DWM services are mid-transition, and calling back into them (DwmSetWindowAttribute,
-   FlushMenuThemes, SetWindowPos(SWP_FRAMECHANGED)) from inside it deadlocks -> the app hangs. Post a
-   private message and do the work on the next message-loop turn, after the broadcast has returned. */
-static FORCEINLINE void OnSettingChange(HWND hwnd, UINT flags, LPCTSTR pszSection)
-{
-    UNREFERENCED_PARAMETER(flags);
-
-    if (pszSection && (0 == lstrcmpi(pszSection, TEXT("ImmersiveColorSet"))))
-    {
-        (void)ThemeOnSettingChange(hwnd, WMAPP_THEMECHANGED, pszSection);
-    }
-}
-
 /* Apply the dark/light dress to a dialog: frame title bar (DWM), the child-control visual style (so
    the OK button -- which paints its own face -- transitions), and a full repaint. Shared by the
    About box's WM_INITDIALOG and the live theme switch, so a dialog already on screen at the moment
    the system theme flips transitions too. */
 static FORCEINLINE void ThemeDialog(HWND hDlg, BOOL fDark)
 {
-    ThemeApplyDialogTree(hDlg, fDark);
-}
-
-/* WMAPP_THEMECHANGED (deferred): re-read the system theme and, on a change, re-dress the window --
-   swap the class brush, re-theme the frame and menus, force a full client + non-client repaint --
-   and re-dress any About dialog open at the moment of the switch. Runs outside the broadcast
-   SendMessage, so the theme/DWM calls below are safe. */
-static FORCEINLINE void OnThemeChanged(HWND hwnd)
-{
-    UNREFERENCED_PARAMETER(hwnd);
-    g_fDark = ThemeOnDeferredThemeChange();
+    pfnAppThemeApplyDialogTree(hDlg, fDark);
 }
 
 /* WM_DESTROY: end whichever pump is running -- WinBaseXRun's on a direct launch, RunComServer's
    under a DelegateExecute embedding. A transient COM launch dies with its window; that is correct. */
 static FORCEINLINE void OnDestroy(HWND hwnd)
 {
-    ThemeUnregisterWindow(hwnd);
+    pfnAppThemeUnregisterWindow(hwnd);
     PostQuitMessage(0);
 }
 
@@ -220,20 +198,25 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 
     switch (uMsg)
     {
+        case WM_SETTINGCHANGE:
+        case WM_ERASEBKGND:
+        case WM_PAINT:
+        case WM_CTLCOLORDLG:
+        case WM_CTLCOLORSTATIC:
+        case WMAPP_THEMECHANGED:
+            if (pfnAppThemeHandleWindowMessage(hwnd, uMsg, wParam, lParam, WMAPP_THEMECHANGED, &lr))
+            {
+                g_fDark = pfnAppThemeIsDarkMode();
+                return lr;
+            }
+            break;
+
         /* Owner-draw the menu bar dark -- but only in dark mode; otherwise fall through so
            DefWindowProc paints the stock light bar. */
         case WM_UAHDRAWMENU:
-            if (!ThemeIsDarkMode())
-            {
-                break;
-            }
             return HANDLE_WM_UAHDRAWMENU(hwnd, wParam, lParam, OnUahDrawMenu);
 
         case WM_UAHDRAWMENUITEM:
-            if (!ThemeIsDarkMode())
-            {
-                break;
-            }
             return HANDLE_WM_UAHDRAWMENUITEM(hwnd, wParam, lParam, OnUahDrawMenuItem);
 
         /* DefWindowProc paints the 1px menu-bar/client seam light; repaint it dark afterward. Split
@@ -241,29 +224,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
            feeds the DefWindowProc call (CONV-4.12 C5045-safe). */
         case WM_NCACTIVATE:
             lr = DefWindowProc(hwnd, WM_NCACTIVATE, wParam, lParam);
-            if (ThemeIsDarkMode())
-            {
-                MenuBarPalette(TRUE, &pal);
-                MenuBarPaintSeam(hwnd, &pal);
-            }
+            pfnAppMenuBarPalette(pfnAppThemeIsDarkMode(), &pal);
+            pfnAppMenuBarPaintSeam(hwnd, &pal);
             return lr;
 
         case WM_NCPAINT:
             lr = DefWindowProc(hwnd, WM_NCPAINT, wParam, lParam);
-            if (ThemeIsDarkMode())
-            {
-                MenuBarPalette(TRUE, &pal);
-                MenuBarPaintSeam(hwnd, &pal);
-            }
+            pfnAppMenuBarPalette(pfnAppThemeIsDarkMode(), &pal);
+            pfnAppMenuBarPaintSeam(hwnd, &pal);
             return lr;
 
-        case WMAPP_THEMECHANGED:
-            OnThemeChanged(hwnd);
-            return 0;
-
-        HANDLE_MSG(hwnd, WM_SETTINGCHANGE, OnSettingChange);
         HANDLE_MSG(hwnd, WM_COMMAND, OnCommand);
-        HANDLE_MSG(hwnd, WM_PAINT, OnPaint);
         HANDLE_MSG(hwnd, WM_DESTROY, OnDestroy);
     }
     return DefWindowProc(hwnd, uMsg, wParam, lParam);
@@ -273,53 +244,67 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 static INT_PTR CALLBACK About(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
     HWND hwndOwner;
+    LRESULT lr;
 
     switch (uMsg)
     {
         case WM_INITDIALOG:
-            ThemeDialog(hDlg, g_fDark);
+            ThemeDialog(hDlg, pfnAppThemeIsDarkMode());
             return (INT_PTR)TRUE;
 
         /* The owner coalesces the broadcast and rethemes registered windows on the next message-loop
            turn, after the shell broadcast has returned. */
         case WM_SETTINGCHANGE:
-            if (lParam && (0 == lstrcmpi((LPCTSTR)lParam, TEXT("ImmersiveColorSet"))))
+            hwndOwner = GetWindow(hDlg, GW_OWNER);
+            if (!hwndOwner)
             {
-                hwndOwner = GetWindow(hDlg, GW_OWNER);
-                if (hwndOwner)
-                {
-                    (void)ThemeOnSettingChange(hwndOwner, WMAPP_THEMECHANGED, (LPCTSTR)lParam);
-                }
-                else
-                {
-                    (void)ThemeOnThemeBroadcast((LPCTSTR)lParam);
-                }
+                hwndOwner = hDlg;
+            }
+            if (pfnAppThemeHandleWindowMessage(hwndOwner, WM_SETTINGCHANGE, wParam, lParam, WMAPP_THEMECHANGED, &lr))
+            {
+                return (INT_PTR)TRUE;
             }
             return (INT_PTR)FALSE;
 
         case WM_ERASEBKGND:
-            return (INT_PTR)ThemeEraseBackground(hDlg, (HDC)wParam, ThemeIsDarkMode());
+            if (pfnAppThemeHandleWindowMessage(hDlg, WM_ERASEBKGND, wParam, lParam, WMAPP_THEMECHANGED, &lr))
+            {
+                return (INT_PTR)lr;
+            }
+            return (INT_PTR)FALSE;
+
+        case WM_PAINT:
+            if (pfnAppThemeHandleWindowMessage(hDlg, WM_PAINT, wParam, lParam, WMAPP_THEMECHANGED, &lr))
+            {
+                return (INT_PTR)lr;
+            }
+            return (INT_PTR)FALSE;
 
         case WM_CTLCOLORDLG:
-        case WM_CTLCOLORSTATIC:
-        case WM_CTLCOLORBTN:
-            if (ThemeIsDarkMode())
+            if (pfnAppThemeHandleWindowMessage(hDlg, WM_CTLCOLORDLG, wParam, lParam, WMAPP_THEMECHANGED, &lr))
             {
-                return (INT_PTR)ThemeCtlColorBrush((HDC)wParam, TRUE);
+                return (INT_PTR)lr;
+            }
+            break;
+
+        case WM_CTLCOLORSTATIC:
+            if (pfnAppThemeHandleWindowMessage(hDlg, WM_CTLCOLORSTATIC, wParam, lParam, WMAPP_THEMECHANGED, &lr))
+            {
+                return (INT_PTR)lr;
             }
             break;
 
         case WM_COMMAND:
             if ((IDOK == LOWORD(wParam)) || (IDCANCEL == LOWORD(wParam)))
             {
-                ThemeUnregisterDialog(hDlg);
+                pfnAppThemeUnregisterDialog(hDlg);
                 EndDialog(hDlg, LOWORD(wParam));
                 return (INT_PTR)TRUE;
             }
             break;
 
         case WM_NCDESTROY:
-            ThemeUnregisterDialog(hDlg);
+            pfnAppThemeUnregisterDialog(hDlg);
             break;
 
         default:
