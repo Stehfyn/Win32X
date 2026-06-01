@@ -8,8 +8,17 @@
 
 #include "targetver.h"
 
+// CRT-free environment: this app links /NODEFAULTLIB. Disable the codegen that would emit calls into
+// an absent C runtime -- runtime checks (/RTC under Debug), stack probing, strict GS -- for the whole
+// translation unit, INCLUDING the inline helpers pulled in from the headers below (uxthemex.h's
+// resolver has stack buffers, which /RTC1 would instrument with _RTC_CheckStackVars).
+#pragma runtime_checks("", off)
+#pragma check_stack(off)
+#pragma strict_gs_check(off)
+
 #define WIN32_LEAN_AND_MEAN             // Exclude rarely-used stuff from Windows headers
 #include <windows.h>
 #include <windowsx.h>                   // message crackers (HANDLE_MSG)
 
 #include "Win32X/win32x.h"              // the library this sample exercises
+#include "Win32X/uxthemex.h"            // dark-mode / theming helpers (pulls in windowsx2.h crackers)
