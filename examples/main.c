@@ -19,14 +19,12 @@ static HINSTANCE g_hInst;                          /* current instance          
 static WCHAR     g_szTitle[MAX_LOADSTRING];        /* title bar text                    */
 static WCHAR     g_szWindowClass[MAX_LOADSTRING];  /* main window class name            */
 static BOOL      g_fDark;                           /* current system app theme is dark  */
-static HWND      g_hAboutDlg;                        /* the open About dialog, else NULL   */
 
 /* Forward declarations. */
 static ATOM             MyRegisterClass(HINSTANCE hInstance);
 static BOOL             InitInstance(HINSTANCE hInstance);
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 static INT_PTR CALLBACK About(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam);
-static BOOL    CALLBACK AboutThemeChildProc(HWND hChild, LPARAM lParam);
 
 DECLSPEC_NOINLINE int WINAPI _tWinMainEx(_In_ HINSTANCE          hInstance,
                                          _In_opt_ HINSTANCE      hPrevInstance,
@@ -44,8 +42,8 @@ DECLSPEC_NOINLINE int WINAPI _tWinMainEx(_In_ HINSTANCE          hInstance,
 
     /* Opt the process into dark mode and read the live system setting before the class is registered
        (the class background brush is chosen from it). */
-    WinXThemeStartup();
-    g_fDark = WinXThemeAppsUseDarkMode();
+    ThemeStartup();
+    g_fDark = ThemeEffectiveDarkMode();
 
     LoadString(hInstance, IDS_APP_TITLE, g_szTitle, MAX_LOADSTRING);
     LoadString(hInstance, IDC_WINDOWSPROJECT, g_szWindowClass, MAX_LOADSTRING);
@@ -83,7 +81,7 @@ static FORCEINLINE ATOM MyRegisterClass(HINSTANCE hInstance)
     wcx.hInstance     = hInstance;
     wcx.hIcon         = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_WINDOWSPROJECT));
     wcx.hCursor       = LoadCursor(NULL, IDC_ARROW);
-    wcx.hbrBackground = WinXThemeBackgroundBrush(g_fDark);
+    wcx.hbrBackground = ThemeBackgroundBrush(g_fDark);
     wcx.lpszMenuName  = MAKEINTRESOURCE(IDC_WINDOWSPROJECT);
     wcx.lpszClassName = g_szWindowClass;
     wcx.hIconSm       = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_SMALL));
@@ -115,8 +113,8 @@ static FORCEINLINE BOOL InitInstance(HINSTANCE hInstance)
         return FALSE;
     }
 
-    /* Dark/light the frame title bar and re-theme the (drop-down) menus to match the class brush. */
-    WinXThemeApplyWindow(hwnd, g_fDark);
+    /* Register and theme the top-level window before the first show, so first paint is coherent. */
+    ThemeApplyTopLevel(hwnd, g_fDark);
 
     /* Win32X's DPI-aware first show: size to three-quarters of the launch monitor's work area and
        position per STARTUPINFO -- the successor's upgrade over the template's ShowWindow(nCmdShow). */
@@ -128,19 +126,19 @@ static FORCEINLINE BOOL InitInstance(HINSTANCE hInstance)
 /* WM_UAHDRAWMENU: paint the whole menu-bar background dark. */
 static FORCEINLINE void OnUahDrawMenu(HWND hwnd, const UAHMENU* pUDM)
 {
-    WINX_MENUBAR_PALETTE pal;
+    MENUBAR_PALETTE pal;
 
-    WinXMenuBarPalette(TRUE, &pal);
-    WinXMenuBarOnDrawMenu(hwnd, pUDM, &pal);
+    MenuBarPalette(TRUE, &pal);
+    MenuBarOnDrawMenu(hwnd, pUDM, &pal);
 }
 
 /* WM_UAHDRAWMENUITEM: paint one bar item dark, by state. */
 static FORCEINLINE void OnUahDrawMenuItem(HWND hwnd, const UAHDRAWMENUITEM* pUDMI)
 {
-    WINX_MENUBAR_PALETTE pal;
+    MENUBAR_PALETTE pal;
 
-    WinXMenuBarPalette(TRUE, &pal);
-    WinXMenuBarOnDrawMenuItem(hwnd, pUDMI, &pal);
+    MenuBarPalette(TRUE, &pal);
+    MenuBarOnDrawMenuItem(hwnd, pUDMI, &pal);
 }
 
 /* WM_COMMAND: the application menu. */
@@ -153,7 +151,6 @@ static FORCEINLINE void OnCommand(HWND hwnd, int id, HWND hwndCtl, UINT codeNoti
     {
         case IDM_ABOUT:
             DialogBox(g_hInst, MAKEINTRESOURCE(IDD_ABOUTBOX), hwnd, About);
-            g_hAboutDlg = NULL; /* DialogBox is modal: cleared once it returns */
             return;
         case IDM_EXIT:
             DestroyWindow(hwnd);
@@ -185,7 +182,7 @@ static FORCEINLINE void OnSettingChange(HWND hwnd, UINT flags, LPCTSTR pszSectio
 
     if (pszSection && (0 == lstrcmpi(pszSection, TEXT("ImmersiveColorSet"))))
     {
-        (void)PostMessage(hwnd, WMAPP_THEMECHANGED, 0, 0);
+        (void)ThemeOnSettingChange(hwnd, WMAPP_THEMECHANGED, pszSection);
     }
 }
 
@@ -195,17 +192,7 @@ static FORCEINLINE void OnSettingChange(HWND hwnd, UINT flags, LPCTSTR pszSectio
    the system theme flips transitions too. */
 static FORCEINLINE void ThemeDialog(HWND hDlg, BOOL fDark)
 {
-    /* Suspend painting while restyling -- the frame attribute and each child's visual-style change
-       would otherwise each erase/repaint on their own and flicker the dialog through several frames.
-       Hold them off with WM_SETREDRAW, then flush in one synchronous pass (RDW_UPDATENOW) so the
-       earlier invalidations coalesce into a single erase+paint. The DWM dark title bar repaints
-       itself when the attribute is set; RDW_FRAME covers the rest of the non-client. */
-    SetWindowRedraw(hDlg, FALSE);
-    WinXThemeApplyDialog(hDlg, fDark);
-    EnumChildWindows(hDlg, AboutThemeChildProc, (LPARAM)fDark);
-    SetWindowRedraw(hDlg, TRUE);
-    RedrawWindow(hDlg, NULL, NULL,
-                 RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME | RDW_UPDATENOW);
+    ThemeApplyDialogTree(hDlg, fDark);
 }
 
 /* WMAPP_THEMECHANGED (deferred): re-read the system theme and, on a change, re-dress the window --
@@ -214,42 +201,22 @@ static FORCEINLINE void ThemeDialog(HWND hDlg, BOOL fDark)
    SendMessage, so the theme/DWM calls below are safe. */
 static FORCEINLINE void OnThemeChanged(HWND hwnd)
 {
-    BOOL fDark;
-
-    fDark = WinXThemeAppsUseDarkMode();
-    if (fDark == g_fDark)
-    {
-        return;
-    }
-    g_fDark = fDark;
-    /* Refresh uxtheme's cached dark state FIRST: the controls' ShouldAppsUseDarkMode reads that cache
-       (per disassembly), so the re-theme below paints the new shade in a single pass instead of
-       flashing the old one. */
-    WinXThemeRefresh();
-    SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)WinXThemeBackgroundBrush(fDark));
-    WinXThemeApplyWindow(hwnd, fDark);
-    InvalidateRect(hwnd, NULL, TRUE);
-    SetWindowPos(hwnd, NULL, 0, 0, 0, 0,
-                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
-    DrawMenuBar(hwnd);
-    if (g_hAboutDlg)
-    {
-        ThemeDialog(g_hAboutDlg, fDark);
-    }
+    UNREFERENCED_PARAMETER(hwnd);
+    g_fDark = ThemeOnDeferredThemeChange();
 }
 
 /* WM_DESTROY: end whichever pump is running -- WinBaseXRun's on a direct launch, RunComServer's
    under a DelegateExecute embedding. A transient COM launch dies with its window; that is correct. */
 static FORCEINLINE void OnDestroy(HWND hwnd)
 {
-    UNREFERENCED_PARAMETER(hwnd);
+    ThemeUnregisterWindow(hwnd);
     PostQuitMessage(0);
 }
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
     LRESULT              lr;
-    WINX_MENUBAR_PALETTE pal;
+    MENUBAR_PALETTE pal;
 
     switch (uMsg)
     {
@@ -276,8 +243,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             lr = DefWindowProc(hwnd, WM_NCACTIVATE, wParam, lParam);
             if (g_fDark)
             {
-                WinXMenuBarPalette(TRUE, &pal);
-                WinXMenuBarPaintSeam(hwnd, &pal);
+                MenuBarPalette(TRUE, &pal);
+                MenuBarPaintSeam(hwnd, &pal);
             }
             return lr;
 
@@ -285,8 +252,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             lr = DefWindowProc(hwnd, WM_NCPAINT, wParam, lParam);
             if (g_fDark)
             {
-                WinXMenuBarPalette(TRUE, &pal);
-                WinXMenuBarPaintSeam(hwnd, &pal);
+                MenuBarPalette(TRUE, &pal);
+                MenuBarPaintSeam(hwnd, &pal);
             }
             return lr;
 
@@ -302,44 +269,58 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
     return DefWindowProc(hwnd, uMsg, wParam, lParam);
 }
 
-/* EnumChildWindows callback: theme one About-box control to match. The OK button paints its own
-   face, so WM_CTLCOLORBTN can't darken it -- the DarkMode_Explorer visual style does. */
-static BOOL CALLBACK AboutThemeChildProc(HWND hChild, LPARAM lParam)
-{
-    WinXThemeApplyControl(hChild, 0 != lParam);
-    return TRUE;
-}
-
 /* Message handler for the About box. Themed to match the window. */
 static INT_PTR CALLBACK About(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
-    UNREFERENCED_PARAMETER(lParam);
+    HWND hwndOwner;
+
     switch (uMsg)
     {
         case WM_INITDIALOG:
-            g_hAboutDlg = hDlg;
-            /* Double-buffer the dialog (children paint to an off-screen surface, blit once) so a live
-               theme switch re-dresses every control as a single flicker-free composite rather than a
-               cascade of individual control repaints. */
-            SetWindowLongPtr(hDlg, GWL_EXSTYLE, GetWindowLongPtr(hDlg, GWL_EXSTYLE) | WS_EX_COMPOSITED);
             ThemeDialog(hDlg, g_fDark);
             return (INT_PTR)TRUE;
+
+        /* Freeze our own tree the instant the colour broadcast reaches us -- as early as the dialog
+           can act, independent of when the owner's WM_SETTINGCHANGE handler runs -- so no control
+           repaints stale during the gap. The owner's deferred OnThemeChanged resumes + flushes us. */
+        case WM_SETTINGCHANGE:
+            if (lParam && (0 == lstrcmpi((LPCTSTR)lParam, TEXT("ImmersiveColorSet"))))
+            {
+                hwndOwner = GetWindow(hDlg, GW_OWNER);
+                if (hwndOwner)
+                {
+                    (void)ThemeOnSettingChange(hwndOwner, WMAPP_THEMECHANGED, (LPCTSTR)lParam);
+                }
+                else
+                {
+                    (void)ThemeOnThemeBroadcast((LPCTSTR)lParam);
+                }
+            }
+            return (INT_PTR)FALSE;
+
+        case WM_ERASEBKGND:
+            return (INT_PTR)ThemeEraseBackground(hDlg, (HDC)wParam, g_fDark);
 
         case WM_CTLCOLORDLG:
         case WM_CTLCOLORSTATIC:
         case WM_CTLCOLORBTN:
             if (g_fDark)
             {
-                return (INT_PTR)WinXThemeCtlColorBrush((HDC)wParam, TRUE);
+                return (INT_PTR)ThemeCtlColorBrush((HDC)wParam, TRUE);
             }
             break;
 
         case WM_COMMAND:
             if ((IDOK == LOWORD(wParam)) || (IDCANCEL == LOWORD(wParam)))
             {
+                ThemeUnregisterDialog(hDlg);
                 EndDialog(hDlg, LOWORD(wParam));
                 return (INT_PTR)TRUE;
             }
+            break;
+
+        case WM_NCDESTROY:
+            ThemeUnregisterDialog(hDlg);
             break;
 
         default:
