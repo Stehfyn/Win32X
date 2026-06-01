@@ -40,31 +40,31 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="win32x.h">
+    <ClInclude Include="..\include\win32x.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="WinBaseX.h">
+    <ClInclude Include="..\include\WinBaseX.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="WinUserX.h">
+    <ClInclude Include="..\include\WinUserX.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="ShellScalingApiX.h">
+    <ClInclude Include="..\include\ShellScalingApiX.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="versionhelpersx.h">
+    <ClInclude Include="..\include\versionhelpersx.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="processenvx.h">
+    <ClInclude Include="..\include\processenvx.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="windefx.h">
+    <ClInclude Include="..\include\windefx.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="result.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="delayimpx.h">
+    <ClInclude Include="..\include\delayimpx.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="WinBaseXText.inl">

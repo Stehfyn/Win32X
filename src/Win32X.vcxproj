@@ -72,6 +72,7 @@
   <PropertyGroup Label="UserMacros" />
   <ItemDefinitionGroup>
     <ClCompile>
+      <AdditionalIncludeDirectories>..\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>WIN32_LEAN_AND_MEAN;COBJMACROS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
@@ -96,20 +97,20 @@
     <ClCompile Include="processenvxW.c" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="win32x.h" />
-    <ClInclude Include="WinBaseX.h" />
+    <ClInclude Include="..\include\win32x.h" />
+    <ClInclude Include="..\include\WinBaseX.h" />
     <ClInclude Include="WinBaseXText.inl" />
-    <ClInclude Include="WinUserX.h" />
+    <ClInclude Include="..\include\WinUserX.h" />
     <ClInclude Include="WinUserXThunks.inl" />
-    <ClInclude Include="ShellScalingApiX.h" />
+    <ClInclude Include="..\include\ShellScalingApiX.h" />
     <ClInclude Include="ShellScalingApiXThunks.inl" />
-    <ClInclude Include="versionhelpersx.h" />
+    <ClInclude Include="..\include\versionhelpersx.h" />
     <ClInclude Include="versionhelpersxThunks.inl" />
-    <ClInclude Include="processenvx.h" />
+    <ClInclude Include="..\include\processenvx.h" />
     <ClInclude Include="processenvxText.inl" />
-    <ClInclude Include="windefx.h" />
+    <ClInclude Include="..\include\windefx.h" />
     <ClInclude Include="result.h" />
-    <ClInclude Include="delayimpx.h" />
+    <ClInclude Include="..\include\delayimpx.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

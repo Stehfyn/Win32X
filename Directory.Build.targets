@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Directory.Build.targets — make Clean delete its output folders, not just the files inside them.
+  MSBuild's built-in Clean removes tracked output files but leaves the OutDir/IntDir directories
+  behind (and writes clean bookkeeping into IntDir, re-creating it). This removes both trees after
+  Clean finishes. Scope is the current Configuration|Platform.
+-->
+<Project>
+  <Target Name="PurgeArchOutputFolders" AfterTargets="Clean" Condition="'$(ArchName)' != ''">
+    <RemoveDir Directories="$(OutDir);$(IntDir)" />
+  </Target>
+</Project>

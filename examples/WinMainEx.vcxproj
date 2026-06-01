@@ -22,7 +22,7 @@
     <VCProjectVersion>18.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
     <ProjectGuid>{8a8eafed-53f9-401c-b7f2-f4b383b566ce}</ProjectGuid>
-    <RootNamespace>WindowsProject</RootNamespace>
+    <RootNamespace>WinMainEx</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
@@ -124,7 +124,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup>
     <ClCompile>
-      <AdditionalIncludeDirectories>..\Win32X;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <BufferSecurityCheck>false</BufferSecurityCheck>
     </ClCompile>
     <Link>
@@ -159,7 +159,7 @@
     <None Include="prebuild.ps1" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\Win32X\Win32X.vcxproj">
+    <ProjectReference Include="..\src\Win32X.vcxproj">
       <Project>{27df9d4e-60cf-460e-9b29-3a78da8239d5}</Project>
     </ProjectReference>
   </ItemGroup>

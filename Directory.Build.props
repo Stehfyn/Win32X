@@ -33,6 +33,38 @@
     <CodeAnalysisRuleSet>NativeRecommendedRules.ruleset</CodeAnalysisRuleSet>
   </PropertyGroup>
 
+  <!--
+    Build-output layout convention. Binaries and intermediates for both architectures live under
+    $(SolutionDir)<arch>\<Configuration>\. The MSBuild platform 'Win32' is deliberately mapped to the
+    folder name 'x86' (and 'x64' to 'x64'), so Win32 outputs land in $(SolutionDir)x86\Debug\ and
+    $(SolutionDir)x86\Release\.
+
+    Anchored on $(SolutionDir): this resolves to the repo root ONLY when the build is driven by a
+    solution located at the repo root. There is no .sln in the tree today — building a project
+    standalone would anchor under that project's own folder instead.
+
+    OutDir is shared per arch/config (the three targets — Win32X.lib, Tests.exe, WindowsProject.exe —
+    never collide). IntDir is per-project so each project's .obj and compiler PDB stay isolated.
+  -->
+  <PropertyGroup Condition="'$(Platform)'=='Win32'">
+    <ArchName>x86</ArchName>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Platform)'=='x64'">
+    <ArchName>x64</ArchName>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(ArchName)'!=''">
+    <OutDir>$(SolutionDir)bin\$(ArchName)\$(Configuration)\</OutDir>
+    <IntDir>$(SolutionDir)bin\$(ArchName)\$(Configuration)\obj\$(MSBuildProjectName)\</IntDir>
+  </PropertyGroup>
+
+  <!-- Keep the per-project build log OUT of bin\. VS holds <Project>.log open for the whole
+       build/clean session; parked under OutDir/IntDir it blocks the Clean purge (MSB3231). -->
+  <ItemDefinitionGroup>
+    <BuildLog>
+      <Path>$(TEMP)\Win32X-buildlogs\$(MSBuildProjectName).$(Platform).$(Configuration).log</Path>
+    </BuildLog>
+  </ItemDefinitionGroup>
+
   <ItemDefinitionGroup>
     <ClCompile>
       <!-- Central exception list — the ONLY warnings disabled solution-wide, each justified:
