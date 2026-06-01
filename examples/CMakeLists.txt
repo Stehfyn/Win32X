@@ -1,6 +1,18 @@
-# WindowsProject — GUI demo. WIN32 => /SUBSYSTEM:WINDOWS; app.manifest is embedded
-# by the MSVC toolchain (PerMonitorV2 DPI awareness + common controls v6).
-add_executable(WindowsProject WIN32 main.c app.manifest)
+# WindowsProject — classic VS "Windows Desktop Application" template reborn on Win32X (_tWinMainEx,
+# CRT-free). WIN32 => /SUBSYSTEM:WINDOWS; app.manifest is embedded by the MSVC toolchain
+# (PerMonitorV2 DPI awareness + common controls v6); WindowsProject.rc carries the icons, menu,
+# accelerators, About dialog, and string table.
+add_executable(WindowsProject WIN32
+  main.c
+  WindowsProject.rc
+  framework.h
+  targetver.h
+  Resource.h
+  WindowsProject.h
+  app.manifest)
+
+# framework.h as the precompiled header, mirroring the stock template.
+target_precompile_headers(WindowsProject PRIVATE framework.h)
 
 target_link_libraries(WindowsProject PRIVATE
   Win32X::Win32X
