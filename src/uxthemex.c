@@ -151,6 +151,8 @@ typedef struct THEME_STATE
     UINT                                      cDialogs;
     UINT                                      cAnimationWindows;
     DWORD                                     dwAnimationStartTick;
+    DWORD                                     dwAnimationSnapTick;
+    DWORD                                     dwAnimationReserved;
 } THEME_STATE;
 
 typedef union THEME_PROC
@@ -668,7 +670,11 @@ static FORCEINLINE COLORREF ThemeClientAnimationColor(void)
     crFrom = ThemeBackgroundColor(g_theme.fAnimationFromDark);
     crTo = ThemeBackgroundColor(g_theme.fAnimationToDark);
     dwDuration = ThemeBackgroundTransitionMs();
-    dwElapsed = GetTickCount() - g_theme.dwAnimationStartTick;
+    /* Use the per-tick clock snapshot, not a fresh GetTickCount, so the client and the menu bar
+       (which is painted a moment later in the same tick) interpolate at the EXACT same t -- on a
+       fast fade an independent read a few ms apart is several percent of progress, which would drift
+       the two surfaces out of the caption's band. */
+    dwElapsed = g_theme.dwAnimationSnapTick - g_theme.dwAnimationStartTick;
     return ThemeLerpColor(crFrom, crTo, dwElapsed, dwDuration);
 }
 
@@ -1263,6 +1269,8 @@ static FORCEINLINE void ThemeOnAnimationTick(void)
         ThemeStopAnimationTimer();
         return;
     }
+    /* One clock read per tick, shared by the client and menu paints this tick. */
+    g_theme.dwAnimationSnapTick = GetTickCount();
 
     phwnd = g_theme.rgAnimationWindows;
     c = g_theme.cAnimationWindows;
@@ -1324,6 +1332,15 @@ static FORCEINLINE BOOL ThemePublishBroadcastPaintState(void)
        flip, so DWM's own caption crossfade runs concurrently with the client/menu crossfade instead
        of starting late and lagging ~30 frames behind. Caption and client then animate in sync. */
     ThemeApplyRegisteredFrames(fEffectiveDark);
+    /* Re-stamp the animation clock to the instant the caption attribute flips, so the client/menu
+       elapsed clock and DWM's caption fade share the same t=0 -- this removes the systematic offset
+       between the (earlier) arm time and the caption flip, leaving only DWM's sub-frame compose
+       latency. */
+    if (g_theme.fAnimatingBackground)
+    {
+        g_theme.dwAnimationStartTick = GetTickCount();
+        g_theme.dwAnimationSnapTick = g_theme.dwAnimationStartTick;
+    }
     ThemeSetRegisteredClassBrushes(fEffectiveDark);
     ThemeInvalidateRegisteredWindows();
     return fEffectiveDark;
@@ -1799,7 +1816,7 @@ static FORCEINLINE COLORREF ThemeMenuAnimationColor(void)
     MenuBarPalette(g_theme.fAnimationFromDark, &palFrom);
     MenuBarPalette(g_theme.fAnimationToDark, &palTo);
     dwDuration = ThemeBackgroundTransitionMs();
-    dwElapsed = GetTickCount() - g_theme.dwAnimationStartTick;
+    dwElapsed = g_theme.dwAnimationSnapTick - g_theme.dwAnimationStartTick;
     return ThemeLerpColor(palFrom.clrBar, palTo.clrBar, dwElapsed, dwDuration);
 }
 

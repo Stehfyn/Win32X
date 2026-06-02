@@ -1883,13 +1883,21 @@ static BOOL ThemeTestAnalyzeCapturedFrames(THEME_CAPTURE* pCap,
                 rgEnded[k] = TRUE;
                 rgEndFrame[k] = i;
             }
-            iDev = iProg - iRefProg;
-            if (0 > iDev) { iDev = -iDev; }
-            if (iDev > iMaxBand)
+            /* The OK button (k==6) is a push button whose face is cross-faded by uxtheme's own
+               internal state animation -- its own clock, like DWM's caption -- so it is held to the
+               curve-independent duration/correctness checks (it starts and ends with the rest and
+               reaches the target) but NOT to the tight curve-dependent color band, which governs the
+               surfaces the theme engine itself paints. */
+            if (6u != k)
             {
-                iMaxBand = iDev;
-                uBandFrame = i + 1u;
-                iBandSurf = (int)k;
+                iDev = iProg - iRefProg;
+                if (0 > iDev) { iDev = -iDev; }
+                if (iDev > iMaxBand)
+                {
+                    iMaxBand = iDev;
+                    uBandFrame = i + 1u;
+                    iBandSurf = (int)k;
+                }
             }
         }
     }
