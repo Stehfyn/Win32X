@@ -65,7 +65,11 @@
    T6 runs a single recording instead of two. Decoupled from WAIT_MS (the 2s hang timeout) so timeouts
    stay generous, and from THEME_SETTLE_MS (the brief post-restore settle) so restoring the original
    theme does not pad the run with a second full-length record. */
-#define THEME_RECORD_MS         1100u
+#define THEME_RECORD_MS         3000u
+/* Forward leg: how long the worker holds the target theme before flipping back, so the forward
+   transition fully settles on the target plateau before the restore begins. RECORD_MS covers both
+   legs (forward + restore) so the single video spans the whole round-trip. */
+#define THEME_LEG_MS            1400u
 /* Post-restore settle: after broadcasting the theme restore we only need the desktop to begin
    repainting before the app is torn down -- not a whole transition -- so this is short, not RECORD_MS. */
 #define THEME_SETTLE_MS         300u

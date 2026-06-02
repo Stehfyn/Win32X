@@ -132,6 +132,7 @@ typedef struct THEME_STATE
     HMODULE                                   hAdvapi32;
     HMODULE                                   hWinmm;
     HBRUSH                                    hbrDarkBg;
+    HBRUSH                                    hbrAnimation;   /* solid brush for the current crossfade color */
     COLORREF                                  crDarkBg;
     DWORD                                     dwBackgroundTransitionMs;
     DWORD                                     dwMajorVersion;
@@ -159,7 +160,7 @@ typedef struct THEME_STATE
     UINT                                      cAnimationWindows;
     DWORD                                     dwAnimationStartTick;
     DWORD                                     dwAnimationSnapTick;
-    DWORD                                     dwAnimationReserved;
+    COLORREF                                  crAnimation;    /* color hbrAnimation was created for (was reserved) */
 } THEME_STATE;
 
 typedef union THEME_PROC
@@ -702,6 +703,50 @@ static FORCEINLINE COLORREF ThemeClientAnimationColor(void)
        the two surfaces out of the caption's band. */
     dwElapsed = g_theme.dwAnimationSnapTick - g_theme.dwAnimationStartTick;
     return ThemeLerpColor(crFrom, crTo, ThemeEaseElapsed(dwElapsed, dwDuration), dwDuration);
+}
+
+/* Control (static/dialog) text color at the current point of the transition, on the same clock as the
+   client background, so a dialog's labels cross-fade in lockstep with the body they sit on instead of
+   snapping. Light mode uses the system window-text color; dark mode uses DARK_TEXT. */
+static FORCEINLINE COLORREF ThemeClientTextColor(BOOL fDark)
+{
+    if (fDark)
+    {
+        return DARK_TEXT;
+    }
+    return GetSysColor(COLOR_WINDOWTEXT);
+}
+
+static FORCEINLINE COLORREF ThemeClientTextAnimationColor(void)
+{
+    COLORREF crFrom;
+    COLORREF crTo;
+    DWORD    dwDuration;
+    DWORD    dwElapsed;
+
+    crFrom = ThemeClientTextColor(g_theme.fAnimationFromDark);
+    crTo = ThemeClientTextColor(g_theme.fAnimationToDark);
+    dwDuration = ThemeBackgroundTransitionMs();
+    dwElapsed = g_theme.dwAnimationSnapTick - g_theme.dwAnimationStartTick;
+    return ThemeLerpColor(crFrom, crTo, ThemeEaseElapsed(dwElapsed, dwDuration), dwDuration);
+}
+
+/* Cached solid brush for the live crossfade color (recreated only when the interpolated color changes),
+   mirroring the hbrDarkBg cache. Returned from WM_CTLCOLOR* during a transition so control backgrounds
+   are filled with the same intermediate color the client erases to -- the dialog's static/edit faces
+   then track the caption's progress band instead of jumping to the target shade on the first frame. */
+static FORCEINLINE HBRUSH ThemeAnimationBrush(COLORREF cr)
+{
+    if (!g_theme.hbrAnimation || (g_theme.crAnimation != cr))
+    {
+        if (g_theme.hbrAnimation)
+        {
+            DeleteObject(g_theme.hbrAnimation);
+        }
+        g_theme.hbrAnimation = CreateSolidBrush(cr);
+        g_theme.crAnimation = cr;
+    }
+    return g_theme.hbrAnimation;
 }
 
 static FORCEINLINE void ThemeArmBackgroundAnimationWindows(void);
@@ -1324,12 +1369,14 @@ static FORCEINLINE void ThemeOnAnimationTick(void)
         hwnd = *phwnd;
         if (IsWindow(hwnd))
         {
-            /* Repaint the client SYNCHRONOUSLY every tick (UpdateWindow forces the WM_PAINT now)
+            /* Repaint the client SYNCHRONOUSLY every tick (RDW_UPDATENOW forces the WM_PAINT now)
                rather than leaving an async InvalidateRect to be coalesced -- otherwise the client
                crossfade lags the menu bar (which is redrawn synchronously below) by however long the
-               paint sat in the queue, and the two surfaces drift out of step. */
-            InvalidateRect(hwnd, NULL, FALSE);
-            UpdateWindow(hwnd);
+               paint sat in the queue, and the two surfaces drift out of step. RDW_ALLCHILDREN extends
+               the repaint to child controls so a dialog's statics re-issue WM_CTLCOLORSTATIC every tick
+               and cross-fade in band too (without it they keep their first-frame shade and stair-step
+               out of the caption's band). No RDW_ERASE: the body cross-fades via WM_PAINT, not erase. */
+            RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
             if (GetMenu(hwnd))
             {
                 /* Drive the menu bar repaint every tick by SENDING WM_NCPAINT synchronously, not via
@@ -1832,6 +1879,30 @@ static FORCEINLINE void ThemeNcRepaintMenuBar(HWND hwnd)
     MenuBarPaintSeam(hwnd, &pal);
 }
 
+/*
+ * WM_CTLCOLOR* during a live transition: fill the control's background with the same intermediate color
+ * the client erases to and interpolate its text color on the same clock, so the dialog's statics
+ * cross-fade in lockstep with the body. DECLSPEC_NOINLINE keeps this helper's color math (and its
+ * inlined lerps) in its own stack frame rather than enlarging the ThemeHandleWindowMessage dispatcher
+ * past the one-page stack-probe threshold (__chkstk, unresolvable in this /NODEFAULTLIB build). Returns
+ * FALSE when no transition is live so the caller falls back to the steady-state brush.
+ */
+static DECLSPEC_NOINLINE BOOL ThemeCtlColorAnimation(HWND hwnd, HDC hdc, LRESULT* plr)
+{
+    COLORREF crBg;
+
+    if (!g_theme.fAnimatingBackground || !ThemeWindowHasBackgroundAnimation(hwnd))
+    {
+        return FALSE;
+    }
+    crBg = ThemeClientAnimationColor();
+    SetBkColor(hdc, crBg);
+    SetTextColor(hdc, ThemeClientTextAnimationColor());
+    SetBkMode(hdc, OPAQUE);
+    *plr = (LRESULT)ThemeAnimationBrush(crBg);
+    return TRUE;
+}
+
 static BOOL ThemeHandleSettingChangeMessage(HWND hwnd, LPARAM lParam, UINT uDeferredMsg, LRESULT* plr)
 {
     if (!ThemeIsImmersiveColorSet((LPCTSTR)lParam))
@@ -1899,6 +1970,14 @@ BOOL WINAPI ThemeHandleWindowMessage(
 
         case WM_CTLCOLORDLG:
         case WM_CTLCOLORSTATIC:
+            /* While a transition is live, paint control backgrounds with the SAME intermediate color
+               the client erases to (off the shared snapshot clock), so the dialog's statics cross-fade
+               in band with the body instead of snapping to the target shade on the first frame. Kept in
+               its own (non-inlined) frame so its color math does not enlarge this dispatcher's stack. */
+            if (ThemeCtlColorAnimation(hwnd, (HDC)wParam, plr))
+            {
+                return TRUE;
+            }
             fDark = ThemeIsDarkMode();
             if (fDark)
             {

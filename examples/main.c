@@ -194,13 +194,20 @@ static FORCEINLINE void OnDestroy(HWND hwnd)
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
     LRESULT              lr;
-    MENUBAR_PALETTE pal;
 
     switch (uMsg)
     {
+        /* Route the non-client frame messages (WM_NCACTIVATE/WM_NCPAINT) through the theme handler too:
+           it lets DefWindowProc render the frame, then repaints the owner-drawn menu band -- the FULL
+           bar cross-faded off the shared snapshot clock while a transition is live, the 1px seam
+           otherwise. Handling them here (instead of the app painting only the seam) is what keeps the
+           menu bar tracking the caption's progress band during the fade instead of snapping to the
+           target shade on the first frame. The animation timer's per-tick WM_NCPAINT drives it. */
         case WM_SETTINGCHANGE:
         case WM_ERASEBKGND:
         case WM_PAINT:
+        case WM_NCACTIVATE:
+        case WM_NCPAINT:
         case WM_CTLCOLORDLG:
         case WM_CTLCOLORSTATIC:
         case WMAPP_THEMECHANGED:
@@ -218,21 +225,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 
         case WM_UAHDRAWMENUITEM:
             return HANDLE_WM_UAHDRAWMENUITEM(hwnd, wParam, lParam, OnUahDrawMenuItem);
-
-        /* DefWindowProc paints the 1px menu-bar/client seam light; repaint it dark afterward. Split
-           per message with a literal id (not the switch-narrowed uMsg) so no range-checked value
-           feeds the DefWindowProc call (CONV-4.12 C5045-safe). */
-        case WM_NCACTIVATE:
-            lr = DefWindowProc(hwnd, WM_NCACTIVATE, wParam, lParam);
-            pfnAppMenuBarPalette(pfnAppThemeIsDarkMode(), &pal);
-            pfnAppMenuBarPaintSeam(hwnd, &pal);
-            return lr;
-
-        case WM_NCPAINT:
-            lr = DefWindowProc(hwnd, WM_NCPAINT, wParam, lParam);
-            pfnAppMenuBarPalette(pfnAppThemeIsDarkMode(), &pal);
-            pfnAppMenuBarPaintSeam(hwnd, &pal);
-            return lr;
 
         HANDLE_MSG(hwnd, WM_COMMAND, OnCommand);
         HANDLE_MSG(hwnd, WM_DESTROY, OnDestroy);

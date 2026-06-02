@@ -33,6 +33,8 @@ static DWORD g_dwThemeWorkerValue;
 static BOOL  g_fThemeWorkerWrote;
 static BOOL  g_fThemeWorkerBroadcast;
 static BOOL  g_fThemeWorkerWriteSystem;
+static DWORD g_dwThemeWorkerRestore;   /* original AppsUseLightTheme value to flip back to in-recording */
+static BOOL  g_fThemeWorkerHadValue;   /* whether AppsUseLightTheme existed before the test            */
 static LPCTSTR g_pszThemeTag = TEXT("");
 static HANDLE g_hThemeStartEvent;
 static HANDLE g_hThemeAppProcess;   /* launched WindowsProject.exe, terminated at teardown */
@@ -744,6 +746,13 @@ static DWORD WINAPI ThemeTestTransitionThread(LPVOID pv)
     {
         g_fThemeWorkerBroadcast = ThemeTestBroadcastImmersiveColorSet();
     }
+    /* Drive the RESTORE flip from inside the recording too: let the forward transition fully play out,
+       then flip the theme back to its original value and re-broadcast. The single capture then spans the
+       complete round-trip (initial -> target -> initial) in one straight video, instead of cutting off
+       at the target. The post-capture restore in the caller stays as an idempotent safety net. */
+    Sleep(THEME_LEG_MS);
+    (void)ThemeTestRestoreAppsUseLightTheme(g_fThemeWorkerHadValue, g_dwThemeWorkerRestore);
+    (void)ThemeTestBroadcastImmersiveColorSet();
     return 0u;
 }
 
@@ -2089,6 +2098,7 @@ static void ThemeTestFillSurfacePoints(HWND hwndTop, HWND hwndDialog, HWND hwndS
     POINT pt;
     RECT  rcTop;
     RECT  rcDialog;
+    RECT  rcCtl;
     UINT  cMenu;
     UINT  k;
 
@@ -2132,9 +2142,15 @@ static void ThemeTestFillSurfacePoints(HWND hwndTop, HWND hwndDialog, HWND hwndS
             pCap->rgSurfActive[4] = TRUE;
         }
     }
-    /* 5: dialog static. */
-    if (hwndStatic && ThemeTestSamplePoint(hwndStatic, 8, 8, &pt))
+    /* 5: dialog static -- sample the RIGHT-edge BACKGROUND of the (shortest) text label. Left-aligned
+       text leaves the right side as pure control background, which cross-fades cleanly dark->light; the
+       glyphs themselves (dark-bg/light-text -> light-bg/dark-text) average to nearly the same mean, and
+       the app icon is a fixed bitmap -- both give a degenerate span the band check cannot normalize. */
+    if (hwndStatic && GetClientRect(hwndStatic, &rcCtl))
     {
+        pt.x = rcCtl.right - THEME_SURF_HALF - 2;
+        pt.y = (rcCtl.top + rcCtl.bottom) / 2;
+        MapWindowPoints(hwndStatic, NULL, &pt, 1u);
         pCap->rgSurfPt[5] = pt;
         pCap->rgSurfActive[5] = TRUE;
     }
@@ -2252,15 +2268,37 @@ static BOOL ThemeTestAnalyzeCapturedFrames(THEME_CAPTURE* pCap,
     {
         return FALSE;
     }
-    iLast = pCap->cCaptured - 1u;
     for (k = 0u; k < 7u; ++k)
     {
         rgStart[k] = ThemeTestSurfaceLuma(pCap, iBase, k, ptRef, rgSurf, rgMenu, cMenu);
-        rgEnd[k] = ThemeTestSurfaceLuma(pCap, iLast, k, ptRef, rgSurf, rgMenu, cMenu);
         rgStartFrame[k] = 0u;
         rgEndFrame[k] = 0u;
         rgStarted[k] = FALSE;
         rgEnded[k] = FALSE;
+    }
+    /* The recording spans the full round-trip (initial -> target -> initial); the FORWARD transition
+       ends at the caption's turning point -- the frame whose caption luma is farthest from the start
+       plateau. Analyze only iBase..iLast (the forward leg); the restore leg is in the video for
+       reference but not banded (its end would otherwise read back at the initial shade -> zero span). */
+    {
+        int iBestDev;
+
+        iBestDev = -1;
+        iLast = iBase;
+        for (i = iBase; i < pCap->cCaptured; ++i)
+        {
+            int iL;
+            int iDevC;
+
+            iL = ThemeTestSurfaceLuma(pCap, i, 0u, ptRef, rgSurf, rgMenu, cMenu);
+            iDevC = iL - rgStart[0];
+            if (0 > iDevC) { iDevC = -iDevC; }
+            if (iDevC > iBestDev) { iBestDev = iDevC; iLast = i; }
+        }
+    }
+    for (k = 0u; k < 7u; ++k)
+    {
+        rgEnd[k] = ThemeTestSurfaceLuma(pCap, iLast, k, ptRef, rgSurf, rgMenu, cMenu);
     }
 
     iRefAmp = rgEnd[0] - rgStart[0];
@@ -2274,7 +2312,7 @@ static BOOL ThemeTestAnalyzeCapturedFrames(THEME_CAPTURE* pCap,
     iMaxBand = 0;
     iBandSurf = -1;
     uBandFrame = 0u;
-    for (i = iBase; i < pCap->cCaptured; ++i)
+    for (i = iBase; i <= iLast; ++i)
     {
         int  iRefProg;
         int  iRefPrev;
@@ -2290,7 +2328,7 @@ static BOOL ThemeTestAnalyzeCapturedFrames(THEME_CAPTURE* pCap,
            the curve-match within the band is still strictly enforced, only the unavoidable one-frame
            compositing phase is allowed -- never a larger lead/lag. */
         iPrev = (i > iBase) ? (i - 1u) : iBase;
-        iNext = ((i + 1u) < pCap->cCaptured) ? (i + 1u) : i;
+        iNext = (i < iLast) ? (i + 1u) : i;   /* stay within the forward leg, not the restore frames */
         iRefProg = ThemeTestProgress(ThemeTestSurfaceLuma(pCap, i, 0u, ptRef, rgSurf, rgMenu, cMenu), rgStart[0], rgEnd[0]);
         iRefPrev = ThemeTestProgress(ThemeTestSurfaceLuma(pCap, iPrev, 0u, ptRef, rgSurf, rgMenu, cMenu), rgStart[0], rgEnd[0]);
         iRefNext = ThemeTestProgress(ThemeTestSurfaceLuma(pCap, iNext, 0u, ptRef, rgSurf, rgMenu, cMenu), rgStart[0], rgEnd[0]);
@@ -3287,6 +3325,7 @@ typedef struct THEME_FINDWND
     BOOL    fOwned;      /* TRUE = owned popup (dialog); FALSE = top-level        */
     BOOL    fNeedMenu;   /* TRUE = window must have a menu (the main window)      */
     HWND    hwndFound;
+    int     iBest;       /* child finder: shortest window-text length kept so far */
 } THEME_FINDWND;
 
 static BOOL CALLBACK ThemeTestEnumFindProc(HWND hwnd, LPARAM lParam)
@@ -3364,8 +3403,16 @@ static BOOL CALLBACK ThemeTestEnumChildProc(HWND hwnd, LPARAM lParam)
     GetClassName(hwnd, szClass, (int)ARRAYSIZE(szClass));
     if (0 == lstrcmpi(szClass, pf->pszClass))
     {
-        pf->hwndFound = hwnd;
-        return FALSE;
+        /* Keep the matching child with the SHORTEST non-empty window text. For the About box's "Static"
+           children that skips the icon (no text -> cannot cross-fade) and prefers the shorter label
+           ("Copyright (c) 2026" over the longer version string), whose left-aligned text leaves the most
+           right-edge background for a clean dark->light sample. Enumerate all, do not stop early. */
+        int iLen = GetWindowTextLength(hwnd);
+        if ((0 < iLen) && (!pf->hwndFound || (iLen < pf->iBest)))
+        {
+            pf->hwndFound = hwnd;
+            pf->iBest = iLen;
+        }
     }
     return TRUE;
 }
@@ -3679,6 +3726,8 @@ static void ThemeTestRunTransition(BOOL fWriteSystem, LPCTSTR pszTag)
     g_fThemeSawNcPaint    = FALSE;
     g_fThemePaintMismatch = FALSE;
     g_dwThemeWorkerValue = dwTargetValue;
+    g_dwThemeWorkerRestore = dwOriginalValue;
+    g_fThemeWorkerHadValue = fHadOriginalValue;
     g_fThemeWorkerWrote = FALSE;
     g_fThemeWorkerBroadcast = FALSE;
     g_hwndThemeTop = hwndTop;
