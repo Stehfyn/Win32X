@@ -96,6 +96,10 @@ typedef HRESULT(WINAPI* PFN_DRAWTHEMETEXTEX)(
 
 #define THEME_ANIMATION_TIMER_ID ((UINT_PTR)0x57A2)
 #define THEME_ANIMATION_TICK_MS  5u
+
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
 #define THEME_MAX_MENU_ITEMS     32
 #define THEME_ANIMATION_SLACK_MS 90u
 
@@ -155,7 +159,12 @@ typedef struct THEME_STATE
     HWND                                      rgAnimationWindows[THEME_MAX_TOPLEVELS + THEME_MAX_DIALOGS];
     HWND                                      rgAnimationStarted[THEME_MAX_TOPLEVELS + THEME_MAX_DIALOGS];
     HWND                                      rgMenuAnimationStarted[THEME_MAX_TOPLEVELS + THEME_MAX_DIALOGS];
-    HWND                                      hwndAnimationTimer;
+    HWND                                      hwndAnimationTimer; /* GUI window the tick message is posted to     */
+    HANDLE                                    hAnimationThread;   /* posts the tick; immune to WM_TIMER starvation */
+    HANDLE                                    hAnimationStop;     /* manual-reset: tells the tick thread to exit    */
+    HANDLE                                    hAnimationTimerObj; /* high-res periodic waitable timer (the clock)   */
+    volatile LONG                             lTickPending;       /* 1 == a tick is queued/in-flight (coalescing)   */
+    UINT                                      uAnimationTickMsg;  /* RegisterWindowMessage id for the posted tick   */
     UINT                                      cTopLevels;
     UINT                                      cDialogs;
     UINT                                      cAnimationWindows;
@@ -762,7 +771,7 @@ static FORCEINLINE HBRUSH ThemeAnimationBrush(COLORREF cr)
 static FORCEINLINE void ThemeArmBackgroundAnimationWindows(void);
 static FORCEINLINE void ThemeCompletePendingThemeChange(void);
 static FORCEINLINE void ThemeStopAnimationTimer(void);
-static void CALLBACK ThemeAnimationTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD dwTime);
+static FORCEINLINE void ThemeStartAnimationThread(void);
 static FORCEINLINE COLORREF ThemeMenuAnimationColor(void);
 static FORCEINLINE COLORREF ThemeMenuTextAnimationColor(void);
 static FORCEINLINE void ThemePaintMenuBarColor(HWND hwnd, COLORREF crBar, COLORREF crText);
@@ -884,17 +893,17 @@ static FORCEINLINE void ThemeArmBackgroundAnimationWindows(void)
     if (g_theme.fAnimatingBackground)
     {
         g_theme.dwAnimationStartTick = GetTickCount();
-        /* Arm with a TIMERPROC, not a NULL callback. A NULL callback posts WM_TIMER to the window's
-           queue, which only fires if the app's WndProc routes WM_TIMER into the theme handler -- a
-           hidden cooperation requirement the app silently failed, leaving the transition (and with
-           it the DWM caption swap) never completed. With a TIMERPROC the tick is delivered straight
-           to the callback by the app's normal DispatchMessage loop, so the engine drives the whole
-           synchronized transition -- client, menu, and caption -- with no WndProc cooperation. */
-        if (IsWindow(g_theme.rgAnimationWindows[0]) &&
-            SetTimer(g_theme.rgAnimationWindows[0], THEME_ANIMATION_TIMER_ID, THEME_ANIMATION_TICK_MS,
-                     ThemeAnimationTimerProc))
+        /* Clock the crossfade from a dedicated thread that POSTS a tick message, not SetTimer/WM_TIMER.
+           WM_TIMER (with or without a TIMERPROC) is synthesized only when the message queue is otherwise
+           empty, so a real Settings switch -- which floods the app with WM_THEMECHANGED/WM_SETTINGCHANGE
+           and forced repaints for the whole transition -- starves it (measured: ticks ~700-1500ms apart
+           instead of every 5ms), and the fade snaps to the target. A posted message is normal priority,
+           dequeued ahead of WM_TIMER/WM_PAINT, so the storm cannot starve it. The thread only
+           PostMessages; every paint stays on the GUI thread in the tick handler, routed through the app's
+           WndProc exactly as the deferred theme-change message already is. */
+        if (IsWindow(g_theme.rgAnimationWindows[0]))
         {
-            g_theme.hwndAnimationTimer = g_theme.rgAnimationWindows[0];
+            ThemeStartAnimationThread();
         }
     }
 }
@@ -1378,11 +1387,38 @@ static FORCEINLINE void ThemeCompletePendingThemeChange(void)
 
 static FORCEINLINE void ThemeStopAnimationTimer(void)
 {
+    if (g_theme.hAnimationThread)
+    {
+        if (g_theme.hAnimationStop)
+        {
+            (void)SetEvent(g_theme.hAnimationStop);
+        }
+        /* The tick thread only ever PostMessages (it never blocks on the GUI thread), so joining it from
+           the GUI thread -- even from inside the tick handler that called us -- cannot deadlock; it exits
+           within one tick interval. */
+        (void)WaitForSingleObject(g_theme.hAnimationThread, INFINITE);
+        CloseHandle(g_theme.hAnimationThread);
+        g_theme.hAnimationThread = NULL;
+    }
+    if (g_theme.hAnimationStop)
+    {
+        CloseHandle(g_theme.hAnimationStop);
+        g_theme.hAnimationStop = NULL;
+    }
+    if (g_theme.hAnimationTimerObj)
+    {
+        (void)CancelWaitableTimer(g_theme.hAnimationTimerObj);
+        CloseHandle(g_theme.hAnimationTimerObj);
+        g_theme.hAnimationTimerObj = NULL;
+    }
+    /* Destroy the tick window only after the thread has stopped posting to it. Safe to call from inside
+       ThemeTickWndProc (a window may be destroyed from within its own procedure on the owning thread). */
     if (g_theme.hwndAnimationTimer)
     {
-        (void)KillTimer(g_theme.hwndAnimationTimer, THEME_ANIMATION_TIMER_ID);
+        DestroyWindow(g_theme.hwndAnimationTimer);
         g_theme.hwndAnimationTimer = NULL;
     }
+    InterlockedExchange(&g_theme.lTickPending, 0);
 }
 
 static FORCEINLINE void ThemeFinishAllBackgroundAnimation(void)
@@ -1521,15 +1557,148 @@ static FORCEINLINE void ThemeOnAnimationTick(void)
     }
 }
 
-static void CALLBACK ThemeAnimationTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD dwTime)
+/* Atom of the library's private tick-window class, registered once per process. */
+static ATOM g_atomThemeTickClass;
+
+/* The library's own message-only window procedure. The animation tick is delivered HERE, to a window the
+   library owns, so it does NOT depend on the host app routing a new message id into
+   ThemeHandleWindowMessage -- the cooperation requirement that silently broke the old WM_TIMER path
+   (examples/main.c routes only a fixed set of messages). The app's normal GetMessage/DispatchMessage
+   loop dispatches the posted tick straight to this proc. */
+static LRESULT CALLBACK ThemeTickWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
-    UNREFERENCED_PARAMETER(hwnd);
-    UNREFERENCED_PARAMETER(uMsg);
-    UNREFERENCED_PARAMETER(dwTime);
-    if (THEME_ANIMATION_TIMER_ID == idEvent)
+    if (g_theme.uAnimationTickMsg && (uMsg == g_theme.uAnimationTickMsg))
     {
+        /* Clear pending first so the tick thread may queue the next tick while this one's paints run. */
+        InterlockedExchange(&g_theme.lTickPending, 0);
         ThemeOnAnimationTick();
+        return 0;
     }
+    return DefWindowProc(hwnd, uMsg, wParam, lParam);
+}
+
+static FORCEINLINE HWND ThemeCreateTickWindow(void)
+{
+    WNDCLASS  wc;
+    HINSTANCE hInst;
+
+    hInst = GetModuleHandle(NULL);
+    if (0u == g_atomThemeTickClass)
+    {
+        SecureZeroMemory(&wc, sizeof(wc));
+        wc.lpfnWndProc   = ThemeTickWndProc;
+        wc.hInstance     = hInst;
+        wc.lpszClassName = TEXT("Win32XThemeTickWnd");
+        g_atomThemeTickClass = RegisterClass(&wc);
+    }
+    if (0u == g_atomThemeTickClass)
+    {
+        return NULL;
+    }
+    /* HWND_MESSAGE: a message-only window -- never shown, just a tick sink on the GUI thread. */
+    return CreateWindowEx(0, TEXT("Win32XThemeTickWnd"), NULL, 0, 0, 0, 0, 0,
+                          HWND_MESSAGE, NULL, hInst, NULL);
+}
+
+/* The animation clock: a dedicated thread that posts uAnimationTickMsg to the library's tick window every
+   THEME_ANIMATION_TICK_MS. It does no GUI work -- only PostMessage -- so it is safe off the GUI thread,
+   and the posted message (normal priority) is never starved by the WM_THEMECHANGED/WM_PAINT storm a real
+   Settings switch delivers, unlike the WM_TIMER it replaces. lTickPending coalesces: at most one tick is
+   ever outstanding, so a slow GUI thread cannot accumulate a backlog of posts. */
+static DWORD WINAPI ThemeAnimationTickThread(LPVOID pvParam)
+{
+    HANDLE rgWait[2];
+    DWORD  dwWait;
+    BOOL   fTick;
+
+    UNREFERENCED_PARAMETER(pvParam);
+    rgWait[0] = g_theme.hAnimationStop;
+    rgWait[1] = g_theme.hAnimationTimerObj;
+    for (;;)
+    {
+        if (rgWait[1])
+        {
+            /* The high-resolution periodic timer is the clock: it re-signals every tick interval to true
+               5ms accuracy, independent of the ~15.6ms default system timer granularity that WaitForSingle-
+               Object's timeout is clamped to (which made the tick ~3x too slow). */
+            dwWait = WaitForMultipleObjects(2u, rgWait, FALSE, INFINITE);
+            if (dwWait != (WAIT_OBJECT_0 + 1u))
+            {
+                break;   /* stop signalled, or wait failed */
+            }
+            fTick = TRUE;
+        }
+        else
+        {
+            /* Fallback when no waitable timer could be created: timeout poll (coarser). */
+            if (WAIT_OBJECT_0 == WaitForSingleObject(g_theme.hAnimationStop, THEME_ANIMATION_TICK_MS))
+            {
+                break;
+            }
+            fTick = TRUE;
+        }
+        if (fTick && (0 == InterlockedExchange(&g_theme.lTickPending, 1)))
+        {
+            if (!PostMessage(g_theme.hwndAnimationTimer, g_theme.uAnimationTickMsg, 0, 0))
+            {
+                /* Window gone or queue full: drop the pending mark so the next interval retries. */
+                InterlockedExchange(&g_theme.lTickPending, 0);
+            }
+        }
+    }
+    return 0u;
+}
+
+static FORCEINLINE void ThemeStartAnimationThread(void)
+{
+    if (0u == g_theme.uAnimationTickMsg)
+    {
+        g_theme.uAnimationTickMsg = RegisterWindowMessage(TEXT("Win32XThemeAnimationTick.v1"));
+    }
+    if (g_theme.hAnimationThread || (0u == g_theme.uAnimationTickMsg))
+    {
+        return;   /* already running, or no tick-message id available */
+    }
+    if (!g_theme.hwndAnimationTimer)
+    {
+        g_theme.hwndAnimationTimer = ThemeCreateTickWindow();
+    }
+    if (!g_theme.hwndAnimationTimer)
+    {
+        return;
+    }
+    if (!g_theme.hAnimationStop)
+    {
+        g_theme.hAnimationStop = CreateEvent(NULL, TRUE, FALSE, NULL);   /* manual-reset, nonsignaled */
+    }
+    else
+    {
+        (void)ResetEvent(g_theme.hAnimationStop);
+    }
+    if (!g_theme.hAnimationStop)
+    {
+        return;
+    }
+    /* High-resolution periodic clock. Falls back to a normal waitable timer, then (in the thread) to a
+       timeout poll, if the high-res flag is unsupported. */
+    if (!g_theme.hAnimationTimerObj)
+    {
+        g_theme.hAnimationTimerObj = CreateWaitableTimerEx(NULL, NULL,
+                                        CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+        if (!g_theme.hAnimationTimerObj)
+        {
+            g_theme.hAnimationTimerObj = CreateWaitableTimer(NULL, FALSE, NULL);
+        }
+    }
+    if (g_theme.hAnimationTimerObj)
+    {
+        LARGE_INTEGER liDue;
+        liDue.QuadPart = -((LONGLONG)THEME_ANIMATION_TICK_MS * 10000);   /* relative, 100ns units */
+        (void)SetWaitableTimer(g_theme.hAnimationTimerObj, &liDue, (LONG)THEME_ANIMATION_TICK_MS,
+                               NULL, NULL, FALSE);
+    }
+    InterlockedExchange(&g_theme.lTickPending, 0);
+    g_theme.hAnimationThread = CreateThread(NULL, 0, ThemeAnimationTickThread, NULL, 0, NULL);
 }
 
 static FORCEINLINE BOOL ThemePublishBroadcastPaintState(void)
@@ -2085,6 +2254,24 @@ static BOOL ThemeHandleDeferredMessage(LRESULT* plr)
     return TRUE;
 }
 
+/* Absorb a redundant WM_THEMECHANGED during a managed transition -- but only while the live (or pending)
+   transition is heading to the SAME target this broadcast reflects, so a quick subsequent switch to a
+   DIFFERENT target falls through and re-arms (see the WM_THEMECHANGED case for the full rationale).
+   DECLSPEC_NOINLINE keeps its local off the ThemeHandleWindowMessage dispatcher frame, which is already
+   at the one-page stack-probe threshold (__chkstk, unresolvable in this /NODEFAULTLIB build). */
+static DECLSPEC_NOINLINE BOOL ThemeHandleThemeChangedMessage(LRESULT* plr)
+{
+    BOOL fRequestedDark;
+
+    if ((g_theme.fAnimatingBackground || g_theme.fPendingThemeChange) &&
+        (ThemeReadEffectiveDarkMode(&fRequestedDark) == g_theme.fAnimationToDark))
+    {
+        *plr = 0;
+        return TRUE;
+    }
+    return FALSE;
+}
+
 BOOL WINAPI ThemeHandleWindowMessage(
     HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT uDeferredMsg, LRESULT* plr)
 {
@@ -2099,17 +2286,27 @@ BOOL WINAPI ThemeHandleWindowMessage(
         case WM_PAINT:
             return ThemeHandlePaintMessage(hwnd, plr);
 
-        case WM_TIMER:
-            if (THEME_ANIMATION_TIMER_ID == wParam)
+        case WM_SETTINGCHANGE:
+            return ThemeHandleSettingChangeMessage(hwnd, lParam, uDeferredMsg, plr);
+
+        case WM_THEMECHANGED:
+            /* A full Settings switch broadcasts WM_THEMECHANGED to every window. While we are running a
+               managed dark-mode transition we already drive control/window theming ourselves (SetWindowTheme
+               on the registered windows) and cross-fade the surfaces on the animation clock; letting
+               DefWindowProc re-theme on each broadcast runs a redundant SYNCHRONOUS comctl re-theme that
+               competes with the crossfade and -- in the real Settings (input) case -- stalls the GUI thread
+               long enough that the first animation frame paints after the transition window has elapsed, so
+               the fade snaps to the target. Absorb it while a change is in flight -- BUT only when the live
+               (or pending) transition is heading to the SAME target this broadcast reflects. A quick
+               subsequent switch to a DIFFERENT target must NOT be swallowed: fall through so the normal
+               WM_SETTINGCHANGE path re-arms the fade to the new target (otherwise the fade keeps running to
+               the now-stale target and controls never re-theme to the new one). Outside a transition,
+               likewise fall through so controls reload normally. */
+            if (ThemeHandleThemeChangedMessage(plr))
             {
-                ThemeOnAnimationTick();
-                *plr = 0;
                 return TRUE;
             }
             break;
-
-        case WM_SETTINGCHANGE:
-            return ThemeHandleSettingChangeMessage(hwnd, lParam, uDeferredMsg, plr);
 
         case WM_NCACTIVATE:
         case WM_NCPAINT:
@@ -2154,6 +2351,15 @@ BOOL WINAPI ThemeHandleWindowMessage(
             if (uMsg == uDeferredMsg)
             {
                 return ThemeHandleDeferredMessage(plr);
+            }
+            if (g_theme.uAnimationTickMsg && (uMsg == g_theme.uAnimationTickMsg))
+            {
+                /* Posted animation tick (ThemeAnimationTickThread). Clear the pending mark first so the
+                   thread may queue the next tick even while this one's paints run. */
+                InterlockedExchange(&g_theme.lTickPending, 0);
+                ThemeOnAnimationTick();
+                *plr = 0;
+                return TRUE;
             }
             break;
     }

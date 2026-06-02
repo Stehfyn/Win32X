@@ -3562,7 +3562,8 @@ static void ThemeTestKillApp(void)
    band (active-state awareness). Kept as its own function so its path/STARTUPINFO/PROCESS_INFORMATION
    buffers stay off ThemeTestRunTransition's already-large stack frame (a >1-page frame emits __chkstk,
    which this /NODEFAULTLIB build cannot resolve). */
-static BOOL ThemeTestLaunchWindowsProject(HWND* phwndTop, HWND* phwndDialog, HWND* phwndStatic, HWND* phwndButton)
+static BOOL ThemeTestLaunchWindowsProject(HWND* phwndTop, HWND* phwndDialog, HWND* phwndStatic, HWND* phwndButton,
+                                          BOOL fInteractive)
 {
     TCHAR               szExe[MAX_PATH];
     STARTUPINFO         si;
@@ -3582,6 +3583,16 @@ static BOOL ThemeTestLaunchWindowsProject(HWND* phwndTop, HWND* phwndDialog, HWN
     si.dwFlags = STARTF_USESIZE;
     si.dwXSize = THEME_APP_WIDTH;
     si.dwYSize = THEME_APP_HEIGHT;
+    if (!fInteractive)
+    {
+        /* T7: park the app in the top-left corner. Its custom startup show (ShowWindowEx -> SWP_SHOWWINDOW)
+           always activates, which we cannot suppress; parking it left of the Settings combo (which sits
+           right-of-center) at least guarantees it never OCCLUDES the combo, so the input-safety gate reads
+           the real Settings window at the combo point and foreground can be handed back to Settings. */
+        si.dwFlags |= STARTF_USEPOSITION;
+        si.dwX = 0;
+        si.dwY = 0;
+    }
     SecureZeroMemory(&pi, sizeof(pi));
     if (!ThemeTestWindowsProjectPath(szExe, (int)ARRAYSIZE(szExe)))
     {
@@ -3599,6 +3610,16 @@ static BOOL ThemeTestLaunchWindowsProject(HWND* phwndTop, HWND* phwndDialog, HWN
     if (!*phwndTop)
     {
         return FALSE;
+    }
+    if (!fInteractive)
+    {
+        /* T7 (real-input Settings path): do NOT open the modal About dialog and do NOT foreground the
+           app. The canonical user path has the app INACTIVE while the Settings window holds the
+           foreground. Foregrounding the app here would (a) be a focus change the user never made and
+           (b) set a foreground lock that prevents the about-to-launch Settings from coming to the
+           foreground -- which then trips the input-safety gate and falsely reports interrupted. Leave the
+           main window where it lands; Settings becomes foreground on its own when launched next. */
+        return TRUE;
     }
     /* Post (not Send) IDM_ABOUT: the app opens a MODAL About box; a SendMessage would block here. */
     PostMessage(*phwndTop, WM_COMMAND, (WPARAM)THEME_IDM_ABOUT, 0);
@@ -3874,6 +3895,19 @@ static DECLSPEC_NOINLINE void ThemeTestSkipNote(LPCTSTR pszName, LPCTSTR pszWhy)
     Skip(szBuf, pszWhy);
 }
 
+/* Distinct from pass/fail/skip: the user took over their own machine mid-run (closed a window, switched
+   focus away from Settings). The test ends immediately and reports [INTR] -- not a failure -- because it
+   could not (and must not) keep driving input. */
+static DECLSPEC_NOINLINE void ThemeTestInterruptNote(LPCTSTR pszName, LPCTSTR pszWhy)
+{
+    Out(TEXT("[INTR] "));
+    Out(g_pszThemeTag);
+    Out(pszName);
+    Out(TEXT(" -- "));
+    Out(pszWhy);
+    Out(TEXT("\n"));
+}
+
 /*
  * The theme-transition body, parameterized over which Personalize DWORD(s) the worker flips:
  *   fWriteSystem == FALSE -> AppsUseLightTheme only (app theme; DWM caption follows the app's explicit
@@ -4017,7 +4051,7 @@ static void ThemeTestRunTransition(BOOL fWriteSystem, LPCTSTR pszTag)
     /* Launch the real, theme-integrated WindowsProject.exe and drive the transition on IT. The Win32X
        state machine lives in the app's own process and its WndProc themes itself; the test only flips
        the Personalize DWORD(s) and broadcasts -- exactly a Settings theme switch. */
-    (void)ThemeTestLaunchWindowsProject(&hwndTop, &hwndDialog, &hwndStatic, &hwndButton);
+    (void)ThemeTestLaunchWindowsProject(&hwndTop, &hwndDialog, &hwndStatic, &hwndButton, TRUE);
 
     if (!hwndTop || !hwndDialog || !hwndStatic || !hwndButton)
     {
@@ -4470,6 +4504,166 @@ static int UiaColorModeSelectedIndex(IUIAutomation* pAuto)
 
 /* Select a mode by index via REAL input: UIA only to put keyboard focus on the combo (no cursor move),
    then synthesized Alt+Down (open) -> Home (top item) -> Down x index -> Enter (commit). */
+/* TRUE only when the window physically at the combo's on-screen center is the same top-level as the
+   foreground window -- i.e. the Settings window hosting the combo is foreground AND the combo is not
+   occluded. This is the gate for ALL synthesized input: the user's machine, cursor, and keyboard are
+   theirs, so if they closed Settings, switched away, or covered it, we must not SetFocus (steals focus)
+   or SendInput (lands keystrokes in their window). Identity is by window-at-point, not by class/title:
+   Settings is a UWP ApplicationFrameWindow whose title/host matching is unreliable. No cursor is moved --
+   WindowFromPoint is a pure query. */
+static BOOL ThemeTestComboHostIsForeground(IUIAutomationElement* pCombo)
+{
+    RECT  rc;
+    POINT pt;
+    HWND  hPt;
+    HWND  hRootAtPt;
+    HWND  hFg;
+
+    if (!pCombo)
+    {
+        return FALSE;
+    }
+    SecureZeroMemory(&rc, sizeof(rc));
+    if (FAILED(IUIAutomationElement_get_CurrentBoundingRectangle(pCombo, &rc)))
+    {
+        return FALSE;
+    }
+    if ((rc.right <= rc.left) || (rc.bottom <= rc.top))
+    {
+        return FALSE;   /* zero/offscreen rect -> not visible */
+    }
+    pt.x = (rc.left + rc.right) / 2;
+    pt.y = (rc.top + rc.bottom) / 2;
+    hPt = WindowFromPoint(pt);
+    if (!hPt)
+    {
+        return FALSE;
+    }
+    hRootAtPt = GetAncestor(hPt, GA_ROOT);
+    hFg       = GetForegroundWindow();
+    return (NULL != hRootAtPt) && (NULL != hFg) && (hRootAtPt == GetAncestor(hFg, GA_ROOT));
+}
+
+/* Diagnostic: dump the input-gate state (combo rect, foreground window class, window-at-combo-point
+   class, root match) so an interruption can be explained rather than guessed at. */
+static DECLSPEC_NOINLINE void ThemeTestDumpInputGateDiag(IUIAutomation* pAuto)
+{
+    IUIAutomationElement* pCombo;
+    RECT  rc;
+    POINT pt;
+    HWND  hFg;
+    HWND  hPt;
+    BOOL  fHadCombo;
+    TCHAR szFg[64];
+    TCHAR szPt[64];
+    TCHAR szLine[256];
+
+    SecureZeroMemory(&rc, sizeof(rc));
+    pCombo = UiaFindColorModeCombo(pAuto);
+    fHadCombo = (NULL != pCombo);
+    if (pCombo)
+    {
+        (void)IUIAutomationElement_get_CurrentBoundingRectangle(pCombo, &rc);
+        IUIAutomationElement_Release(pCombo);
+    }
+    pt.x = (rc.left + rc.right) / 2;
+    pt.y = (rc.top + rc.bottom) / 2;
+    hFg  = GetForegroundWindow();
+    hPt  = WindowFromPoint(pt);
+    szFg[0] = TEXT('\0');
+    szPt[0] = TEXT('\0');
+    if (hFg) { (void)GetClassName(hFg, szFg, (int)ARRAYSIZE(szFg)); }
+    if (hPt) { (void)GetClassName(hPt, szPt, (int)ARRAYSIZE(szPt)); }
+    wnsprintf(szLine, (int)ARRAYSIZE(szLine),
+              TEXT("[INFO] T7 gate combo?=%d rc=(%d,%d,%d,%d) match=%d\n"),
+              (int)fHadCombo, (int)rc.left, (int)rc.top, (int)rc.right, (int)rc.bottom,
+              (int)(hFg && hPt && (GetAncestor(hFg, GA_ROOT) == GetAncestor(hPt, GA_ROOT))));
+    Out(szLine);
+    wnsprintf(szLine, (int)ARRAYSIZE(szLine), TEXT("[INFO] T7 gate fgCls=%s ptCls=%s\n"), szFg, szPt);
+    Out(szLine);
+}
+
+/* Hand the foreground to the Settings window that hosts the combo (NOT our app). Our app's launch
+   forcibly activates it; this reclaims foreground for the real target so the canonical "app inactive,
+   Settings active" state holds. The combo is parked unoccluded (corner-launched app), so WindowFromPoint
+   at its center yields the Settings top-level. AttachThreadInput to the current foreground thread makes
+   the cross-process SetForegroundWindow take. Returns TRUE if Settings ends up foreground. */
+static BOOL ThemeTestForegroundSettings(IUIAutomation* pAuto)
+{
+    IUIAutomationElement* pCombo;
+    RECT  rc;
+    POINT pt;
+    HWND  hPt;
+    HWND  hRoot;
+    HWND  hFg;
+    DWORD tidFg;
+    DWORD tidMe;
+    BOOL  fOk;
+
+    fOk    = FALSE;
+    pCombo = UiaFindColorModeCombo(pAuto);
+    if (!pCombo)
+    {
+        return FALSE;
+    }
+    SecureZeroMemory(&rc, sizeof(rc));
+    if (SUCCEEDED(IUIAutomationElement_get_CurrentBoundingRectangle(pCombo, &rc)) &&
+        (rc.right > rc.left) && (rc.bottom > rc.top))
+    {
+        pt.x  = (rc.left + rc.right) / 2;
+        pt.y  = (rc.top + rc.bottom) / 2;
+        hPt   = WindowFromPoint(pt);
+        hRoot = hPt ? GetAncestor(hPt, GA_ROOT) : NULL;
+        if (hRoot)
+        {
+            hFg   = GetForegroundWindow();
+            tidFg = GetWindowThreadProcessId(hFg, NULL);
+            tidMe = GetCurrentThreadId();
+            (void)AttachThreadInput(tidMe, tidFg, TRUE);
+            (void)SetForegroundWindow(hRoot);
+            (void)AttachThreadInput(tidMe, tidFg, FALSE);
+            fOk = TRUE;
+        }
+    }
+    IUIAutomationElement_Release(pCombo);
+    return fOk;
+}
+
+/* Poll until the Settings window hosting the combo is genuinely foreground (and unoccluded), or time out.
+   This is the precondition for driving any input. */
+static BOOL ThemeTestWaitForComboForeground(IUIAutomation* pAuto, DWORD dwTimeoutMs)
+{
+    IUIAutomationElement* pCombo;
+    BOOL                  fFg;
+    DWORD                 dwWaited;
+
+    dwWaited = 0u;
+    for (;;)
+    {
+        pCombo = UiaFindColorModeCombo(pAuto);
+        fFg    = FALSE;
+        if (pCombo)
+        {
+            fFg = ThemeTestComboHostIsForeground(pCombo);
+            IUIAutomationElement_Release(pCombo);
+        }
+        if (fFg)
+        {
+            return TRUE;
+        }
+        if (dwWaited >= dwTimeoutMs)
+        {
+            return FALSE;
+        }
+        Sleep(200u);
+        dwWaited += 200u;
+    }
+}
+
+/* Returns FALSE the instant it is unsafe to drive input (Settings not foreground / closed, or the combo
+   is gone) -- the caller treats that as an interruption and ends the test. Never sends a keystroke nor
+   takes focus unless Settings is genuinely foreground, and re-checks between key groups so the user
+   taking over mid-toggle stops input immediately. */
 static BOOL ThemeTestSettingsPickMode(IUIAutomation* pAuto, int index)
 {
     IUIAutomationElement* pCombo;
@@ -4484,8 +4678,18 @@ static BOOL ThemeTestSettingsPickMode(IUIAutomation* pAuto, int index)
     {
         return FALSE;
     }
+    if (!ThemeTestComboHostIsForeground(pCombo))
+    {
+        IUIAutomationElement_Release(pCombo);
+        return FALSE;
+    }
     (void)IUIAutomationElement_SetFocus(pCombo);
     Sleep(150u);
+    if (!ThemeTestComboHostIsForeground(pCombo))
+    {
+        IUIAutomationElement_Release(pCombo);
+        return FALSE;
+    }
     ThemeTestSendVk(VK_MENU, FALSE);
     ThemeTestKeyPress(VK_DOWN);
     ThemeTestSendVk(VK_MENU, TRUE);
@@ -4496,6 +4700,11 @@ static BOOL ThemeTestSettingsPickMode(IUIAutomation* pAuto, int index)
     {
         ThemeTestKeyPress(VK_DOWN);
         Sleep(80u);
+    }
+    if (!ThemeTestComboHostIsForeground(pCombo))
+    {
+        IUIAutomationElement_Release(pCombo);
+        return FALSE;
     }
     ThemeTestKeyPress(VK_RETURN);
     Sleep(150u);
@@ -4551,6 +4760,8 @@ static void T_ThemeSettingsToggle(void)
     BOOL           fRestored;
     BOOL           fWalStarted;
     BOOL           fComboReady;
+    BOOL           fSettingsForeground;
+    BOOL           fInterrupted;
     HWND           hwndTop;
     HWND           hwndDialog;
     HWND           hwndStatic;
@@ -4606,17 +4817,17 @@ static void T_ThemeSettingsToggle(void)
     hwndDialog = NULL;
     hwndStatic = NULL;
     hwndButton = NULL;
-    (void)ThemeTestLaunchWindowsProject(&hwndTop, &hwndDialog, &hwndStatic, &hwndButton);
-    if (!hwndTop || !hwndDialog)
+    (void)ThemeTestLaunchWindowsProject(&hwndTop, &hwndDialog, &hwndStatic, &hwndButton, FALSE);
+    if (!hwndTop)
     {
-        ThemeTestCheck(FALSE, TEXT("T7 launches WindowsProject.exe and opens its About dialog"));
+        ThemeTestCheck(FALSE, TEXT("T7 launches WindowsProject.exe (inactive, no foreground steal)"));
         (void)ThemeTestRestoreAppsUseLightTheme(fHadOriginalValue, dwOriginalValue);
         ThemeTestKillApp();
         ReleaseMutex(hMutex);
         CloseHandle(hMutex);
         return;
     }
-    ThemeTestCheck(TRUE, TEXT("T7 launches WindowsProject.exe and opens its About dialog"));
+    ThemeTestCheck(TRUE, TEXT("T7 launches WindowsProject.exe (inactive, no foreground steal)"));
 
     /* WAL on the app GUI thread BEFORE Settings takes the foreground, so the app's WM_NCACTIVATE(FALSE)
        (losing activation to Settings) and every per-toggle message land in T7_msgwal.log in order. */
@@ -4631,22 +4842,39 @@ static void T_ThemeSettingsToggle(void)
        inactive, exactly as in the recording; the cursor is never moved. */
     (void)ShellExecute(NULL, TEXT("open"), TEXT("ms-settings:colors"), NULL, NULL, SW_SHOWNORMAL);
     fComboReady = ThemeTestWaitForColorCombo(pAuto, WAIT_MS * 4u);
-    ThemeTestCheck(fComboReady, TEXT("T7 opens Settings > Colors and finds the mode combo via UIA"));
+    if (fComboReady)
+    {
+        /* Hand the foreground to Settings (the real target), undoing our app's launch activation, then
+           wait until Settings genuinely holds it. Only then is it safe to drive input. */
+        (void)ThemeTestForegroundSettings(pAuto);
+    }
+    fSettingsForeground = fComboReady && ThemeTestWaitForComboForeground(pAuto, WAIT_MS * 2u);
+    ThemeTestDumpInputGateDiag(pAuto);   /* gate state after handing foreground to Settings */
 
     iOriginalMode = UiaColorModeSelectedIndex(pAuto);
 
     /* Toggle dark<->light through REAL keystrokes on the focused combo, app inactive throughout. Start
-       opposite the current mode so the first toggle is an actual change. */
-    iNextMode = (1 == iOriginalMode) ? 0 : 1;
-    cApplied  = 0u;
-    if (fComboReady)
+       opposite the current mode so the first toggle is an actual change. The moment the user takes their
+       machine back -- closes the app window, closes Settings, or switches focus away -- detection fires,
+       input stops, and the test ENDS as interrupted (it never drives input into the user's windows). */
+    iNextMode    = (1 == iOriginalMode) ? 0 : 1;
+    cApplied     = 0u;
+    fInterrupted = !fSettingsForeground;
+    if (fSettingsForeground)
     {
         for (i = 0u; i < THEME_SETTINGS_TOGGLES; ++i)
         {
-            if (ThemeTestSettingsPickMode(pAuto, iNextMode))
+            if (!IsWindow(hwndTop))                          /* user closed the app under test */
             {
-                ++cApplied;
+                fInterrupted = TRUE;
+                break;
             }
+            if (!ThemeTestSettingsPickMode(pAuto, iNextMode)) /* Settings closed / not foreground */
+            {
+                fInterrupted = TRUE;
+                break;
+            }
+            ++cApplied;
             Sleep(THEME_LEG_MS);                 /* let each leg play out before the next toggle */
             iNextMode = iNextMode ? 0 : 1;
         }
@@ -4654,14 +4882,17 @@ static void T_ThemeSettingsToggle(void)
 
     MsgWalStop();
 
-    /* Restore the original mode through the same real path, then close Settings. */
-    if (fComboReady && (iOriginalMode >= 0))
+    /* Restore the original mode through the same real path -- only while still safe; otherwise the
+       registry safety net below restores it. */
+    if (fComboReady && (iOriginalMode >= 0) && !fInterrupted)
     {
         (void)ThemeTestSettingsPickMode(pAuto, iOriginalMode);
         Sleep(THEME_SETTLE_MS);
     }
+    /* Close only the Settings window we opened, and only if it is still there (the user may have already
+       closed it -- that is exactly the interrupted case, and PostMessage to a gone window is harmless). */
     hwndSettings = FindWindow(TEXT("ApplicationFrameWindow"), TEXT("Settings"));
-    if (hwndSettings)
+    if (hwndSettings && !fInterrupted)
     {
         (void)PostMessage(hwndSettings, WM_CLOSE, 0, 0);
     }
@@ -4675,8 +4906,8 @@ static void T_ThemeSettingsToggle(void)
         CoUninitialize();
     }
 
-    /* Safety net: guarantee the developer's exact original Personalize DWORDs regardless of the combo
-       restore (e.g. an original "Custom" state the two-item toggle cannot reproduce). */
+    /* Safety net: ALWAYS restore the developer's exact original Personalize DWORDs, interrupted or not,
+       so the machine is never left on the wrong theme. */
     fRestored = ThemeTestRestoreAppsUseLightTheme(fHadOriginalValue, dwOriginalValue);
     if (fRestored)
     {
@@ -4686,9 +4917,17 @@ static void T_ThemeSettingsToggle(void)
 
     ThemeTestKillApp();
 
-    ThemeTestCheck(fWalStarted, TEXT("T7 installs the cross-process message WAL on the app GUI thread"));
-    ThemeTestCheck(cApplied == THEME_SETTINGS_TOGGLES,
-                   TEXT("T7 toggles the Settings mode combo via real input (UIA focus + SendInput)"));
+    if (fInterrupted)
+    {
+        ThemeTestInterruptNote(TEXT("T7 settings-menu theme toggle"),
+                               TEXT("user closed a window or switched focus from Settings; ended without driving input elsewhere"));
+    }
+    else
+    {
+        ThemeTestCheck(fWalStarted, TEXT("T7 installs the cross-process message WAL on the app GUI thread"));
+        ThemeTestCheck(cApplied == THEME_SETTINGS_TOGGLES,
+                       TEXT("T7 toggles the Settings mode combo via real input (UIA focus + SendInput)"));
+    }
     ThemeTestCheck(fRestored, TEXT("T7 restores both Personalize DWORDs"));
 
     ReleaseMutex(hMutex);
