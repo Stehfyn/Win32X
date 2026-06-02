@@ -33,6 +33,8 @@
 #include <mfreadwrite.h>
 #include <commctrl.h>
 #include <shlwapi.h>
+#include <shellapi.h>
+#include <uiautomation.h>
 #include "Win32X/win32x.h"
 #include "Win32X/uxthemex.h"
 
@@ -265,7 +267,8 @@ static PFN_TEST volatile g_rgTests[] =
     T_StartupRect,
     T_Hardening,
     T_Position,
-    T_ThemeTransition
+    T_ThemeTransition,
+    T_ThemeSettingsToggle
 };
 
 void __cdecl TestEntry(void)

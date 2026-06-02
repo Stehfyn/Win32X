@@ -16,7 +16,7 @@ target_include_directories(Tests PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 
 target_link_libraries(Tests PRIVATE
   Win32X::Win32X
-  kernel32 user32 advapi32 ole32 shell32 shlwapi)
+  kernel32 user32 advapi32 ole32 oleaut32 shell32 shlwapi)
 
 set_target_properties(Tests PROPERTIES INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
 
@@ -32,5 +32,17 @@ endif()
 if(CMAKE_GENERATOR MATCHES "Visual Studio")
   set_target_properties(Tests PROPERTIES VS_GLOBAL_RunCodeAnalysis false)
 endif()
+
+# Cross-process message-WAL hook (msgwal.h / msgwal_hook.c): Tests.exe installs WH_GETMESSAGE +
+# WH_CALLWNDPROC from this DLL onto the launched WindowsProject.exe GUI thread to log the exact message
+# sequence during a theme transition. Ordinary DLL (default CRT) -- it is injected into the app's
+# process, which is unrelated to Tests.exe's CRT-free link. Co-located with Tests.exe via the global
+# RUNTIME_OUTPUT_DIRECTORY so Tests.exe can LoadLibrary it from its own folder.
+add_library(MsgWalHook SHARED msgwal_hook.c)
+target_link_libraries(MsgWalHook PRIVATE kernel32 user32)
+if(MSVC)
+  target_compile_options(MsgWalHook PRIVATE /W3)
+endif()
+add_dependencies(Tests MsgWalHook)
 
 add_test(NAME Win32X.Tests COMMAND Tests)

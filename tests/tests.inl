@@ -5,6 +5,8 @@
  * rule. Callees precede callers so no forward prototypes are needed.
  */
 
+#include "msgwal.h"
+
 static LRESULT CALLBACK TestWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
     return DefWindowProc(hwnd, uMsg, wParam, lParam);
@@ -40,6 +42,17 @@ static HANDLE g_hThemeStartEvent;
 static HANDLE g_hThemeAppProcess;   /* launched WindowsProject.exe, terminated at teardown */
 static HWND   g_hwndThemeTop;
 static HWND   g_hwndThemeDialog;
+
+/* Cross-process message-WAL state (see msgwal.h). The hooks live in MsgWalHook.dll, injected into the
+   app GUI thread; these handles + the logger thread live here in Tests.exe. */
+static HANDLE     g_hMsgWalMap;
+static MSGWAL_HDR* g_pMsgWalHdr;
+static HMODULE    g_hMsgWalDll;
+static HHOOK      g_hMsgWalHookGet;
+static HHOOK      g_hMsgWalHookCwp;
+static HANDLE     g_hMsgWalLogThread;
+static HANDLE     g_hMsgWalFile;
+static volatile LONG g_lMsgWalStop;
 
 #define THEME_IDM_ABOUT 104   /* IDM_ABOUT from examples/Resource.h: opens WindowsProject's About box */
 
@@ -616,6 +629,16 @@ static BOOL ThemeTestBroadcastImmersiveColorSet(void)
                                      0,
                                      (LPARAM)TEXT("ImmersiveColorSet"));
     return 0 <= lResult;
+}
+
+/* The exact real-Settings broadcast: disassembling uxtheme.dll and themeui.dll shows a light/dark switch
+   flips the HKCU Personalize DWORD(s), then calls
+   SendNotifyMessageW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, L"ImmersiveColorSet") -- an asynchronous,
+   non-blocking fan-out to every top-level window. T7 (the inactive Settings-toggle test) uses this so it
+   reproduces the user path from the screen recording, not the synchronous BroadcastSystemMessage above. */
+static BOOL ThemeTestSendNotifyImmersiveColorSet(void)
+{
+    return SendNotifyMessage(HWND_BROADCAST, WM_SETTINGCHANGE, 0, (LPARAM)TEXT("ImmersiveColorSet"));
 }
 
 static BOOL ThemeTestInitCommonControls(void)
@@ -3593,6 +3616,244 @@ static BOOL ThemeTestLaunchWindowsProject(HWND* phwndTop, HWND* phwndDialog, HWN
     return (NULL != *phwndButton) && (NULL != *phwndStatic);
 }
 
+/* ----- Cross-process window-message write-ahead log (see msgwal.h / msgwal_hook.c) ------------------ */
+
+/* Names for the messages that matter to the theme/activation/paint sequence; everything else logs by
+   hex id alone. ANSI: the log is written as bytes so it reads cleanly regardless of the UNICODE build. */
+static LPCSTR MsgWalMsgNameA(UINT message)
+{
+    switch (message)
+    {
+        case WM_ACTIVATE:                 return "WM_ACTIVATE";
+        case WM_SETFOCUS:                 return "WM_SETFOCUS";
+        case WM_KILLFOCUS:                return "WM_KILLFOCUS";
+        case WM_PAINT:                    return "WM_PAINT";
+        case WM_ERASEBKGND:               return "WM_ERASEBKGND";
+        case WM_SYSCOLORCHANGE:           return "WM_SYSCOLORCHANGE";
+        case WM_SETTINGCHANGE:            return "WM_SETTINGCHANGE";
+        case WM_ACTIVATEAPP:              return "WM_ACTIVATEAPP";
+        case WM_MOUSEACTIVATE:            return "WM_MOUSEACTIVATE";
+        case WM_NCCALCSIZE:               return "WM_NCCALCSIZE";
+        case WM_NCHITTEST:                return "WM_NCHITTEST";
+        case WM_NCPAINT:                  return "WM_NCPAINT";
+        case WM_NCACTIVATE:               return "WM_NCACTIVATE";
+        case WM_WINDOWPOSCHANGING:        return "WM_WINDOWPOSCHANGING";
+        case WM_WINDOWPOSCHANGED:         return "WM_WINDOWPOSCHANGED";
+        case WM_CTLCOLORMSGBOX:           return "WM_CTLCOLORMSGBOX";
+        case WM_CTLCOLOREDIT:             return "WM_CTLCOLOREDIT";
+        case WM_CTLCOLORBTN:              return "WM_CTLCOLORBTN";
+        case WM_CTLCOLORDLG:              return "WM_CTLCOLORDLG";
+        case WM_CTLCOLORSTATIC:           return "WM_CTLCOLORSTATIC";
+        case WM_TIMER:                    return "WM_TIMER";
+        case WM_COMMAND:                  return "WM_COMMAND";
+        case WM_SYSCOMMAND:               return "WM_SYSCOMMAND";
+        case 0x031A /*WM_THEMECHANGED*/:  return "WM_THEMECHANGED";
+        case 0x0320 /*WM_DWMCOLORIZATIONCOLORCHANGED*/: return "WM_DWMCOLORIZATIONCOLORCHANGED";
+        case 0x0090:                      return "WM_UAHINITMENU";
+        case 0x0091:                      return "WM_UAHDRAWMENU";
+        case 0x0092:                      return "WM_UAHDRAWMENUITEM";
+        case 0x0093:                      return "WM_UAHMEASUREMENUITEM";
+        case 0x0094:                      return "WM_UAHNCPAINTMENUPOPUP";
+        default:                          return "WM_?";
+    }
+}
+
+static void MsgWalWriteLine(const MSGWAL_REC* pRec, LONGLONG qpc0, LONGLONG qpcFreq)
+{
+    CHAR  szLine[256];
+    int   cch;
+    DWORD cbWritten;
+    LONG  lMs;
+
+    if (!g_hMsgWalFile || (0 == qpcFreq))
+    {
+        return;
+    }
+    lMs = (LONG)(((pRec->qpc - qpc0) * 1000) / qpcFreq);
+    cch = wnsprintfA(szLine, (int)ARRAYSIZE(szLine),
+                     "+%5ldms %-4hs h=%08lX%08lX %-22hs 0x%04X w=%08lX%08lX l=%08lX%08lX %hs\r\n",
+                     lMs,
+                     (MSGWAL_SRC_GET == pRec->dwSource) ? "GET" : "SENT",
+                     (DWORD)(pRec->hwnd >> 32), (DWORD)pRec->hwnd,
+                     MsgWalMsgNameA(pRec->message), pRec->message,
+                     (DWORD)(pRec->wParam >> 32), (DWORD)pRec->wParam,
+                     (DWORD)(pRec->lParam >> 32), (DWORD)pRec->lParam,
+                     pRec->szText);
+    if (cch > 0)
+    {
+        WriteFile(g_hMsgWalFile, szLine, (DWORD)cch, &cbWritten, NULL);
+    }
+}
+
+/* Single consumer: drain every committed-but-unread record. qpc0 is latched off the first record so the
+   timeline reads as +ms from the first logged message. */
+static void MsgWalDrain(LONGLONG* pQpc0, BOOL* pfHaveQpc0)
+{
+    MSGWAL_HDR* pHdr;
+    LONGLONG    w;
+
+    pHdr = g_pMsgWalHdr;
+    if (!pHdr)
+    {
+        return;
+    }
+    for (;;)
+    {
+        w = pHdr->writeIdx;
+        MemoryBarrier();
+        if (pHdr->readIdx >= w)
+        {
+            break;
+        }
+        {
+            MSGWAL_REC* pRec = &MSGWAL_RECS(pHdr)[pHdr->readIdx & (pHdr->capacity - 1)];
+            if (!*pfHaveQpc0)
+            {
+                *pQpc0 = pRec->qpc;
+                *pfHaveQpc0 = TRUE;
+            }
+            MsgWalWriteLine(pRec, *pQpc0, pHdr->qpcFreq);
+        }
+        ++pHdr->readIdx;
+    }
+}
+
+static DWORD WINAPI MsgWalLoggerThread(LPVOID pv)
+{
+    LONGLONG qpc0;
+    BOOL     fHaveQpc0;
+    BOOL     fStop;
+
+    UNREFERENCED_PARAMETER(pv);
+    qpc0 = 0;
+    fHaveQpc0 = FALSE;
+    for (;;)
+    {
+        fStop = (0 != InterlockedCompareExchange(&g_lMsgWalStop, 0, 0));
+        MsgWalDrain(&qpc0, &fHaveQpc0);
+        if (fStop)
+        {
+            MsgWalDrain(&qpc0, &fHaveQpc0);   /* final sweep after the producer has stopped */
+            break;
+        }
+        Sleep(2u);
+    }
+    return 0u;
+}
+
+/* Stand up the shared ring, the log file, and the two hooks scoped to the app's GUI thread, then start
+   the logger. The hook DLL is loaded from Tests.exe's own directory (SetWindowsHookEx hands that path to
+   the OS to inject into the app). */
+static BOOL MsgWalStart(HWND hwndTop, LPCTSTR pszLogName)
+{
+    TCHAR         szDir[MAX_PATH];
+    TCHAR         szDll[MAX_PATH];
+    DWORD         dwPid;
+    DWORD         dwTid;
+    LARGE_INTEGER freq;
+    HOOKPROC      pfnGet;
+    HOOKPROC      pfnCwp;
+
+    dwTid = GetWindowThreadProcessId(hwndTop, &dwPid);
+    if (0u == dwTid)
+    {
+        return FALSE;
+    }
+    g_hMsgWalMap = CreateFileMapping(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
+                                     (DWORD)((ULONGLONG)MSGWAL_TOTAL_BYTES >> 32),
+                                     (DWORD)((ULONGLONG)MSGWAL_TOTAL_BYTES & 0xFFFFFFFFu),
+                                     MSGWAL_MAPPING_NAME);
+    if (!g_hMsgWalMap)
+    {
+        return FALSE;
+    }
+    g_pMsgWalHdr = (MSGWAL_HDR*)MapViewOfFile(g_hMsgWalMap, FILE_MAP_WRITE, 0, 0, MSGWAL_TOTAL_BYTES);
+    if (!g_pMsgWalHdr)
+    {
+        return FALSE;
+    }
+    SecureZeroMemory(g_pMsgWalHdr, sizeof(MSGWAL_HDR));
+    QueryPerformanceFrequency(&freq);
+    g_pMsgWalHdr->qpcFreq        = freq.QuadPart;
+    g_pMsgWalHdr->capacity       = MSGWAL_CAPACITY;
+    g_pMsgWalHdr->recSize        = (DWORD)sizeof(MSGWAL_REC);
+    g_pMsgWalHdr->targetThreadId = dwTid;
+
+    g_hMsgWalFile = CreateFile(pszLogName, GENERIC_WRITE, FILE_SHARE_READ, NULL,
+                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (INVALID_HANDLE_VALUE == g_hMsgWalFile)
+    {
+        g_hMsgWalFile = NULL;
+    }
+
+    GetModuleFileName(NULL, szDir, (DWORD)ARRAYSIZE(szDir));
+    PathRemoveFileSpec(szDir);
+    wnsprintf(szDll, (int)ARRAYSIZE(szDll), TEXT("%s\\MsgWalHook.dll"), szDir);
+    g_hMsgWalDll = LoadLibrary(szDll);
+    if (!g_hMsgWalDll)
+    {
+        return FALSE;
+    }
+    pfnGet = (HOOKPROC)GetProcAddress(g_hMsgWalDll, "MsgWalGetMsgProc");
+    pfnCwp = (HOOKPROC)GetProcAddress(g_hMsgWalDll, "MsgWalCallWndProc");
+    if (!pfnGet || !pfnCwp)
+    {
+        return FALSE;
+    }
+    g_hMsgWalHookGet = SetWindowsHookEx(WH_GETMESSAGE, pfnGet, g_hMsgWalDll, dwTid);
+    g_hMsgWalHookCwp = SetWindowsHookEx(WH_CALLWNDPROC, pfnCwp, g_hMsgWalDll, dwTid);
+
+    g_lMsgWalStop = 0;
+    g_hMsgWalLogThread = CreateThread(NULL, 0, MsgWalLoggerThread, NULL, 0, NULL);
+    return (NULL != g_hMsgWalHookGet) && (NULL != g_hMsgWalHookCwp);
+}
+
+static void MsgWalStop(void)
+{
+    if (g_hMsgWalHookGet)
+    {
+        UnhookWindowsHookEx(g_hMsgWalHookGet);
+        g_hMsgWalHookGet = NULL;
+    }
+    if (g_hMsgWalHookCwp)
+    {
+        UnhookWindowsHookEx(g_hMsgWalHookCwp);
+        g_hMsgWalHookCwp = NULL;
+    }
+    /* Let any hook calls already in flight on the app GUI thread complete before the producer is declared
+       stopped, so the final sweep sees every committed record. */
+    Sleep(50u);
+    InterlockedExchange(&g_lMsgWalStop, 1);
+    if (g_hMsgWalLogThread)
+    {
+        WaitForSingleObject(g_hMsgWalLogThread, WAIT_MS);
+        CloseHandle(g_hMsgWalLogThread);
+        g_hMsgWalLogThread = NULL;
+    }
+    if (g_hMsgWalFile)
+    {
+        CloseHandle(g_hMsgWalFile);
+        g_hMsgWalFile = NULL;
+    }
+    if (g_pMsgWalHdr)
+    {
+        OutF(TEXT("[INFO] T6 msgwal records: %d\n"), (int)g_pMsgWalHdr->writeIdx);
+        OutF(TEXT("[INFO] T6 msgwal dropped: %d\n"), (int)g_pMsgWalHdr->dropped);
+        UnmapViewOfFile(g_pMsgWalHdr);
+        g_pMsgWalHdr = NULL;
+    }
+    if (g_hMsgWalMap)
+    {
+        CloseHandle(g_hMsgWalMap);
+        g_hMsgWalMap = NULL;
+    }
+    if (g_hMsgWalDll)
+    {
+        FreeLibrary(g_hMsgWalDll);
+        g_hMsgWalDll = NULL;
+    }
+}
+
 /* Tagged result emitters: prepend the active scenario tag (e.g. "[apps] ") to the result name so the
    apps-only and apps+system runs of the same transition body produce distinct, greppable lines. */
 /* DECLSPEC_NOINLINE: each carries a 192-TCHAR scratch buffer. Under the tests' LTCG, inlining them
@@ -3769,6 +4030,11 @@ static void ThemeTestRunTransition(BOOL fWriteSystem, LPCTSTR pszTag)
         return;
     }
     ThemeTestCheck(TRUE, TEXT("T6 launches WindowsProject.exe and opens its About dialog"));
+
+    /* Install the cross-process message WAL on the app GUI thread before the capture thread fires the
+       theme flip, so the full message sequence around the transition (WM_SETTINGCHANGE, WM_NCACTIVATE,
+       WM_TIMER ticks, the UAH menu paints) is logged to T6_msgwal.log in dispatch order. */
+    (void)MsgWalStart(hwndTop, TEXT("T6_msgwal.log"));
 
     GetWindowRect(hwndTop, &rcTopCreated);
     UpdateWindow(hwndTop);
@@ -4015,6 +4281,9 @@ static void ThemeTestRunTransition(BOOL fWriteSystem, LPCTSTR pszTag)
         ThemeTestPumpForMs(THEME_SETTLE_MS);
     }
 
+    /* Tear down the message WAL (unhook, drain, flush the log) before killing the app. */
+    MsgWalStop();
+
     /* These are another process's windows -- never DestroyWindow them; terminate the app instead. */
     ThemeTestKillApp();
 
@@ -4095,4 +4364,333 @@ static void ThemeTestRunTransition(BOOL fWriteSystem, LPCTSTR pszTag)
 static void T_ThemeTransition(void)
 {
     ThemeTestRunTransition(TRUE, TEXT("[apps+system] "));
+}
+
+/* ----- T7 real-input Settings driver: UIA to focus, SendInput keystrokes to actuate ---------------- */
+
+/* One synthesized key transition through the real input pipeline (SendInput): not a posted message, so
+   it drives the genuine WinUI input -> SelectionChanged -> apply path a literal click takes -- which is
+   why UIA SelectionItem.Select gave different results than a real click. */
+static void ThemeTestSendVk(WORD wVk, BOOL fUp)
+{
+    INPUT in;
+    SecureZeroMemory(&in, sizeof(in));
+    in.type       = INPUT_KEYBOARD;
+    in.ki.wVk     = wVk;
+    in.ki.dwFlags = fUp ? KEYEVENTF_KEYUP : 0u;
+    SendInput(1u, &in, (int)sizeof(INPUT));
+}
+
+static void ThemeTestKeyPress(WORD wVk)
+{
+    ThemeTestSendVk(wVk, FALSE);
+    Sleep(30u);
+    ThemeTestSendVk(wVk, TRUE);
+    Sleep(30u);
+}
+
+/* Find the Settings "Choose your mode" combo by its stable AutomationId (caller releases). */
+static IUIAutomationElement* UiaFindColorModeCombo(IUIAutomation* pAuto)
+{
+    IUIAutomationElement*   pRoot;
+    IUIAutomationElement*   pEl;
+    IUIAutomationCondition* pCond;
+    VARIANT                 v;
+
+    if (!pAuto)
+    {
+        return NULL;
+    }
+    pRoot = NULL;
+    if (FAILED(IUIAutomation_GetRootElement(pAuto, &pRoot)) || !pRoot)
+    {
+        return NULL;
+    }
+    pEl   = NULL;
+    pCond = NULL;
+    VariantInit(&v);
+    v.vt      = VT_BSTR;
+    v.bstrVal = SysAllocString(L"SystemSettings_Personalize_Color_ColorMode_ComboBox");
+    if (SUCCEEDED(IUIAutomation_CreatePropertyCondition(pAuto, UIA_AutomationIdPropertyId, v, &pCond)) && pCond)
+    {
+        (void)IUIAutomationElement_FindFirst(pRoot, TreeScope_Descendants, pCond, &pEl);
+        IUIAutomationCondition_Release(pCond);
+    }
+    VariantClear(&v);
+    IUIAutomationElement_Release(pRoot);
+    return pEl;
+}
+
+/* The combo's currently selected item name -> mode index (Light=0, Dark=1, Custom=2; -1 unknown). */
+static int UiaColorModeSelectedIndex(IUIAutomation* pAuto)
+{
+    IUIAutomationElement*          pCombo;
+    IUIAutomationSelectionPattern* pSel;
+    IUIAutomationElementArray*     pArr;
+    IUIAutomationElement*          pItem;
+    BSTR                           bsName;
+    int                            cItems;
+    int                            idx;
+
+    idx    = -1;
+    pCombo = UiaFindColorModeCombo(pAuto);
+    if (!pCombo)
+    {
+        return -1;
+    }
+    pSel = NULL;
+    if (SUCCEEDED(IUIAutomationElement_GetCurrentPatternAs(pCombo, UIA_SelectionPatternId,
+                                                           &IID_IUIAutomationSelectionPattern, (void**)&pSel)) && pSel)
+    {
+        pArr = NULL;
+        if (SUCCEEDED(IUIAutomationSelectionPattern_GetCurrentSelection(pSel, &pArr)) && pArr)
+        {
+            cItems = 0;
+            (void)IUIAutomationElementArray_get_Length(pArr, &cItems);
+            pItem = NULL;
+            if ((cItems > 0) && SUCCEEDED(IUIAutomationElementArray_GetElement(pArr, 0, &pItem)) && pItem)
+            {
+                bsName = NULL;
+                if (SUCCEEDED(IUIAutomationElement_get_CurrentName(pItem, &bsName)) && bsName)
+                {
+                    if (0 == lstrcmpiW(bsName, L"Light"))       idx = 0;
+                    else if (0 == lstrcmpiW(bsName, L"Dark"))   idx = 1;
+                    else if (0 == lstrcmpiW(bsName, L"Custom")) idx = 2;
+                    SysFreeString(bsName);
+                }
+                IUIAutomationElement_Release(pItem);
+            }
+            IUIAutomationElementArray_Release(pArr);
+        }
+        IUIAutomationSelectionPattern_Release(pSel);
+    }
+    IUIAutomationElement_Release(pCombo);
+    return idx;
+}
+
+/* Select a mode by index via REAL input: UIA only to put keyboard focus on the combo (no cursor move),
+   then synthesized Alt+Down (open) -> Home (top item) -> Down x index -> Enter (commit). */
+static BOOL ThemeTestSettingsPickMode(IUIAutomation* pAuto, int index)
+{
+    IUIAutomationElement* pCombo;
+    int                   k;
+
+    if (index < 0)
+    {
+        return FALSE;
+    }
+    pCombo = UiaFindColorModeCombo(pAuto);
+    if (!pCombo)
+    {
+        return FALSE;
+    }
+    (void)IUIAutomationElement_SetFocus(pCombo);
+    Sleep(150u);
+    ThemeTestSendVk(VK_MENU, FALSE);
+    ThemeTestKeyPress(VK_DOWN);
+    ThemeTestSendVk(VK_MENU, TRUE);
+    Sleep(250u);
+    ThemeTestKeyPress(VK_HOME);
+    Sleep(100u);
+    for (k = 0; k < index; ++k)
+    {
+        ThemeTestKeyPress(VK_DOWN);
+        Sleep(80u);
+    }
+    ThemeTestKeyPress(VK_RETURN);
+    Sleep(150u);
+    IUIAutomationElement_Release(pCombo);
+    return TRUE;
+}
+
+/* Poll for the Settings color-mode combo to appear after launch. */
+static BOOL ThemeTestWaitForColorCombo(IUIAutomation* pAuto, DWORD dwTimeoutMs)
+{
+    IUIAutomationElement* pCombo;
+    DWORD                 dwWaited;
+
+    dwWaited = 0u;
+    for (;;)
+    {
+        pCombo = UiaFindColorModeCombo(pAuto);
+        if (pCombo)
+        {
+            IUIAutomationElement_Release(pCombo);
+            return TRUE;
+        }
+        if (dwWaited >= dwTimeoutMs)
+        {
+            return FALSE;
+        }
+        Sleep(250u);
+        dwWaited += 250u;
+    }
+}
+
+/*
+ * T7 -- the high-priority user path from the screen recording, driven through REAL input: launch the
+ * real WindowsProject.exe (it goes inactive once Settings takes the foreground -- no focus-steal hack,
+ * the mouse is never touched), open Settings to Personalization > Colors, and toggle the "Choose your
+ * mode" combo light<->dark several times using SendInput keystrokes (UIA only locates + focuses the
+ * combo). This goes through the genuine Settings/uxtheme/themeui/DWM path a literal click takes -- the
+ * one that produced different results than the synthetic RegSetValue + broadcast. The cross-process
+ * message WAL (msgwal.h) records the exact sequence the inactive app receives to T7_msgwal.log; the
+ * original mode is restored through the same combo, with a registry restore as the safety net.
+ */
+#define THEME_SETTINGS_TOGGLES 4u
+
+static void T_ThemeSettingsToggle(void)
+{
+    DWORD          dwOriginalValue;
+    BOOL           fHadOriginalValue;
+    BOOL           fCanUseDarkMode;
+    UINT           i;
+    UINT           cApplied;
+    int            iOriginalMode;
+    int            iNextMode;
+    BOOL           fRestored;
+    BOOL           fWalStarted;
+    BOOL           fComboReady;
+    HWND           hwndTop;
+    HWND           hwndDialog;
+    HWND           hwndStatic;
+    HWND           hwndButton;
+    HWND           hwndSettings;
+    HRESULT        hrCo;
+    BOOL           fCoInit;
+    IUIAutomation* pAuto;
+    HANDLE         hMutex;
+    DWORD          dwWait;
+
+    g_pszThemeTag = TEXT("[settings] ");
+
+    hMutex = CreateMutex(NULL, FALSE, TEXT("Local\\Win32XThemeTransitionTest"));
+    if (!hMutex)
+    {
+        ThemeTestSkipNote(TEXT("T7 settings-menu theme toggle"), TEXT("theme transition mutex cannot be created"));
+        return;
+    }
+    dwWait = WaitForSingleObject(hMutex, WAIT_MS);
+    if ((WAIT_OBJECT_0 != dwWait) && (WAIT_ABANDONED != dwWait))
+    {
+        CloseHandle(hMutex);
+        ThemeTestCheck(FALSE, TEXT("T7 settings-menu theme toggle is not run concurrently"));
+        return;
+    }
+
+    pfnTestThemeStartup();
+    fCanUseDarkMode = pfnTestThemeCanUseDarkMode();
+    if (!fCanUseDarkMode)
+    {
+        ReleaseMutex(hMutex);
+        CloseHandle(hMutex);
+        ThemeTestSkipNote(TEXT("T7 settings-menu theme toggle"), TEXT("dark-mode uxtheme/DWM contract unavailable"));
+        return;
+    }
+    if (!ThemeTestReadAppsUseLightTheme(&dwOriginalValue, &fHadOriginalValue))
+    {
+        ReleaseMutex(hMutex);
+        CloseHandle(hMutex);
+        ThemeTestSkipNote(TEXT("T7 settings-menu theme toggle"), TEXT("AppsUseLightTheme cannot be read"));
+        return;
+    }
+    if (!ThemeTestInitCommonControls())
+    {
+        ReleaseMutex(hMutex);
+        CloseHandle(hMutex);
+        ThemeTestSkipNote(TEXT("T7 settings-menu theme toggle"), TEXT("common controls v6 unavailable"));
+        return;
+    }
+
+    hwndTop    = NULL;
+    hwndDialog = NULL;
+    hwndStatic = NULL;
+    hwndButton = NULL;
+    (void)ThemeTestLaunchWindowsProject(&hwndTop, &hwndDialog, &hwndStatic, &hwndButton);
+    if (!hwndTop || !hwndDialog)
+    {
+        ThemeTestCheck(FALSE, TEXT("T7 launches WindowsProject.exe and opens its About dialog"));
+        (void)ThemeTestRestoreAppsUseLightTheme(fHadOriginalValue, dwOriginalValue);
+        ThemeTestKillApp();
+        ReleaseMutex(hMutex);
+        CloseHandle(hMutex);
+        return;
+    }
+    ThemeTestCheck(TRUE, TEXT("T7 launches WindowsProject.exe and opens its About dialog"));
+
+    /* WAL on the app GUI thread BEFORE Settings takes the foreground, so the app's WM_NCACTIVATE(FALSE)
+       (losing activation to Settings) and every per-toggle message land in T7_msgwal.log in order. */
+    fWalStarted = MsgWalStart(hwndTop, TEXT("T7_msgwal.log"));
+
+    hrCo    = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    fCoInit = (S_OK == hrCo);
+    pAuto   = NULL;
+    (void)CoCreateInstance(&CLSID_CUIAutomation, NULL, CLSCTX_INPROC_SERVER, &IID_IUIAutomation, (void**)&pAuto);
+
+    /* Open the real Settings to Personalization > Colors. It takes the foreground -> the app goes
+       inactive, exactly as in the recording; the cursor is never moved. */
+    (void)ShellExecute(NULL, TEXT("open"), TEXT("ms-settings:colors"), NULL, NULL, SW_SHOWNORMAL);
+    fComboReady = ThemeTestWaitForColorCombo(pAuto, WAIT_MS * 4u);
+    ThemeTestCheck(fComboReady, TEXT("T7 opens Settings > Colors and finds the mode combo via UIA"));
+
+    iOriginalMode = UiaColorModeSelectedIndex(pAuto);
+
+    /* Toggle dark<->light through REAL keystrokes on the focused combo, app inactive throughout. Start
+       opposite the current mode so the first toggle is an actual change. */
+    iNextMode = (1 == iOriginalMode) ? 0 : 1;
+    cApplied  = 0u;
+    if (fComboReady)
+    {
+        for (i = 0u; i < THEME_SETTINGS_TOGGLES; ++i)
+        {
+            if (ThemeTestSettingsPickMode(pAuto, iNextMode))
+            {
+                ++cApplied;
+            }
+            Sleep(THEME_LEG_MS);                 /* let each leg play out before the next toggle */
+            iNextMode = iNextMode ? 0 : 1;
+        }
+    }
+
+    MsgWalStop();
+
+    /* Restore the original mode through the same real path, then close Settings. */
+    if (fComboReady && (iOriginalMode >= 0))
+    {
+        (void)ThemeTestSettingsPickMode(pAuto, iOriginalMode);
+        Sleep(THEME_SETTLE_MS);
+    }
+    hwndSettings = FindWindow(TEXT("ApplicationFrameWindow"), TEXT("Settings"));
+    if (hwndSettings)
+    {
+        (void)PostMessage(hwndSettings, WM_CLOSE, 0, 0);
+    }
+    if (pAuto)
+    {
+        IUIAutomation_Release(pAuto);
+        pAuto = NULL;
+    }
+    if (fCoInit)
+    {
+        CoUninitialize();
+    }
+
+    /* Safety net: guarantee the developer's exact original Personalize DWORDs regardless of the combo
+       restore (e.g. an original "Custom" state the two-item toggle cannot reproduce). */
+    fRestored = ThemeTestRestoreAppsUseLightTheme(fHadOriginalValue, dwOriginalValue);
+    if (fRestored)
+    {
+        (void)ThemeTestSendNotifyImmersiveColorSet();
+        ThemeTestPumpForMs(THEME_SETTLE_MS);
+    }
+
+    ThemeTestKillApp();
+
+    ThemeTestCheck(fWalStarted, TEXT("T7 installs the cross-process message WAL on the app GUI thread"));
+    ThemeTestCheck(cApplied == THEME_SETTINGS_TOGGLES,
+                   TEXT("T7 toggles the Settings mode combo via real input (UIA focus + SendInput)"));
+    ThemeTestCheck(fRestored, TEXT("T7 restores both Personalize DWORDs"));
+
+    ReleaseMutex(hMutex);
+    CloseHandle(hMutex);
 }

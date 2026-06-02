@@ -1566,6 +1566,13 @@ static FORCEINLINE BOOL ThemePublishBroadcastPaintState(void)
     {
         g_theme.dwAnimationStartTick = GetTickCount();
         g_theme.dwAnimationSnapTick = g_theme.dwAnimationStartTick;
+        /* Reset the shared progress to t=0 on every (re)arm. Otherwise the first paint triggered by
+           the invalidate below runs BEFORE the next timer tick refreshes the value, and reuses the
+           PREVIOUS leg's final progress (1000 = 100%). On the restore leg that paints the client
+           instantly at lerp(target,initial,100%) = fully restored -> the client snaps while the caption
+           is still at target. Whether the tick beats that first paint was the bimodal restore-leg race
+           (forward leg starts from a 0/plateau so it was never hit). */
+        g_theme.dwCaptionProgress = 0u;
     }
     ThemeSetRegisteredClassBrushes(fEffectiveDark);
     /* Reverse the dialog control sub-theme to the target now (DarkMode_Explorer -> Explorer on the way
