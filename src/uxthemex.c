@@ -630,6 +630,30 @@ static FORCEINLINE DWORD ThemeBackgroundTransitionMs(void)
 }
 
 /*
+ * DWM does not fade the immersive caption linearly -- it uses a front-loaded (ease-out) curve, so a
+ * straight luma lerp on the client/menu trails the caption mid-transition. This maps linear elapsed
+ * time onto a matching ease-out (rational p = t / (0.6 + 0.4t), i.e. 5e*d / (3d + 2e)) and returns
+ * the effective elapsed value the linear lerp should consume, so the client and menu track the
+ * caption's progress. The 0.6 weight was fit to the measured caption curve (the group otherwise sits
+ * ~10% behind the eased caption at the steep part of the fade).
+ */
+static FORCEINLINE DWORD ThemeEaseElapsed(DWORD dwElapsed, DWORD dwDuration)
+{
+    DWORDLONG ullDen;
+
+    if ((0u == dwDuration) || (dwElapsed >= dwDuration))
+    {
+        return dwDuration;
+    }
+    ullDen = ((DWORDLONG)3u * (DWORDLONG)dwDuration) + ((DWORDLONG)2u * (DWORDLONG)dwElapsed);
+    if (0u == ullDen)
+    {
+        return 0u;
+    }
+    return (DWORD)(((DWORDLONG)5u * (DWORDLONG)dwElapsed * (DWORDLONG)dwDuration) / ullDen);
+}
+
+/*
  * Client background color at the current point of the transition, interpolated on the same clock
  * (dwAnimationStartTick + ThemeBackgroundTransitionMs) the menu bar uses, so the client and the
  * owner-drawn menu cross-fade in lockstep instead of drifting on independent animation timelines.
@@ -1247,7 +1271,12 @@ static FORCEINLINE void ThemeOnAnimationTick(void)
         hwnd = *phwnd;
         if (IsWindow(hwnd))
         {
+            /* Repaint the client SYNCHRONOUSLY every tick (UpdateWindow forces the WM_PAINT now)
+               rather than leaving an async InvalidateRect to be coalesced -- otherwise the client
+               crossfade lags the menu bar (which is redrawn synchronously below) by however long the
+               paint sat in the queue, and the two surfaces drift out of step. */
             InvalidateRect(hwnd, NULL, FALSE);
+            UpdateWindow(hwnd);
             if (GetMenu(hwnd))
             {
                 DrawMenuBar(hwnd);

@@ -1716,7 +1716,10 @@ static int ThemeTestMenuLumaAt(const THEME_CAPTURE* pCap, UINT iFrame, const POI
  * nothing is sampled away or skipped.
  */
 #define THEME_SYNC_FRAMES  16   /* curve-independent: how far apart surfaces may start/end (frames) */
-#define THEME_BAND_TOL     22   /* curve-dependent: normalized-progress band around the caption (%) */
+/* curve-dependent: normalized-progress band around the caption (%). The client/menu crossfade must
+   follow the SAME ease-out curve DWM applies to the caption, so every surface sits within this tight
+   band of the caption's progress at every frame. */
+#define THEME_BAND_TOL      9
 #define THEME_MIN_SPAN    120   /* a real transition moves the caption at least this much luma */
 
 /* Luma of surface k at a frame. k: 0 ref caption, 1 dialog caption, 2 menu bar (avg of its points),
@@ -1936,19 +1939,19 @@ static BOOL ThemeTestAnalyzeCapturedFrames(THEME_CAPTURE* pCap,
     pCap->iFirstTargetFrame = (UINT)(fAllStarted ? uMinStart : 0u);
     pCap->iFirstIntermediateFrame = (UINT)(fAllEnded ? uMaxEnd : 0u);
 
-    OutF(TEXT("[BAND] base=%d\n"), (int)iBase);
-    OutF(TEXT("[BAND] worstframe=%d\n"), (int)uBandFrame);
     if (0u < uBandFrame)
     {
         UINT bf = uBandFrame - 1u;
+        OutF(TEXT("[BAND] frame=%d\n"), (int)uBandFrame);
         OutF(TEXT("[BAND] refprog=%d\n"), ThemeTestProgress(ThemeTestLumaAt(pCap, bf, ptRef), rgStart[0], rgEnd[0]));
         for (k = 0u; k < 7u; ++k)
         {
-            OutF(TEXT("[BAND] k.prog=%d\n"),
+            OutF(TEXT("[BAND] prog=%d\n"),
                  ThemeTestProgress(ThemeTestSurfaceLuma(pCap, bf, k, ptRef, rgSurf, rgMenu, cMenu), rgStart[k], rgEnd[k]));
-            OutF(TEXT("[BAND] k.start=%d\n"), rgStart[k]);
-            OutF(TEXT("[BAND] k.end=%d\n"), rgEnd[k]);
         }
+        OutF(TEXT("[BAND] menustart=%d\n"), rgStart[2]);
+        OutF(TEXT("[BAND] menuend=%d\n"), rgEnd[2]);
+        OutF(TEXT("[BAND] menuluma=%d\n"), ThemeTestMenuLumaAt(pCap, bf, rgMenu, cMenu));
     }
     return TRUE;
 }
