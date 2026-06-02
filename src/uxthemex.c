@@ -652,12 +652,14 @@ static FORCEINLINE DWORD ThemeBackgroundTransitionMs(void)
 }
 
 /*
- * DWM does not fade the immersive caption linearly -- it uses a mildly front-loaded (ease-out) curve,
- * so a straight luma lerp on the client/menu trails the caption mid-transition. This maps linear
- * elapsed time onto a matching ease-out (rational p = t / (0.75 + 0.25t), i.e. 4e*d / (3d + e)) and
- * returns the effective elapsed value the linear lerp should consume, so the client and menu track
- * the caption's progress. The 0.75 weight was fit to the measured caption curve: the linear client
- * otherwise sits ~7% behind the caption at t~0.34 (cap 41% vs cli 34%); p(0.34)=0.41 closes it.
+ * DWM fades the immersive caption on a mildly front-loaded (ease-out) curve, well approximated by the
+ * rational p = 4t/(3+t). The client/menu are linear in elapsed time, so without this they trail the
+ * caption through the body of the transition; mapping elapsed time through the same ease-out makes the
+ * body track the caption to within the band. (The residual is a ~1-frame phase offset at the steep
+ * entry/exit -- inherent because the app's wall-clock timer cannot be frame-locked to DWM's separately
+ * composited caption -- which the analyzer's per-frame band check tolerates with a +/-1 frame window.)
+ * Returned as the effective elapsed the linear lerp consumes: eff = 4*e*d / (3d + e) (integer,
+ * branchless, C5045-safe -- no control-dependent load).
  */
 static FORCEINLINE DWORD ThemeEaseElapsed(DWORD dwElapsed, DWORD dwDuration)
 {
@@ -668,11 +670,9 @@ static FORCEINLINE DWORD ThemeEaseElapsed(DWORD dwElapsed, DWORD dwDuration)
 
     e = (int)dwElapsed;
     d = (int)dwDuration;
-    /* Branchless clamp of e to [0,d] and fold of a zero duration to 1, mirroring ThemeLerpColor's
-     * C5045-safe idiom: no conditional means no control-dependent load, so the optimized build stays
-     * clean. d += (0==d) folds a zero denominator up to 1. (d-e)>>31 is all-ones exactly when e>d,
-     * selecting the (d-e) correction that pins e to d; the second shift pins a negative e (cannot
-     * occur for a monotonic tick clock, but defensive) to 0. den = 3d+e is therefore always >= 3. */
+    /* Branchless clamp of e to [0,d] and fold of a zero duration to 1 (ThemeLerpColor's idiom):
+     * d += (0==d) lifts a zero denominator to 1; (d-e)>>31 is all-ones exactly when e>d, selecting the
+     * (d-e) correction that pins e to d; ~(e>>31) pins a (defensive) negative e to 0. den = 3d+e >= 3. */
     d += (int)(0 == d);
     e += (d - e) & ((d - e) >> 31);
     e &= ~(e >> 31);
@@ -710,6 +710,7 @@ static FORCEINLINE void ThemeStopAnimationTimer(void);
 static void CALLBACK ThemeAnimationTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD dwTime);
 static FORCEINLINE COLORREF ThemeMenuAnimationColor(void);
 static FORCEINLINE COLORREF ThemeMenuTextAnimationColor(void);
+static FORCEINLINE void ThemePaintMenuBarColor(HWND hwnd, COLORREF crBar, COLORREF crText);
 static BOOL CALLBACK ThemeApplyControlProc(HWND hChild, LPARAM lParam);
 FORCEINLINE void WINAPI MenuBarPalette(BOOL fDark, MENUBAR_PALETTE* pPalette);
 static FORCEINLINE void MenuBarPaintSeamToHdc(HWND hwnd, HDC hdc, const MENUBAR_PALETTE* pPalette);
@@ -719,6 +720,18 @@ FORCEINLINE void WINAPI MenuBarPaintSeam(HWND hwnd, const MENUBAR_PALETTE* pPale
 static FORCEINLINE void ThemeStartBackgroundTransition(BOOL fFromDark, BOOL fToDark)
 {
     if (fFromDark == fToDark)
+    {
+        return;
+    }
+    /* Idempotent: a theme switch delivers more than one ImmersiveColorSet broadcast (the app's own
+       re-broadcast plus the system's on the registry write). ThemeArmBackgroundAnimationWindows
+       re-stamps dwAnimationStartTick and re-arms the timer, so honoring a duplicate broadcast mid-fade
+       would reset the shared clock -- surfaces already painted on the first clock (e.g. the menu bar)
+       would then read tens of percent ahead of surfaces repainted against the reset clock. While a
+       transition in this same direction is live, ignore the duplicate and let the running clock ride. */
+    if (g_theme.fAnimatingBackground &&
+        (g_theme.fAnimationFromDark == fFromDark) &&
+        (g_theme.fAnimationToDark == fToDark))
     {
         return;
     }
@@ -1313,11 +1326,16 @@ static FORCEINLINE void ThemeOnAnimationTick(void)
             UpdateWindow(hwnd);
             if (GetMenu(hwnd))
             {
-                /* Force a synchronous WM_NCPAINT this tick; the theme handler repaints the menu bar
-                   over DefWindowProc's frame off the current snapshot, in lockstep with the client.
-                   RDW_INVALIDATE is required for RDW_FRAME to actually mark the non-client area and
-                   deliver WM_NCPAINT. */
-                RedrawWindow(hwnd, NULL, NULL, RDW_FRAME | RDW_INVALIDATE | RDW_UPDATENOW | RDW_NOCHILDREN);
+                /* Drive the menu bar repaint every tick by SENDING WM_NCPAINT synchronously, not via
+                   RedrawWindow(RDW_FRAME): the frame's own dirty tracking coalesces RDW_FRAME, so the
+                   handler does not re-run every 5ms tick and the bar updates in visible stair-steps
+                   (holding a shade for 8-12 composition frames while the client advances smoothly),
+                   throwing the bar 10-14% off the caption's per-frame progress. SendMessage bypasses
+                   the dirty-region gate, so the WM_NCPAINT handler -- which paints the bar off the
+                   shared snapshot clock -- runs unconditionally each tick, pinning the bar to the
+                   client's curve frame-for-frame. The paint stays in the handler's own stack frame,
+                   not inlined into this timer path. wParam==1 means "whole window region". */
+                SendMessage(hwnd, WM_NCPAINT, (WPARAM)1, 0);
             }
         }
         ++phwnd;
@@ -1668,12 +1686,118 @@ static BOOL ThemeHandlePaintMessage(HWND hwnd, LRESULT* plr)
 }
 
 /*
+ * Process-lifetime cache of the menu font. SPI_GETNONCLIENTMETRICS fills a ~500-byte NONCLIENTMETRICS;
+ * keeping that buffer (and the CreateFontIndirect/DeleteObject pair) out of ThemePaintMenuBarColor
+ * matters twice over: the paint runs every 5ms animation tick (creating/destroying a font each tick
+ * churns GDI handles), and a NONCLIENTMETRICS-sized frame on a function the timer path inlines pushes
+ * past the one-page stack-probe threshold (__chkstk, which this no-CRT build cannot resolve).
+ */
+static HFONT g_hThemeMenuBarFont;
+
+static NONCLIENTMETRICS g_themeNcmScratch;
+
+static FORCEINLINE HFONT ThemeMenuBarFont(void)
+{
+    if (g_hThemeMenuBarFont)
+    {
+        return g_hThemeMenuBarFont;
+    }
+    /* g_themeNcmScratch is a file-static (not a stack local): a ~500-byte NONCLIENTMETRICS on the
+       stack of a FORCEINLINE function would, once expanded into the timer path, push the frame past
+       the one-page stack-probe threshold and emit __chkstk, which this /NODEFAULTLIB build cannot
+       resolve. Keeping the buffer off-stack lets the font fetch inline cleanly. GUI thread only. */
+    SecureZeroMemory(&g_themeNcmScratch, sizeof(g_themeNcmScratch));
+    g_themeNcmScratch.cbSize = (DWORD)sizeof(g_themeNcmScratch);
+    if (SystemParametersInfo(SPI_GETNONCLIENTMETRICS, (UINT)sizeof(g_themeNcmScratch), &g_themeNcmScratch, 0))
+    {
+        g_hThemeMenuBarFont = CreateFontIndirect(&g_themeNcmScratch.lfMenuFont);
+    }
+    return g_hThemeMenuBarFont;
+}
+
+/*
+ * Paint the whole owner-drawn menu bar -- background fill plus each top-level label -- directly
+ * through the window DC at the supplied cross-fade colors (adzm's UAHDrawMenuNCBottomLine technique:
+ * GetWindowDC over the non-client menu band). WM_UAHDRAWMENU, which DefWindowProc drives, does NOT
+ * re-fire on every animation tick, so a UAH-only bar holds a stale paint -- one computed against the
+ * pre-caption-flip start tick, before that tick was re-stamped forward -- and reads ~30% ahead of the
+ * client. Painting it here, every tick, off the same snapshot clock the client uses, pins the bar to
+ * the client's progress so every surface stays inside the caption's band.
+ */
+static FORCEINLINE void ThemePaintMenuBarColor(HWND hwnd, COLORREF crBar, COLORREF crText)
+{
+    MENUBARINFO      mbi;
+    RECT             rcWindow;
+    RECT             rcBar;
+    RECT             rcItem;
+    HDC              hdc;
+    HMENU            hMenu;
+    HFONT            hFont;
+    HGDIOBJ          hOldFont;
+    WCHAR            szText[64];
+    int              i;
+    int              cch;
+
+    hMenu = GetMenu(hwnd);
+    if (!hMenu)
+    {
+        return;
+    }
+    SecureZeroMemory(&mbi, sizeof(mbi));
+    mbi.cbSize = (DWORD)sizeof(mbi);
+    if (!GetMenuBarInfo(hwnd, OBJID_MENU, 0, &mbi))
+    {
+        return;
+    }
+    GetWindowRect(hwnd, &rcWindow);
+    rcBar = mbi.rcBar;
+    OffsetRect(&rcBar, -rcWindow.left, -rcWindow.top);
+    rcBar.left = 0;
+    rcBar.right = rcWindow.right - rcWindow.left;
+    rcBar.bottom = rcBar.bottom + 1;
+    hdc = GetWindowDC(hwnd);
+    if (!hdc)
+    {
+        return;
+    }
+    ThemePaintSolidColor(hdc, &rcBar, crBar);
+
+    /* The fill erased the item labels DefWindowProc drew; redraw each top-level label over it in the
+       menu font at the interpolated text color so "File"/"Help" stay visible and cross-fade with the
+       bar instead of vanishing until the swap completes. */
+    hFont = ThemeMenuBarFont();
+    hOldFont = hFont ? SelectObject(hdc, hFont) : NULL;
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, crText);
+    /* Constant loop bound (a bounded pre-tested loop is C5045-safe); GetMenuItemRect fails past the
+       real top-level item count, so the body simply skips. DrawTextW is called unconditionally -- a
+       zero-length GetMenuStringW result draws nothing -- so no comparison-checked value feeds a call. */
+    for (i = 0; i < THEME_MAX_MENU_ITEMS; ++i)
+    {
+        if (!GetMenuItemRect(hwnd, hMenu, (UINT)i, &rcItem))
+        {
+            continue;
+        }
+        OffsetRect(&rcItem, -rcWindow.left, -rcWindow.top);
+        szText[0] = 0;
+        cch = GetMenuStringW(hMenu, (UINT)i, szText, (int)ARRAYSIZE(szText) - 1, MF_BYPOSITION);
+        (void)DrawTextW(hdc, szText, cch, &rcItem,
+                        DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_HIDEPREFIX);
+    }
+    if (hOldFont)
+    {
+        SelectObject(hdc, hOldFont);
+    }
+    /* hFont is the process-lifetime cached menu font (ThemeMenuBarFont); not deleted here. */
+    ReleaseDC(hwnd, hdc);
+}
+
+/*
  * Non-client repaint of the owner-drawn menu bar, the DwmDefWindowProc way: the caller lets
- * DefWindowProc render the frame first -- which re-issues WM_UAHDRAWMENU / WM_UAHDRAWMENUITEM, and our
- * handlers fill the bar and draw the item text at the (animated, while cross-fading) colors -- then
- * this restamps the 1px seam DefWindowProc drew in the stock shade (adzm's UAHDrawMenuNCBottomLine).
- * During the fade MenuBarOnDrawMenu paints the bar through its bottom edge, so the seam is already the
- * animated color and we leave it; once settled we repaint the seam in the final shade.
+ * DefWindowProc render the frame first, then this repaints the menu band. While the background is
+ * cross-fading we paint the whole bar ourselves off the shared snapshot clock (so it tracks the client
+ * to the frame, not the stale WM_UAHDRAWMENU cadence); otherwise the system's WM_UAHDRAWMENU has filled
+ * the bar and we only restamp the 1px seam DefWindowProc drew in the stock shade.
  */
 static FORCEINLINE void ThemeNcRepaintMenuBar(HWND hwnd)
 {
@@ -1685,6 +1809,7 @@ static FORCEINLINE void ThemeNcRepaintMenuBar(HWND hwnd)
     }
     if (g_theme.fAnimatingBackground && ThemeWindowHasBackgroundAnimation(hwnd))
     {
+        ThemePaintMenuBarColor(hwnd, ThemeMenuAnimationColor(), ThemeMenuTextAnimationColor());
         return;
     }
     MenuBarPalette(ThemeIsDarkMode(), &pal);
