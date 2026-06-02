@@ -1701,6 +1701,33 @@ static FORCEINLINE void ThemeStartAnimationThread(void)
     g_theme.hAnimationThread = CreateThread(NULL, 0, ThemeAnimationTickThread, NULL, 0, NULL);
 }
 
+/* TRUE when this ImmersiveColorSet broadcast merely duplicates the switch already being animated: we are
+   mid-transition AND the registry's effective mode -- read FRESH (ThemeReadPersonalizeDarkMode, not the
+   cached ShouldAppsUseDarkMode) -- already equals the target we are fading to. A real Settings switch
+   re-broadcasts ImmersiveColorSet several times, and a full switch broadcasts again for the system-theme
+   half; running ThemePublishBroadcastPaintState's heavy RefreshImmersiveColorPolicyState flush on each one
+   blocks the GUI thread through the fade window (the input path's 11 animation ticks vs the harness's ~74).
+   Detecting the duplicate here -- via the always-fresh registry, BEFORE any flush -- lets those duplicates
+   skip the flush. The harness's first, real broadcast is not yet animating, so it is never a duplicate and
+   still flushes + arms; an opposite mid-fade switch differs from fAnimationToDark and is likewise not a
+   duplicate, so it re-arms. DECLSPEC_NOINLINE keeps its local off the inlined publish/dispatch frame
+   (__chkstk, unresolvable in this /NODEFAULTLIB build). */
+static DECLSPEC_NOINLINE BOOL ThemeBroadcastDuplicatesLiveTransition(void)
+{
+    BOOL fRegDark;
+
+    if (!g_theme.fAnimatingBackground)
+    {
+        return FALSE;
+    }
+    fRegDark = FALSE;
+    if (!ThemeReadPersonalizeDarkMode(&fRegDark))
+    {
+        return FALSE;
+    }
+    return ((fRegDark && g_theme.fDarkCapable) == g_theme.fAnimationToDark);
+}
+
 static FORCEINLINE BOOL ThemePublishBroadcastPaintState(void)
 {
     BOOL fRequestedDark;
@@ -1708,6 +1735,11 @@ static FORCEINLINE BOOL ThemePublishBroadcastPaintState(void)
     BOOL fOldEffectiveDark;
     BOOL fStarted;
 
+    /* Skip the heavy flush/republish for re-broadcasts of the switch already in flight -- see helper. */
+    if (ThemeBroadcastDuplicatesLiveTransition())
+    {
+        return g_theme.fEffectiveDark;
+    }
     ThemeRefresh();
     fOldEffectiveDark = g_theme.fEffectiveDark;
     fEffectiveDark = ThemeReadEffectiveDarkMode(&fRequestedDark);

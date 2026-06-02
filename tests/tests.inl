@@ -4628,12 +4628,19 @@ static BOOL ThemeTestWaitForComboForeground(IUIAutomation* pAuto, DWORD dwTimeou
 static BOOL ThemeTestSettingsPickMode(IUIAutomation* pAuto, int index)
 {
     IUIAutomationElement* pCombo;
-    int                   k;
+    WORD                  wVkItem;
 
     if (index < 0)
     {
         return FALSE;
     }
+    /* Type-ahead key for the target item, like a real user clicking it directly: Light='L', Dark='D',
+       Custom='C'. Do NOT arrow through the list (Home/Down): Settings LIVE-PREVIEWS each highlighted
+       item, so navigating Light->Dark fires TWO theme switches per toggle (the double ImmersiveColorSet
+       burst seen in the WAL that the harness -- a single switch -- never produces). One direct selection
+       == one switch == the harness sequence. */
+    wVkItem = (0 == index) ? (WORD)'L' : (1 == index) ? (WORD)'D' : (WORD)'C';
+
     pCombo = UiaFindColorModeCombo(pAuto);
     if (!pCombo)
     {
@@ -4651,23 +4658,11 @@ static BOOL ThemeTestSettingsPickMode(IUIAutomation* pAuto, int index)
         IUIAutomationElement_Release(pCombo);
         return FALSE;
     }
-    ThemeTestSendVk(VK_MENU, FALSE);
-    ThemeTestKeyPress(VK_DOWN);
-    ThemeTestSendVk(VK_MENU, TRUE);
-    Sleep(250u);
-    ThemeTestKeyPress(VK_HOME);
-    Sleep(100u);
-    for (k = 0; k < index; ++k)
-    {
-        ThemeTestKeyPress(VK_DOWN);
-        Sleep(80u);
-    }
-    if (!ThemeTestComboHostIsForeground(pCombo))
-    {
-        IUIAutomationElement_Release(pCombo);
-        return FALSE;
-    }
-    ThemeTestKeyPress(VK_RETURN);
+    /* Closed-combo type-ahead: with the combo focused but NOT open, the matching item is selected and
+       committed in one step -- one switch -- with no open-dropdown live-preview phase (which would fire a
+       second switch on highlight, the double ImmersiveColorSet burst). This is the single-switch a real
+       direct click produces, matching the harness. */
+    ThemeTestKeyPress(wVkItem);
     Sleep(150u);
     IUIAutomationElement_Release(pCombo);
     return TRUE;
