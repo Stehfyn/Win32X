@@ -653,32 +653,43 @@ static FORCEINLINE DWORD ThemeBackgroundTransitionMs(void)
 }
 
 /*
- * DWM fades the immersive caption on a mildly front-loaded (ease-out) curve, well approximated by the
- * rational p = 4t/(3+t). The client/menu are linear in elapsed time, so without this they trail the
- * caption through the body of the transition; mapping elapsed time through the same ease-out makes the
- * body track the caption to within the band. (The residual is a ~1-frame phase offset at the steep
- * entry/exit -- inherent because the app's wall-clock timer cannot be frame-locked to DWM's separately
- * composited caption -- which the analyzer's per-frame band check tolerates with a +/-1 frame window.)
- * Returned as the effective elapsed the linear lerp consumes: eff = 4*e*d / (3d + e) (integer,
- * branchless, C5045-safe -- no control-dependent load).
+ * DWM fades the immersive caption on a mildly front-loaded (ease-out) curve, p = 4t/(3+t) -- but it
+ * does NOT fade symmetrically: the to-DARK caption fade completes markedly faster than the to-LIGHT
+ * fade. A single curve therefore cannot track both directions: tuned for one, the app leads the caption
+ * on the fast direction and lags it on the slow one. So the shape stays p = 4t/(3+t) but the effective
+ * duration the lerp completes over is scaled per direction -- a shorter window to-dark (app was lagging),
+ * a slightly longer one to-light (app was leading). The curve still reaches full at e == d_eff, then the
+ * clamp holds it, so each direction's body tracks the caption within the band. Percentages are tuned
+ * against T6's measured per-leg caption-band deviation.
+ *
+ * eff = 4*e*d / (3*d_eff + e), with d_eff = d * pct/100 and e clamped to [0, d_eff] (integer, branchless,
+ * C5045-safe: pct is selected by arithmetic on a 0/1 flag, not a control-dependent load).
  */
-static FORCEINLINE DWORD ThemeEaseElapsed(DWORD dwElapsed, DWORD dwDuration)
+#define THEME_EASE_TOLIGHT_PCT  108   /* to-light: mild stretch (app led the caption ~14% at pct=100)  */
+#define THEME_EASE_TODARK_PCT    76   /* to-dark: compress (app lagged ~34% at pct=100, led ~37% at 52) */
+
+static FORCEINLINE DWORD ThemeEaseElapsed(DWORD dwElapsed, DWORD dwDuration, BOOL fToDark)
 {
     int       e;
     int       d;
+    int       deff;
+    int       pct;
     DWORDLONG ullNum;
     DWORDLONG ullDen;
 
     e = (int)dwElapsed;
     d = (int)dwDuration;
-    /* Branchless clamp of e to [0,d] and fold of a zero duration to 1 (ThemeLerpColor's idiom):
-     * d += (0==d) lifts a zero denominator to 1; (d-e)>>31 is all-ones exactly when e>d, selecting the
-     * (d-e) correction that pins e to d; ~(e>>31) pins a (defensive) negative e to 0. den = 3d+e >= 3. */
     d += (int)(0 == d);
-    e += (d - e) & ((d - e) >> 31);
+    /* Branchless per-direction duration: pct = TOLIGHT + flag*(TODARK - TOLIGHT), flag in {0,1}. */
+    pct = THEME_EASE_TOLIGHT_PCT + ((0 != fToDark) ? 1 : 0) * (THEME_EASE_TODARK_PCT - THEME_EASE_TOLIGHT_PCT);
+    deff = (int)(((DWORDLONG)(DWORD)d * (DWORDLONG)(DWORD)pct) / 100u);
+    deff += (int)(0 == deff);
+    /* Clamp e to [0, deff]: (deff-e)>>31 is all-ones exactly when e>deff (pins e to deff); ~(e>>31)
+     * pins a defensive negative e to 0. The lerp reaches full (eff==d) at e==deff, then holds. */
+    e += (deff - e) & ((deff - e) >> 31);
     e &= ~(e >> 31);
     ullNum = (DWORDLONG)4 * (DWORDLONG)(DWORD)e * (DWORDLONG)(DWORD)d;
-    ullDen = (DWORDLONG)3 * (DWORDLONG)(DWORD)d + (DWORDLONG)(DWORD)e;
+    ullDen = (DWORDLONG)3 * (DWORDLONG)(DWORD)deff + (DWORDLONG)(DWORD)e;
     return (DWORD)(ullNum / ullDen);
 }
 
@@ -702,7 +713,7 @@ static FORCEINLINE COLORREF ThemeClientAnimationColor(void)
        fast fade an independent read a few ms apart is several percent of progress, which would drift
        the two surfaces out of the caption's band. */
     dwElapsed = g_theme.dwAnimationSnapTick - g_theme.dwAnimationStartTick;
-    return ThemeLerpColor(crFrom, crTo, ThemeEaseElapsed(dwElapsed, dwDuration), dwDuration);
+    return ThemeLerpColor(crFrom, crTo, ThemeEaseElapsed(dwElapsed, dwDuration, g_theme.fAnimationToDark), dwDuration);
 }
 
 /* Control (static/dialog) text color at the current point of the transition, on the same clock as the
@@ -728,7 +739,7 @@ static FORCEINLINE COLORREF ThemeClientTextAnimationColor(void)
     crTo = ThemeClientTextColor(g_theme.fAnimationToDark);
     dwDuration = ThemeBackgroundTransitionMs();
     dwElapsed = g_theme.dwAnimationSnapTick - g_theme.dwAnimationStartTick;
-    return ThemeLerpColor(crFrom, crTo, ThemeEaseElapsed(dwElapsed, dwDuration), dwDuration);
+    return ThemeLerpColor(crFrom, crTo, ThemeEaseElapsed(dwElapsed, dwDuration, g_theme.fAnimationToDark), dwDuration);
 }
 
 /* Cached solid brush for the live crossfade color (recreated only when the interpolated color changes),
@@ -1369,14 +1380,12 @@ static FORCEINLINE void ThemeOnAnimationTick(void)
         hwnd = *phwnd;
         if (IsWindow(hwnd))
         {
-            /* Repaint the client SYNCHRONOUSLY every tick (RDW_UPDATENOW forces the WM_PAINT now)
+            /* Repaint the client SYNCHRONOUSLY every tick (UpdateWindow forces the WM_PAINT now)
                rather than leaving an async InvalidateRect to be coalesced -- otherwise the client
                crossfade lags the menu bar (which is redrawn synchronously below) by however long the
-               paint sat in the queue, and the two surfaces drift out of step. RDW_ALLCHILDREN extends
-               the repaint to child controls so a dialog's statics re-issue WM_CTLCOLORSTATIC every tick
-               and cross-fade in band too (without it they keep their first-frame shade and stair-step
-               out of the caption's band). No RDW_ERASE: the body cross-fades via WM_PAINT, not erase. */
-            RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+               paint sat in the queue, and the two surfaces drift out of step. */
+            InvalidateRect(hwnd, NULL, FALSE);
+            UpdateWindow(hwnd);
             if (GetMenu(hwnd))
             {
                 /* Drive the menu bar repaint every tick by SENDING WM_NCPAINT synchronously, not via
@@ -1586,6 +1595,10 @@ FORCEINLINE void WINAPI ThemeApplyTopLevel(HWND hwnd, BOOL fDark)
     g_theme.fRequestedDark = fDark;
     g_theme.fEffectiveDark = fEffective;
     ThemeRegisterWindow(hwnd);
+    /* Clip child windows out of the parent's paint: the per-tick crossfade fills the whole client, and
+       without WS_CLIPCHILDREN that fill lands under child controls and fights their own paint -- the
+       flicker. Clipped, the parent fill never touches child pixels; each child crossfades itself. */
+    SetWindowLongPtr(hwnd, GWL_STYLE, GetWindowLongPtr(hwnd, GWL_STYLE) | WS_CLIPCHILDREN);
     SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)ThemeBackgroundBrush(fEffective));
     ThemeApplyWindow(hwnd, fEffective);
 }
@@ -1618,6 +1631,9 @@ FORCEINLINE void WINAPI ThemeApplyDialogTree(HWND hwnd, BOOL fDark)
 
     fEffective = fDark && ThemeCanUseDarkMode();
     ThemeRegisterDialog(hwnd);
+    /* Clip children so the dialog's full-client crossfade fill never paints under the static/button
+       child windows and fights their paint (the flicker). Each child crossfades its own background. */
+    SetWindowLongPtr(hwnd, GWL_STYLE, GetWindowLongPtr(hwnd, GWL_STYLE) | WS_CLIPCHILDREN);
     SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)ThemeBackgroundBrush(fEffective));
     ThemeApplyDialog(hwnd, fEffective);
     EnumChildWindows(hwnd, ThemeApplyControlProc, (LPARAM)fEffective);
@@ -1723,7 +1739,7 @@ static FORCEINLINE COLORREF ThemeMenuTextAnimationColor(void)
     MenuBarPalette(g_theme.fAnimationToDark, &palTo);
     dwDuration = ThemeBackgroundTransitionMs();
     dwElapsed = g_theme.dwAnimationSnapTick - g_theme.dwAnimationStartTick;
-    return ThemeLerpColor(palFrom.clrText, palTo.clrText, ThemeEaseElapsed(dwElapsed, dwDuration), dwDuration);
+    return ThemeLerpColor(palFrom.clrText, palTo.clrText, ThemeEaseElapsed(dwElapsed, dwDuration, g_theme.fAnimationToDark), dwDuration);
 }
 
 static BOOL ThemeHandlePaintMessage(HWND hwnd, LRESULT* plr)
@@ -2124,7 +2140,7 @@ static FORCEINLINE COLORREF ThemeMenuAnimationColor(void)
     MenuBarPalette(g_theme.fAnimationToDark, &palTo);
     dwDuration = ThemeBackgroundTransitionMs();
     dwElapsed = g_theme.dwAnimationSnapTick - g_theme.dwAnimationStartTick;
-    return ThemeLerpColor(palFrom.clrBar, palTo.clrBar, ThemeEaseElapsed(dwElapsed, dwDuration), dwDuration);
+    return ThemeLerpColor(palFrom.clrBar, palTo.clrBar, ThemeEaseElapsed(dwElapsed, dwDuration, g_theme.fAnimationToDark), dwDuration);
 }
 
 FORCEINLINE void WINAPI MenuBarOnDrawMenu(HWND hwnd, const UAHMENU* pUDM, const MENUBAR_PALETTE* pPalette)

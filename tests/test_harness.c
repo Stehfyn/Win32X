@@ -111,9 +111,13 @@ typedef struct
     volatile LONG cEncodedFrames;
     volatile LONG cReducedFrames;          /* frames the compute thread has reduced so far              */
     volatile LONG fCaptureComplete;
+    UINT     uPhaseFrames;                 /* caption-band phase window (frames), scaled to refresh rate */
     UINT     cSurf;                        /* surfaces populated in rgSurfPt (<= THEME_MAX_SURF)         */
     POINT    rgSurfPt[THEME_MAX_SURF];     /* per-surface sample center, SCREEN space                   */
     BOOL     rgSurfActive[THEME_MAX_SURF]; /* surface present this run (absent dialog/children -> FALSE)*/
+    UINT     rgSurfBand[THEME_MAX_SURF];   /* per-surface worst caption-band deviation, both legs (%)   */
+    BOOL     rgSurfStarted[THEME_MAX_SURF];/* per-surface: began the forward leg                        */
+    BOOL     rgSurfReturned[THEME_MAX_SURF];/* per-surface: completed the restore leg                   */
     COLORREF* pSurfColor;                  /* [cFrames*THEME_MAX_SURF] GPU-reduced mean colors (readback)*/
     BOOL  fEncodeOverflow;
     UINT  cQueueFrames;

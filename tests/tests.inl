@@ -2177,7 +2177,10 @@ static int ThemeTestProgress(int iLuma, int iStart, int iEnd)
     return ((iLuma - iStart) * 100) / iSpan;
 }
 
-static BOOL ThemeTestAnalyzeCapturedFrames(THEME_CAPTURE* pCap,
+/* DECLSPEC_NOINLINE: keep this large analyzer out of ThemeTestRunTransition's frame. Under the tests'
+   LTCG, it would otherwise be inlined into that already-large one-shot caller, and the combined frame
+   crosses the one-page stack-probe threshold (__chkstk, unresolvable in this /NODEFAULTLIB build). */
+static DECLSPEC_NOINLINE BOOL ThemeTestAnalyzeCapturedFrames(THEME_CAPTURE* pCap,
                                            HWND hwndTop,
                                            HWND hwndDialog,
                                            HWND hwndStatic,
@@ -2219,6 +2222,10 @@ static BOOL ThemeTestAnalyzeCapturedFrames(THEME_CAPTURE* pCap,
     int   iRefAmp;
     UINT  uBandFrame;
     BOOL  fFound;
+    int   dbgCliFwd  = 0;
+    int   dbgCliRst  = 0;
+    int   dbgMenuFwd = 0;
+    int   dbgMenuRst = 0;
 
     /* The main window's menu bar and client are always present; the dialog and its children are
        optional (main-window-only capture passes them NULL). Each surface carries an 'active' flag so
@@ -2323,23 +2330,26 @@ static BOOL ThemeTestAnalyzeCapturedFrames(THEME_CAPTURE* pCap,
     for (i = iBase; i < pCap->cCaptured; ++i)   /* span BOTH legs: forward (0->100) and restore (100->0) */
     {
         int  iRefProg;
-        int  iRefPrev;
-        int  iRefNext;
-        UINT iPrev;
-        UINT iNext;
+        int  rgRefWin[9];   /* caption progress over [i-W, i+W], W = pCap->uPhaseFrames (<= 4) */
+        int  nWin;
+        int  jj;
+        int  iW;
 
-        /* Caption progress at this frame and at its two neighbours. The owner-drawn surfaces are
-           painted on the app's wall-clock timer while DWM composites the caption on its own clock, so
-           a +/-1 frame phase offset between them is inherent (and its sign flips between the apps-only
-           and apps+system paths, depending on whether the app or the system drives the caption flip).
-           The band is therefore measured against the closest of the caption's three adjacent frames:
-           the curve-match within the band is still strictly enforced, only the unavoidable one-frame
-           compositing phase is allowed -- never a larger lead/lag. */
-        iPrev = (i > iBase) ? (i - 1u) : iBase;
-        iNext = ((i + 1u) < pCap->cCaptured) ? (i + 1u) : i;
+        /* The owner-drawn surfaces are painted on the app's wall-clock timer while DWM composites the
+           caption separately, so a small phase offset is inherent. It is bounded in REAL time (~one
+           composition), so its size in FRAMES scales with refresh -- hence the +/-W window (W from the
+           refresh rate), not a fixed +/-1. The band measures each surface against the CLOSEST caption
+           frame in that window: the curve-match is still strictly enforced, only the unavoidable
+           compositing phase is forgiven, never a larger lead/lag. */
+        iW = (int)pCap->uPhaseFrames;
+        nWin = 0;
+        for (jj = (int)i - iW; jj <= (int)i + iW; ++jj)
+        {
+            UINT jc;
+            jc = (jj < (int)iBase) ? iBase : (((UINT)jj >= pCap->cCaptured) ? (pCap->cCaptured - 1u) : (UINT)jj);
+            rgRefWin[nWin++] = ThemeTestProgress(ThemeTestSurfaceLuma(pCap, jc, 0u, ptRef, rgSurf, rgMenu, cMenu), rgStart[0], rgEnd[0]);
+        }
         iRefProg = ThemeTestProgress(ThemeTestSurfaceLuma(pCap, i, 0u, ptRef, rgSurf, rgMenu, cMenu), rgStart[0], rgEnd[0]);
-        iRefPrev = ThemeTestProgress(ThemeTestSurfaceLuma(pCap, iPrev, 0u, ptRef, rgSurf, rgMenu, cMenu), rgStart[0], rgEnd[0]);
-        iRefNext = ThemeTestProgress(ThemeTestSurfaceLuma(pCap, iNext, 0u, ptRef, rgSurf, rgMenu, cMenu), rgStart[0], rgEnd[0]);
         for (k = 0u; k < 7u; ++k)
         {
             int iLuma;
@@ -2374,23 +2384,30 @@ static BOOL ThemeTestAnalyzeCapturedFrames(THEME_CAPTURE* pCap,
                 rgReturned[k] = TRUE;
                 rgReturnFrame[k] = i;
             }
-            /* The OK button (k==6) is a push button whose face is cross-faded by uxtheme's own
-               internal state animation -- its own clock, like DWM's caption -- so it is held to the
-               curve-independent duration/correctness checks (it starts and ends with the rest and
-               reaches the target) but NOT to the tight curve-dependent color band, which governs the
-               surfaces the theme engine itself paints. */
-            if (6u != k)
             {
-                int iDevPrev;
-                int iDevNext;
+                int w;
+                int dd;
 
-                iDev     = iProg - iRefProg; if (0 > iDev)     { iDev = -iDev; }
-                iDevPrev = iProg - iRefPrev; if (0 > iDevPrev) { iDevPrev = -iDevPrev; }
-                iDevNext = iProg - iRefNext; if (0 > iDevNext) { iDevNext = -iDevNext; }
-                /* Closest of the caption's three adjacent frames (+/-1 frame phase window). */
-                if (iDevPrev < iDev) { iDev = iDevPrev; }
-                if (iDevNext < iDev) { iDev = iDevNext; }
-                if (iDev > iMaxBand)
+                /* Deviation = distance to the CLOSEST caption frame in the +/-W phase window. */
+                iDev = 1000;
+                for (w = 0; w < nWin; ++w)
+                {
+                    dd = iProg - rgRefWin[w];
+                    if (0 > dd) { dd = -dd; }
+                    if (dd < iDev) { iDev = dd; }
+                }
+                /* Per-surface worst deviation (both legs), so each surface gets its own test verdict. */
+                if ((UINT)iDev > pCap->rgSurfBand[k])
+                {
+                    pCap->rgSurfBand[k] = (UINT)iDev;
+                }
+                /* Per-leg tuning diagnostics for the two key owner-painted surfaces. */
+                if (3u == k) { if (i <= iLast) { if (iDev > dbgCliFwd)  { dbgCliFwd  = iDev; } } else if (iDev > dbgCliRst)  { dbgCliRst  = iDev; } }
+                if (2u == k) { if (i <= iLast) { if (iDev > dbgMenuFwd) { dbgMenuFwd = iDev; } } else if (iDev > dbgMenuRst) { dbgMenuRst = iDev; } }
+                /* The OK button (k==6) is a push button whose face is cross-faded by uxtheme's own
+                   internal state animation -- its own clock -- so it is excluded from the AGGREGATE
+                   tight band (its per-surface verdict below uses a wider tolerance). */
+                if ((6u != k) && (iDev > iMaxBand))
                 {
                     iMaxBand = iDev;
                     uBandFrame = i + 1u;
@@ -2462,6 +2479,20 @@ static BOOL ThemeTestAnalyzeCapturedFrames(THEME_CAPTURE* pCap,
     pCap->uIntermediateMask = (UINT)(fAllEnded ? (uMaxEnd - uMinEnd) : 999u);
     pCap->iFirstTargetFrame = (UINT)(fAllStarted ? uMinStart : 0u);
     pCap->iFirstIntermediateFrame = (UINT)(fAllEnded ? uMaxEnd : 0u);
+
+    OutF(TEXT("[INFO] T6 dbg client fwd=%d\n"), dbgCliFwd);
+    OutF(TEXT("[INFO] T6 dbg client rst=%d\n"), dbgCliRst);
+    OutF(TEXT("[INFO] T6 dbg menu fwd=%d\n"),   dbgMenuFwd);
+    OutF(TEXT("[INFO] T6 dbg menu rst=%d\n"),   dbgMenuRst);
+
+    /* Per-surface verdicts: each surface must have moved on the forward leg AND returned on the restore
+       leg. Exposed so the caller emits an individual test line per surface (menu, dialog text, button,
+       ...) -- "is there a test for this surface" is then answerable by name, not just an aggregate. */
+    for (k = 0u; k < 7u; ++k)
+    {
+        pCap->rgSurfStarted[k]  = rgStarted[k];
+        pCap->rgSurfReturned[k] = rgReturned[k];
+    }
 
     if (0u < uBandFrame)
     {
@@ -3564,14 +3595,18 @@ static BOOL ThemeTestLaunchWindowsProject(HWND* phwndTop, HWND* phwndDialog, HWN
 
 /* Tagged result emitters: prepend the active scenario tag (e.g. "[apps] ") to the result name so the
    apps-only and apps+system runs of the same transition body produce distinct, greppable lines. */
-static void ThemeTestCheck(BOOL fOk, LPCTSTR pszName)
+/* DECLSPEC_NOINLINE: each carries a 192-TCHAR scratch buffer. Under the tests' LTCG, inlining them
+   into ThemeTestRunTransition (which calls ThemeTestCheck ~20 times) would stack a fresh buffer per
+   call site and blow the frame past the one-page stack-probe threshold (__chkstk, unresolvable in this
+   /NODEFAULTLIB build). Kept out-of-line so the buffer lives once, in their own frame. */
+static DECLSPEC_NOINLINE void ThemeTestCheck(BOOL fOk, LPCTSTR pszName)
 {
     TCHAR szBuf[192];
     wnsprintf(szBuf, ARRAYSIZE(szBuf), TEXT("%s%s"), g_pszThemeTag, pszName);
     Check(fOk, szBuf);
 }
 
-static void ThemeTestSkipNote(LPCTSTR pszName, LPCTSTR pszWhy)
+static DECLSPEC_NOINLINE void ThemeTestSkipNote(LPCTSTR pszName, LPCTSTR pszWhy)
 {
     TCHAR szBuf[192];
     wnsprintf(szBuf, ARRAYSIZE(szBuf), TEXT("%s%s"), g_pszThemeTag, pszName);
@@ -3636,10 +3671,15 @@ static void ThemeTestRunTransition(BOOL fWriteSystem, LPCTSTR pszTag)
     UINT              cExpectedFrames;
     RECT              rcCapture;
     RECT              rcTopCreated;
-    THEME_CAPTURE     capture;
+    /* capture/dxgi are large (frame textures, the per-surface color series, the compute pipeline) and
+       are shared by the capture/encode/reduce threads by pointer. Holding them in file-static storage
+       (the T6 mutex serializes the whole run, so there is only ever one live instance) keeps
+       ThemeTestRunTransition's stack frame under the one-page stack-probe threshold -- a larger frame
+       would emit __chkstk, unresolvable in this /NODEFAULTLIB build. */
+    static THEME_CAPTURE capture;
+    static THEME_DXGI    dxgi;
     THEME_CAPTURE_RUN captureRun;
     THEME_ENCODE_RUN  encodeRun;
-    THEME_DXGI        dxgi;
     THEME_DIAGNOSTICS diag;
 
     g_pszThemeTag = pszTag;
@@ -3908,6 +3948,18 @@ static void ThemeTestRunTransition(BOOL fWriteSystem, LPCTSTR pszTag)
         fNoMixedFrames = FALSE;
         fSawMenuIntermediateFrame = FALSE;
         fSawTargetFrame = FALSE;
+        /* Caption-band phase window scaled to the monitor's refresh: the app paints owner-drawn surfaces
+           on its wall-clock timer while DWM composites the caption separately, an offset bounded in REAL
+           time (~one composition), so its size in FRAMES grows with refresh. A fixed +/-1 frame is right
+           at 60Hz but far too strict at 180Hz (the same wall-clock phase spans ~3 frames). Scale it:
+           round(hz/60), clamped to [1,4]. The curve match within the window stays strictly enforced. */
+        {
+            UINT uHz;
+            uHz = dxgi.uRefreshDenominator ? (dxgi.uRefreshNumerator / dxgi.uRefreshDenominator) : 60u;
+            capture.uPhaseFrames = (uHz + 30u) / 60u;
+            if (capture.uPhaseFrames < 1u) { capture.uPhaseFrames = 1u; }
+            if (capture.uPhaseFrames > 4u) { capture.uPhaseFrames = 4u; }
+        }
         /* Analysis runs off the GPU-reduced per-surface color time series (fReduced), NOT a CPU decode
            of the MP4 -- the MP4 is still written for reference, just no longer the analysis source. */
         fAnalyzedFrames = fCapturedFrames &&
@@ -3976,6 +4028,38 @@ static void ThemeTestRunTransition(BOOL fWriteSystem, LPCTSTR pszTag)
     ThemeTestCheck(fSawTargetFrame, TEXT("T6 transition completes: caption spans the full shade change"));
     ThemeTestCheck(fSawMenuIntermediateFrame, TEXT("T6 curve-independent: every surface starts and ends its transition together (same duration, synchronized)"));
     ThemeTestCheck(fNoMixedFrames, TEXT("T6 curve-dependent: every surface stays within a tight band of the DWM caption's progress, every frame"));
+    /* Per-surface verdicts (both legs: forward fade AND restore). Each surface that the theme engine
+       paints must cross-fade within the caption band and complete both legs. The OK button rides
+       uxtheme's own button-state clock, so it gets a wider band but must still start and return. An
+       absent surface (no dialog) passes vacuously. These make the menu/dialog-text/client/button each
+       individually testable by name rather than hidden inside the aggregate band verdict. */
+    if (fAnalyzedFrames)
+    {
+        ThemeTestCheck(!capture.rgSurfActive[2] ||
+            ((capture.rgSurfBand[2] <= THEME_BAND_TOL) && capture.rgSurfStarted[2] && capture.rgSurfReturned[2]),
+            TEXT("T6 menu bar cross-fades in the caption band over both legs"));
+        ThemeTestCheck(!capture.rgSurfActive[5] ||
+            ((capture.rgSurfBand[5] <= THEME_BAND_TOL) && capture.rgSurfStarted[5] && capture.rgSurfReturned[5]),
+            TEXT("T6 dialog static text cross-fades in the caption band over both legs"));
+        ThemeTestCheck(!capture.rgSurfActive[4] ||
+            ((capture.rgSurfBand[4] <= THEME_BAND_TOL) && capture.rgSurfStarted[4] && capture.rgSurfReturned[4]),
+            TEXT("T6 dialog client cross-fades in the caption band over both legs"));
+        ThemeTestCheck(!capture.rgSurfActive[1] ||
+            ((capture.rgSurfBand[1] <= THEME_BAND_TOL) && capture.rgSurfStarted[1] && capture.rgSurfReturned[1]),
+            TEXT("T6 dialog caption cross-fades in the caption band over both legs"));
+        ThemeTestCheck(!capture.rgSurfActive[3] ||
+            ((capture.rgSurfBand[3] <= THEME_BAND_TOL) && capture.rgSurfStarted[3] && capture.rgSurfReturned[3]),
+            TEXT("T6 main client cross-fades in the caption band over both legs"));
+        ThemeTestCheck(!capture.rgSurfActive[6] ||
+            ((capture.rgSurfBand[6] <= 25u) && capture.rgSurfStarted[6] && capture.rgSurfReturned[6]),
+            TEXT("T6 OK button tracks the transition over both legs (own clock, wide band)"));
+        OutF(TEXT("[INFO] T6 surf band menu=%u\n"),       capture.rgSurfBand[2]);
+        OutF(TEXT("[INFO] T6 surf band dlgstatic=%u\n"),  capture.rgSurfBand[5]);
+        OutF(TEXT("[INFO] T6 surf band dlgclient=%u\n"),  capture.rgSurfBand[4]);
+        OutF(TEXT("[INFO] T6 surf band dlgcaption=%u\n"), capture.rgSurfBand[1]);
+        OutF(TEXT("[INFO] T6 surf band mainclient=%u\n"), capture.rgSurfBand[3]);
+        OutF(TEXT("[INFO] T6 surf band button=%u\n"),     capture.rgSurfBand[6]);
+    }
     if (!fSawTargetFrame || !fNoMixedFrames || !fSawMenuIntermediateFrame || !fNoDroppedFrames)
     {
         OutF(TEXT("[INFO] T6 captured frames: %u\n"), capture.cCaptured);
