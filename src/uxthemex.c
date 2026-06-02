@@ -717,11 +717,16 @@ static FORCEINLINE void MenuBarPaintSeamToHdc(HWND hwnd, HDC hdc, const MENUBAR_
 static FORCEINLINE void MenuBarPaintSeamToHdcEx(HWND hwnd, HDC hdc, const MENUBAR_PALETTE* pPalette, int dx, int dy);
 FORCEINLINE void WINAPI MenuBarPaintSeam(HWND hwnd, const MENUBAR_PALETTE* pPalette);
 
-static FORCEINLINE void ThemeStartBackgroundTransition(BOOL fFromDark, BOOL fToDark)
+/*
+ * Returns TRUE only when this call actually (re)armed a transition -- the caller gates its
+ * clock-stamp/caption-flip/invalidate tail on that, so a duplicate broadcast that arms nothing also
+ * repaints nothing. Returns FALSE for a no-op (from==to) or a duplicate of a live same-direction fade.
+ */
+static FORCEINLINE BOOL ThemeStartBackgroundTransition(BOOL fFromDark, BOOL fToDark)
 {
     if (fFromDark == fToDark)
     {
-        return;
+        return FALSE;
     }
     /* Idempotent: a theme switch delivers more than one ImmersiveColorSet broadcast (the app's own
        re-broadcast plus the system's on the registry write). ThemeArmBackgroundAnimationWindows
@@ -733,11 +738,12 @@ static FORCEINLINE void ThemeStartBackgroundTransition(BOOL fFromDark, BOOL fToD
         (g_theme.fAnimationFromDark == fFromDark) &&
         (g_theme.fAnimationToDark == fToDark))
     {
-        return;
+        return FALSE;
     }
     g_theme.fAnimationFromDark = fFromDark;
     g_theme.fAnimationToDark = fToDark;
     ThemeArmBackgroundAnimationWindows();
+    return TRUE;
 }
 
 static FORCEINLINE BOOL ThemeCanPaintBackgroundAnimation(void)
@@ -1367,14 +1373,24 @@ static FORCEINLINE BOOL ThemePublishBroadcastPaintState(void)
     BOOL fRequestedDark;
     BOOL fEffectiveDark;
     BOOL fOldEffectiveDark;
+    BOOL fStarted;
 
     ThemeRefresh();
     fOldEffectiveDark = g_theme.fEffectiveDark;
     fEffectiveDark = ThemeReadEffectiveDarkMode(&fRequestedDark);
-    ThemeStartBackgroundTransition(fOldEffectiveDark, fEffectiveDark);
+    fStarted = ThemeStartBackgroundTransition(fOldEffectiveDark, fEffectiveDark);
     ThemeSetProcessDarkModeAllowed(TRUE);
     g_theme.fRequestedDark = fRequestedDark;
     g_theme.fEffectiveDark = fEffectiveDark;
+    /* A theme switch re-broadcasts ImmersiveColorSet, so this runs more than once per switch. Only the
+       call that actually (re)armed a transition owns the surfaces; a duplicate that armed nothing must
+       not touch them. Re-flipping the caption, re-stamping the shared clock back to t=0, or
+       re-invalidating mid-fade would repaint every crossfading surface (client AND menu, which read the
+       same snapshot clock) at the from-color for a frame -- the visible flash. Leave the live fade be. */
+    if (!fStarted)
+    {
+        return fEffectiveDark;
+    }
     /* Flip the DWM caption attribute at the START of the transition, together with the class-brush
        flip, so DWM's own caption crossfade runs concurrently with the client/menu crossfade instead
        of starting late and lagging ~30 frames behind. Caption and client then animate in sync. */

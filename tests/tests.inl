@@ -895,7 +895,14 @@ static BOOL ThemeTestCaptureInit(THEME_CAPTURE* pCap, const RECT* prc, UINT cFra
     pCap->ppEncodeFrames = (ID3D11Texture2D**)HeapAlloc(GetProcessHeap(),
                                                         HEAP_ZERO_MEMORY,
                                                         (SIZE_T)(sizeof(ID3D11Texture2D*) * pCap->cFrames));
-    return IsNonNull(pCap->ppFrames) && IsNonNull(pCap->ppEncodeFrames);
+    pCap->ppAnalysisFrames = (ID3D11Texture2D**)HeapAlloc(GetProcessHeap(),
+                                                          HEAP_ZERO_MEMORY,
+                                                          (SIZE_T)(sizeof(ID3D11Texture2D*) * pCap->cFrames));
+    pCap->pSurfColor = (COLORREF*)HeapAlloc(GetProcessHeap(),
+                                            HEAP_ZERO_MEMORY,
+                                            (SIZE_T)(sizeof(COLORREF) * pCap->cFrames * THEME_MAX_SURF));
+    return IsNonNull(pCap->ppFrames) && IsNonNull(pCap->ppEncodeFrames) &&
+           IsNonNull(pCap->ppAnalysisFrames) && IsNonNull(pCap->pSurfColor);
 }
 
 static UINT ThemeTestNativeRecordFrameCount(const THEME_DXGI* pDxgi)
@@ -947,6 +954,21 @@ static void ThemeTestCaptureFree(THEME_CAPTURE* pCap)
             }
         }
         HeapFree(GetProcessHeap(), 0, pCap->ppEncodeFrames);
+    }
+    if (pCap->ppAnalysisFrames)
+    {
+        for (i = 0u; i < pCap->cFrames; ++i)
+        {
+            if (pCap->ppAnalysisFrames[i])
+            {
+                ID3D11Texture2D_Release(pCap->ppAnalysisFrames[i]);
+            }
+        }
+        HeapFree(GetProcessHeap(), 0, pCap->ppAnalysisFrames);
+    }
+    if (pCap->pSurfColor)
+    {
+        HeapFree(GetProcessHeap(), 0, pCap->pSurfColor);
     }
     if (pCap->pbFrames)
     {
@@ -1180,12 +1202,20 @@ static BOOL ThemeTestDxgiCopyFrame(THEME_DXGI* pDxgi, THEME_CAPTURE* pCap, ID3D1
     ID3D11DeviceContext_CopyResource(pDxgi->pContext,
                                      (ID3D11Resource*)pCap->ppEncodeFrames[iFrame],
                                      (ID3D11Resource*)pCap->ppFrames[iSlot]);
+    /* Independent blit for the reduction compute thread (see ppAnalysisFrames). */
+    ID3D11DeviceContext_CopyResource(pDxgi->pContext,
+                                     (ID3D11Resource*)pCap->ppAnalysisFrames[iFrame],
+                                     (ID3D11Resource*)pCap->ppFrames[iSlot]);
     ID3D11DeviceContext_Flush(pDxgi->pContext);
     pCap->cCaptured = iFrame + 1u;
     InterlockedExchange(&pCap->cReadyFrames, (LONG)(iFrame + 1u));
     if (pCap->hEncodeReady)
     {
         SetEvent(pCap->hEncodeReady);
+    }
+    if (pCap->hReduceReady)
+    {
+        SetEvent(pCap->hReduceReady);
     }
     return TRUE;
 }
@@ -1221,12 +1251,20 @@ static BOOL ThemeTestDxgiRepeatFrame(THEME_DXGI* pDxgi, THEME_CAPTURE* pCap, UIN
     ID3D11DeviceContext_CopyResource(pDxgi->pContext,
                                      (ID3D11Resource*)pCap->ppEncodeFrames[iFrame],
                                      (ID3D11Resource*)pCap->ppFrames[iSlot]);
+    /* Independent blit for the reduction compute thread (see ppAnalysisFrames). */
+    ID3D11DeviceContext_CopyResource(pDxgi->pContext,
+                                     (ID3D11Resource*)pCap->ppAnalysisFrames[iFrame],
+                                     (ID3D11Resource*)pCap->ppFrames[iSlot]);
     ID3D11DeviceContext_Flush(pDxgi->pContext);
     pCap->cCaptured = iFrame + 1u;
     InterlockedExchange(&pCap->cReadyFrames, (LONG)(iFrame + 1u));
     if (pCap->hEncodeReady)
     {
         SetEvent(pCap->hEncodeReady);
+    }
+    if (pCap->hReduceReady)
+    {
+        SetEvent(pCap->hReduceReady);
     }
     return TRUE;
 }
@@ -1258,7 +1296,273 @@ static BOOL ThemeTestAllocateFrameQueue(THEME_DXGI* pDxgi, THEME_CAPTURE* pCap)
             return FALSE;
         }
     }
+    /* The analysis set is bound as a shader resource so the reduction compute shader can SRV-read it;
+       otherwise identical to the encode set. Separate textures (vs reusing ppEncodeFrames) keep the
+       compute thread off the encoder's frames so the two never serialize on a shared resource. */
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    for (i = 0u; i < pCap->cFrames; ++i)
+    {
+        if (FAILED(ID3D11Device_CreateTexture2D(pDxgi->pDevice, &desc, NULL, &pCap->ppAnalysisFrames[i])))
+        {
+            return FALSE;
+        }
+    }
     return TRUE;
+}
+
+/*
+ * GPU reduction pipeline. Creates the reduction compute shader and its buffers; reduces each captured
+ * analysis frame to a per-surface exact-mean color via Dispatch; reads the whole time series back once.
+ * The device is created without D3D11_CREATE_DEVICE_SINGLETHREADED, so the immediate context is
+ * internally synchronized -- the reduce thread shares it with the capture thread safely (they serialize
+ * on D3D's lock, but operate on disjoint resources so neither blocks on the other's frames).
+ */
+static void ThemeTestComputeFree(THEME_DXGI* pDxgi)
+{
+    if (pDxgi->pReduceStaging)     { ID3D11Buffer_Release(pDxgi->pReduceStaging);          pDxgi->pReduceStaging = NULL; }
+    if (pDxgi->pReduceResultsUAV)  { ID3D11UnorderedAccessView_Release(pDxgi->pReduceResultsUAV); pDxgi->pReduceResultsUAV = NULL; }
+    if (pDxgi->pReduceResults)     { ID3D11Buffer_Release(pDxgi->pReduceResults);          pDxgi->pReduceResults = NULL; }
+    if (pDxgi->pReduceParams)      { ID3D11Buffer_Release(pDxgi->pReduceParams);           pDxgi->pReduceParams = NULL; }
+    if (pDxgi->pReduceCS)          { ID3D11ComputeShader_Release(pDxgi->pReduceCS);        pDxgi->pReduceCS = NULL; }
+    pDxgi->fComputeReady = FALSE;
+}
+
+static BOOL ThemeTestComputeInit(THEME_DXGI* pDxgi, const THEME_CAPTURE* pCap)
+{
+    D3D11_BUFFER_DESC                desc;
+    D3D11_UNORDERED_ACCESS_VIEW_DESC uav;
+    UINT                             cElems;
+
+    /* cs_5_0 + structured-buffer UAV require feature level 11_0+. On a 10_0 device CreateComputeShader
+       fails and fComputeReady stays FALSE; the caller then skips the GPU-reduced analysis with a note. */
+    if (FAILED(ID3D11Device_CreateComputeShader(pDxgi->pDevice,
+                                                g_themeReduceCS,
+                                                (SIZE_T)sizeof(g_themeReduceCS),
+                                                NULL,
+                                                &pDxgi->pReduceCS)))
+    {
+        return FALSE;
+    }
+
+    cElems = pCap->cFrames * THEME_MAX_SURF;
+
+    SecureZeroMemory(&desc, sizeof(desc));
+    desc.ByteWidth = (UINT)sizeof(THEME_REDUCE_PARAMS);
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    if (FAILED(ID3D11Device_CreateBuffer(pDxgi->pDevice, &desc, NULL, &pDxgi->pReduceParams)))
+    {
+        ThemeTestComputeFree(pDxgi);
+        return FALSE;
+    }
+
+    SecureZeroMemory(&desc, sizeof(desc));
+    desc.ByteWidth = cElems * 16u;                 /* uint4 per (frame, surface) */
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+    desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+    desc.StructureByteStride = 16u;
+    if (FAILED(ID3D11Device_CreateBuffer(pDxgi->pDevice, &desc, NULL, &pDxgi->pReduceResults)))
+    {
+        ThemeTestComputeFree(pDxgi);
+        return FALSE;
+    }
+
+    SecureZeroMemory(&uav, sizeof(uav));
+    uav.Format = DXGI_FORMAT_UNKNOWN;
+    uav.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+    uav.Buffer.FirstElement = 0u;
+    uav.Buffer.NumElements = cElems;
+    if (FAILED(ID3D11Device_CreateUnorderedAccessView(pDxgi->pDevice,
+                                                      (ID3D11Resource*)pDxgi->pReduceResults,
+                                                      &uav,
+                                                      &pDxgi->pReduceResultsUAV)))
+    {
+        ThemeTestComputeFree(pDxgi);
+        return FALSE;
+    }
+
+    SecureZeroMemory(&desc, sizeof(desc));
+    desc.ByteWidth = cElems * 16u;
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    if (FAILED(ID3D11Device_CreateBuffer(pDxgi->pDevice, &desc, NULL, &pDxgi->pReduceStaging)))
+    {
+        ThemeTestComputeFree(pDxgi);
+        return FALSE;
+    }
+
+    pDxgi->fComputeReady = TRUE;
+    return TRUE;
+}
+
+/* Capture-space sample patch for surface s: a (2*HALF)^2 box centered on the screen-space sample point,
+   clamped to the captured region. Returned in p->gRects[s] = {x, y, w, h}. */
+static void ThemeTestComputeSurfaceRect(const THEME_CAPTURE* pCap, UINT s, THEME_REDUCE_PARAMS* p)
+{
+    LONG x;
+    LONG y;
+    LONG w;
+    LONG h;
+
+    x = (pCap->rgSurfPt[s].x - pCap->rc.left) - THEME_SURF_HALF;
+    y = (pCap->rgSurfPt[s].y - pCap->rc.top) - THEME_SURF_HALF;
+    w = 2 * THEME_SURF_HALF;
+    h = 2 * THEME_SURF_HALF;
+    if (x < 0) { x = 0; }
+    if (y < 0) { y = 0; }
+    if ((x + w) > pCap->cx) { w = pCap->cx - x; }
+    if ((y + h) > pCap->cy) { h = pCap->cy - y; }
+    if (w < 0) { w = 0; }
+    if (h < 0) { h = 0; }
+    p->gRects[s][0] = (UINT)x;
+    p->gRects[s][1] = (UINT)y;
+    p->gRects[s][2] = (UINT)w;
+    p->gRects[s][3] = (UINT)h;
+}
+
+static BOOL ThemeTestComputeReduceFrame(THEME_DXGI* pDxgi, const THEME_CAPTURE* pCap,
+                                        THEME_REDUCE_PARAMS* pParams, UINT iFrame)
+{
+    D3D11_SHADER_RESOURCE_VIEW_DESC srv;
+    ID3D11ShaderResourceView*       pSRV;
+    ID3D11ShaderResourceView*       pNullSRV;
+    ID3D11UnorderedAccessView*      pNullUAV;
+
+    SecureZeroMemory(&srv, sizeof(srv));
+    srv.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    srv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    srv.Texture2D.MostDetailedMip = 0u;
+    srv.Texture2D.MipLevels = 1u;
+    pSRV = NULL;
+    if (FAILED(ID3D11Device_CreateShaderResourceView(pDxgi->pDevice,
+                                                     (ID3D11Resource*)pCap->ppAnalysisFrames[iFrame],
+                                                     &srv,
+                                                     &pSRV)))
+    {
+        return FALSE;
+    }
+
+    pParams->gFrameSlot = iFrame;
+    ID3D11DeviceContext_UpdateSubresource(pDxgi->pContext,
+                                          (ID3D11Resource*)pDxgi->pReduceParams,
+                                          0u, NULL, pParams, 0u, 0u);
+
+    ID3D11DeviceContext_CSSetShader(pDxgi->pContext, pDxgi->pReduceCS, NULL, 0u);
+    ID3D11DeviceContext_CSSetConstantBuffers(pDxgi->pContext, 0u, 1u, &pDxgi->pReduceParams);
+    ID3D11DeviceContext_CSSetShaderResources(pDxgi->pContext, 0u, 1u, &pSRV);
+    ID3D11DeviceContext_CSSetUnorderedAccessViews(pDxgi->pContext, 0u, 1u, &pDxgi->pReduceResultsUAV, NULL);
+    ID3D11DeviceContext_Dispatch(pDxgi->pContext, pCap->cSurf, 1u, 1u);
+
+    /* Unbind so the SRV's texture is free for the next frame's blit and the UAV for readback. */
+    pNullSRV = NULL;
+    pNullUAV = NULL;
+    ID3D11DeviceContext_CSSetShaderResources(pDxgi->pContext, 0u, 1u, &pNullSRV);
+    ID3D11DeviceContext_CSSetUnorderedAccessViews(pDxgi->pContext, 0u, 1u, &pNullUAV, NULL);
+    ID3D11ShaderResourceView_Release(pSRV);
+    return TRUE;
+}
+
+static BOOL ThemeTestComputeReadback(THEME_DXGI* pDxgi, THEME_CAPTURE* pCap)
+{
+    D3D11_MAPPED_SUBRESOURCE map;
+    const UINT*              pu;
+    UINT                     i;
+    UINT                     cElems;
+    UINT                     sumR;
+    UINT                     sumG;
+    UINT                     sumB;
+    UINT                     cN;
+
+    ID3D11DeviceContext_CopyResource(pDxgi->pContext,
+                                     (ID3D11Resource*)pDxgi->pReduceStaging,
+                                     (ID3D11Resource*)pDxgi->pReduceResults);
+    if (FAILED(ID3D11DeviceContext_Map(pDxgi->pContext,
+                                       (ID3D11Resource*)pDxgi->pReduceStaging,
+                                       0u, D3D11_MAP_READ, 0u, &map)))
+    {
+        return FALSE;
+    }
+    pu = (const UINT*)map.pData;
+    cElems = pCap->cCaptured * THEME_MAX_SURF;
+    for (i = 0u; i < cElems; ++i)
+    {
+        sumR = pu[(i * 4u) + 0u];
+        sumG = pu[(i * 4u) + 1u];
+        sumB = pu[(i * 4u) + 2u];
+        cN   = pu[(i * 4u) + 3u];
+        if (0u == cN)
+        {
+            pCap->pSurfColor[i] = CLR_INVALID;
+        }
+        else
+        {
+            pCap->pSurfColor[i] = RGB((BYTE)(sumR / cN), (BYTE)(sumG / cN), (BYTE)(sumB / cN));
+        }
+    }
+    ID3D11DeviceContext_Unmap(pDxgi->pContext, (ID3D11Resource*)pDxgi->pReduceStaging, 0u);
+    return TRUE;
+}
+
+/*
+ * Reduce-on-GPU worker: a peer of the encode thread. Drains captured analysis frames as they become
+ * ready (off cReadyFrames / hReduceReady), dispatching one reduction per frame, then reads the whole
+ * per-surface color time series back once capture completes. Independent ppAnalysisFrames slots mean it
+ * never contends with the encoder for a texture.
+ */
+static BOOL ThemeTestReduceCapturedFrames(THEME_DXGI* pDxgi, THEME_CAPTURE* pCap)
+{
+    THEME_REDUCE_PARAMS params;
+    UINT                s;
+    LONG                iDone;
+    LONG                cReady;
+
+    if (!pDxgi->fComputeReady)
+    {
+        return FALSE;
+    }
+    SecureZeroMemory(&params, sizeof(params));
+    params.gSurfCount = pCap->cSurf;
+    for (s = 0u; s < pCap->cSurf; ++s)
+    {
+        ThemeTestComputeSurfaceRect(pCap, s, &params);
+    }
+
+    iDone = 0;
+    while (TRUE)
+    {
+        cReady = InterlockedCompareExchange(&pCap->cReadyFrames, 0, 0);
+        while (iDone < cReady)
+        {
+            if (!ThemeTestComputeReduceFrame(pDxgi, pCap, &params, (UINT)iDone))
+            {
+                return FALSE;
+            }
+            ++iDone;
+            InterlockedExchange(&pCap->cReducedFrames, iDone);
+        }
+        if (InterlockedCompareExchange(&pCap->fCaptureComplete, 0, 0) &&
+            (iDone >= InterlockedCompareExchange(&pCap->cReadyFrames, 0, 0)))
+        {
+            break;
+        }
+        if (pCap->hReduceReady)
+        {
+            (void)WaitForSingleObject(pCap->hReduceReady, THEME_DXGI_TIMEOUT_MS);
+        }
+    }
+    return ThemeTestComputeReadback(pDxgi, pCap);
+}
+
+static DWORD WINAPI ThemeTestReduceThread(LPVOID pv)
+{
+    THEME_REDUCE_RUN* pRun;
+
+    pRun = (THEME_REDUCE_RUN*)pv;
+    pRun->dwThreadId = GetCurrentThreadId();
+    pRun->fOk = ThemeTestReduceCapturedFrames(pRun->pDxgi, pRun->pCap);
+    SetEvent(pRun->hDone);
+    return pRun->fOk ? 0u : 1u;
 }
 
 static BOOL ThemeTestFramePixel(const THEME_CAPTURE* pCap, UINT iFrame, POINT ptScreen, COLORREF* pcr)
@@ -1743,22 +2047,103 @@ static int ThemeTestMenuLumaAt(const THEME_CAPTURE* pCap, UINT iFrame, const POI
 #define THEME_BAND_TOL      9
 #define THEME_MIN_SPAN    120   /* a real transition moves the caption at least this much luma */
 
-/* Luma of surface k at a frame. k: 0 ref caption, 1 dialog caption, 2 menu bar (avg of its points),
-   3 top client, 4 dialog client, 5 static, 6 OK button. */
+/* Luma of surface k at a frame, sourced from the GPU-reduced per-surface mean color (pSurfColor),
+   NOT a CPU pixel read -- the compute shader integer-averaged each surface's capture-space patch for
+   every captured frame on the reduce thread. k: 0 ref caption, 1 dialog caption, 2 menu bar, 3 top
+   client, 4 dialog client, 5 static, 6 OK button. Returns -1 when the patch had no pixels (CLR_INVALID).
+   The trailing point/menu args are unused now (the GPU patch replaces them) but kept so the analyzer's
+   many call sites stay untouched. */
 static int ThemeTestSurfaceLuma(const THEME_CAPTURE* pCap, UINT iFrame, UINT k,
                                 POINT ptRef, const POINT* rgSurf, const POINT* rgMenu, UINT cMenu)
 {
-    static const UINT rgMap[7] = { 0u, 0u, 0u, 1u, 2u, 3u, 4u };
+    COLORREF cr;
 
-    if (0u == k)
+    UNREFERENCED_PARAMETER(ptRef);
+    UNREFERENCED_PARAMETER(rgSurf);
+    UNREFERENCED_PARAMETER(rgMenu);
+    UNREFERENCED_PARAMETER(cMenu);
+    if (!pCap->pSurfColor || (k >= THEME_MAX_SURF) || (iFrame >= pCap->cFrames))
     {
-        return ThemeTestLumaAt(pCap, iFrame, ptRef);
+        return -1;
     }
-    if (2u == k)
+    cr = pCap->pSurfColor[(iFrame * THEME_MAX_SURF) + k];
+    if (CLR_INVALID == cr)
     {
-        return ThemeTestMenuLumaAt(pCap, iFrame, rgMenu, cMenu);
+        return -1;
     }
-    return ThemeTestLumaAt(pCap, iFrame, rgSurf[rgMap[k]]);
+    return (int)(((299u * GetRValue(cr)) + (587u * GetGValue(cr)) + (114u * GetBValue(cr))) / 1000u);
+}
+
+/*
+ * Fill pCap->rgSurfPt / rgSurfActive with the per-surface SCREEN-space sample centers the reduction
+ * shader patches -- run BEFORE capture so the reduce thread has them. Surface order matches
+ * ThemeTestSurfaceLuma's k: 0 main caption, 1 dialog caption, 2 menu bar (its middle probe), 3 main
+ * client, 4 dialog client, 5 dialog static, 6 OK button. The main window's caption/menu/client are
+ * always present; the dialog and its children are optional. Must mirror the analyzer's old per-surface
+ * sample points exactly so the GPU patch lands on the same place the CPU used to read.
+ */
+static void ThemeTestFillSurfacePoints(HWND hwndTop, HWND hwndDialog, HWND hwndStatic, HWND hwndButton,
+                                       THEME_CAPTURE* pCap)
+{
+    POINT rgMenu[3];
+    POINT pt;
+    RECT  rcTop;
+    RECT  rcDialog;
+    UINT  cMenu;
+    UINT  k;
+
+    pCap->cSurf = 7u;
+    for (k = 0u; k < THEME_MAX_SURF; ++k)
+    {
+        pCap->rgSurfActive[k] = FALSE;
+        pCap->rgSurfPt[k].x = 0;
+        pCap->rgSurfPt[k].y = 0;
+    }
+    if (!GetWindowRect(hwndTop, &rcTop))
+    {
+        return;
+    }
+    /* 0: main caption (reference). */
+    pCap->rgSurfPt[0].x = rcTop.left + 120;
+    pCap->rgSurfPt[0].y = rcTop.top + 12;
+    pCap->rgSurfActive[0] = TRUE;
+    /* 2: menu bar -- its middle probe (max-of-3 collapses to one robust box patch on the GPU). */
+    if (ThemeTestMenuPoints(hwndTop, rgMenu, &cMenu))
+    {
+        pCap->rgSurfPt[2] = rgMenu[1];
+        pCap->rgSurfActive[2] = TRUE;
+    }
+    /* 3: main client. */
+    if (ThemeTestSamplePoint(hwndTop, 24, 96, &pt))
+    {
+        pCap->rgSurfPt[3] = pt;
+        pCap->rgSurfActive[3] = TRUE;
+    }
+    if (hwndDialog && GetWindowRect(hwndDialog, &rcDialog))
+    {
+        /* 1: dialog caption. */
+        pCap->rgSurfPt[1].x = rcDialog.left + 190;
+        pCap->rgSurfPt[1].y = rcDialog.top + 12;
+        pCap->rgSurfActive[1] = TRUE;
+        /* 4: dialog client. */
+        if (ThemeTestSamplePoint(hwndDialog, 180, 84, &pt))
+        {
+            pCap->rgSurfPt[4] = pt;
+            pCap->rgSurfActive[4] = TRUE;
+        }
+    }
+    /* 5: dialog static. */
+    if (hwndStatic && ThemeTestSamplePoint(hwndStatic, 8, 8, &pt))
+    {
+        pCap->rgSurfPt[5] = pt;
+        pCap->rgSurfActive[5] = TRUE;
+    }
+    /* 6: OK button. */
+    if (hwndButton && ThemeTestSamplePoint(hwndButton, 12, 8, &pt))
+    {
+        pCap->rgSurfPt[6] = pt;
+        pCap->rgSurfActive[6] = TRUE;
+    }
 }
 
 /* Where a surface sits in its OWN transition, 0..100, relative to its own dark/light endpoints --
@@ -1818,43 +2203,27 @@ static BOOL ThemeTestAnalyzeCapturedFrames(THEME_CAPTURE* pCap,
        optional (main-window-only capture passes them NULL). Each surface carries an 'active' flag so
        absent surfaces are simply excluded from the band and the start/end-sync checks rather than
        failing the analysis. */
+    UNREFERENCED_PARAMETER(hwndTop);
+    UNREFERENCED_PARAMETER(hwndDialog);
+    UNREFERENCED_PARAMETER(hwndStatic);
+    UNREFERENCED_PARAMETER(hwndButton);
+    /* Per-surface sample patches were computed pre-capture (ThemeTestFillSurfacePoints) and reduced on
+       the GPU; the analyzer reads each surface's per-frame mean color from pCap->pSurfColor by index
+       (ThemeTestSurfaceLuma), so it no longer recomputes screen points here. ptRef/rgSurf/rgMenu/cMenu
+       survive only as now-ignored call arguments at the unchanged read sites below. */
     for (k = 0u; k < 7u; ++k)
     {
-        rgActive[k] = FALSE;
+        rgActive[k] = pCap->rgSurfActive[k];
     }
     SecureZeroMemory(rgSurf, sizeof(rgSurf));
-    if (!ThemeTestMenuPoints(hwndTop, rgMenu, &cMenu) ||
-        !ThemeTestSamplePoint(hwndTop, 24, 96, &rgSurf[1]))
-    {
-        return FALSE;
-    }
-    if (!GetWindowRect(hwndTop, &rcTop))
-    {
-        return FALSE;
-    }
+    SecureZeroMemory(rgMenu, sizeof(rgMenu));
+    SecureZeroMemory(&ptRef, sizeof(ptRef));
+    SecureZeroMemory(&rcTop, sizeof(rcTop));
     SecureZeroMemory(&rcDialog, sizeof(rcDialog));
-    ptRef.x = rcTop.left + 120;
-    ptRef.y = rcTop.top + 12;
-    rgActive[0] = TRUE;   /* main caption (reference, always active -- no modal dialog dims it) */
-    rgActive[2] = TRUE;   /* menu bar     */
-    rgActive[3] = TRUE;   /* main client  */
-    if (hwndDialog && GetWindowRect(hwndDialog, &rcDialog))
+    cMenu = 0u;
+    if (!rgActive[0])
     {
-        rgSurf[0].x = rcDialog.left + 190;
-        rgSurf[0].y = rcDialog.top + 12;
-        rgActive[1] = TRUE;
-        if (ThemeTestSamplePoint(hwndDialog, 180, 84, &rgSurf[2]))
-        {
-            rgActive[4] = TRUE;
-        }
-    }
-    if (hwndStatic && ThemeTestSamplePoint(hwndStatic, 8, 8, &rgSurf[3]))
-    {
-        rgActive[5] = TRUE;
-    }
-    if (hwndButton && ThemeTestSamplePoint(hwndButton, 12, 8, &rgSurf[4]))
-    {
-        rgActive[6] = TRUE;
+        return FALSE;   /* no reference caption -> nothing to band against */
     }
 
     /* Establish each surface's pre-transition plateau from a frame that is past the capture's black
@@ -1868,8 +2237,8 @@ static BOOL ThemeTestAnalyzeCapturedFrames(THEME_CAPTURE* pCap,
         int iB;
         int iD;
 
-        iA = ThemeTestLumaAt(pCap, i, ptRef);
-        iB = ThemeTestLumaAt(pCap, i + 6u, ptRef);
+        iA = ThemeTestSurfaceLuma(pCap, i, 0u, ptRef, rgSurf, rgMenu, cMenu);
+        iB = ThemeTestSurfaceLuma(pCap, i + 6u, 0u, ptRef, rgSurf, rgMenu, cMenu);
         iD = iA - iB;
         if (0 > iD) { iD = -iD; }
         if ((12 < iA) && (6 >= iD))
@@ -1922,9 +2291,9 @@ static BOOL ThemeTestAnalyzeCapturedFrames(THEME_CAPTURE* pCap,
            compositing phase is allowed -- never a larger lead/lag. */
         iPrev = (i > iBase) ? (i - 1u) : iBase;
         iNext = ((i + 1u) < pCap->cCaptured) ? (i + 1u) : i;
-        iRefProg = ThemeTestProgress(ThemeTestLumaAt(pCap, i, ptRef), rgStart[0], rgEnd[0]);
-        iRefPrev = ThemeTestProgress(ThemeTestLumaAt(pCap, iPrev, ptRef), rgStart[0], rgEnd[0]);
-        iRefNext = ThemeTestProgress(ThemeTestLumaAt(pCap, iNext, ptRef), rgStart[0], rgEnd[0]);
+        iRefProg = ThemeTestProgress(ThemeTestSurfaceLuma(pCap, i, 0u, ptRef, rgSurf, rgMenu, cMenu), rgStart[0], rgEnd[0]);
+        iRefPrev = ThemeTestProgress(ThemeTestSurfaceLuma(pCap, iPrev, 0u, ptRef, rgSurf, rgMenu, cMenu), rgStart[0], rgEnd[0]);
+        iRefNext = ThemeTestProgress(ThemeTestSurfaceLuma(pCap, iNext, 0u, ptRef, rgSurf, rgMenu, cMenu), rgStart[0], rgEnd[0]);
         for (k = 0u; k < 7u; ++k)
         {
             int iLuma;
@@ -2030,7 +2399,7 @@ static BOOL ThemeTestAnalyzeCapturedFrames(THEME_CAPTURE* pCap,
     {
         UINT bf = uBandFrame - 1u;
         OutF(TEXT("[BAND] frame=%d\n"), (int)uBandFrame);
-        OutF(TEXT("[BAND] refprog=%d\n"), ThemeTestProgress(ThemeTestLumaAt(pCap, bf, ptRef), rgStart[0], rgEnd[0]));
+        OutF(TEXT("[BAND] refprog=%d\n"), ThemeTestProgress(ThemeTestSurfaceLuma(pCap, bf, 0u, ptRef, rgSurf, rgMenu, cMenu), rgStart[0], rgEnd[0]));
         for (k = 0u; k < 7u; ++k)
         {
             OutF(TEXT("[BAND] prog=%d\n"),
@@ -2038,7 +2407,7 @@ static BOOL ThemeTestAnalyzeCapturedFrames(THEME_CAPTURE* pCap,
         }
         OutF(TEXT("[BAND] menustart=%d\n"), rgStart[2]);
         OutF(TEXT("[BAND] menuend=%d\n"), rgEnd[2]);
-        OutF(TEXT("[BAND] menuluma=%d\n"), ThemeTestMenuLumaAt(pCap, bf, rgMenu, cMenu));
+        OutF(TEXT("[BAND] menuluma=%d\n"), ThemeTestSurfaceLuma(pCap, bf, 2u, ptRef, rgSurf, rgMenu, cMenu));
     }
     return TRUE;
 }
@@ -3075,6 +3444,13 @@ static BOOL ThemeTestLaunchWindowsProject(HWND* phwndTop, HWND* phwndDialog, HWN
 
     SecureZeroMemory(&si, sizeof(si));
     si.cb = (DWORD)sizeof(si);
+    /* Launch the app small via STARTUPINFO: it honors STARTF_USESIZE in CalculateWindowStartupPosition
+       (falling back to 3/4 work area otherwise), so a smaller window means a smaller capture region and
+       faster decode for the single straight recording, while staying large enough that the main client
+       is not occluded by the centered modal About dialog. */
+    si.dwFlags = STARTF_USESIZE;
+    si.dwXSize = THEME_APP_WIDTH;
+    si.dwYSize = THEME_APP_HEIGHT;
     SecureZeroMemory(&pi, sizeof(pi));
     if (!ThemeTestWindowsProjectPath(szExe, (int)ARRAYSIZE(szExe)))
     {
@@ -3172,6 +3548,10 @@ static void ThemeTestRunTransition(BOOL fWriteSystem, LPCTSTR pszTag)
     HANDLE            hCaptureDone;
     HANDLE            hEncodeThread;
     HANDLE            hEncodeDone;
+    HANDLE            hReduceThread;
+    HANDLE            hReduceDone;
+    THEME_REDUCE_RUN  reduceRun;
+    BOOL              fReduced;
     HANDLE            hMutex;
     DWORD             dwWait;
     DWORD             dwGuiThreadId;
@@ -3251,6 +3631,9 @@ static void ThemeTestRunTransition(BOOL fWriteSystem, LPCTSTR pszTag)
     hCaptureDone = NULL;
     hEncodeThread = NULL;
     hEncodeDone = NULL;
+    hReduceThread = NULL;
+    hReduceDone = NULL;
+    fReduced = FALSE;
     SecureZeroMemory(&rcTopCreated, sizeof(rcTopCreated));
 
     /* Launch the real, theme-integrated WindowsProject.exe and drive the transition on IT. The Win32X
@@ -3338,6 +3721,21 @@ static void ThemeTestRunTransition(BOOL fWriteSystem, LPCTSTR pszTag)
             encodeRun.hDone = hEncodeDone;
             hEncodeThread = CreateThread(NULL, 0, ThemeTestEncodeThread, &encodeRun, 0, NULL);
         }
+        /* Stand up the GPU reduction alongside the encoder: fix the surface sample patches, init the
+           compute pipeline, and spawn the reduce thread. It drains analysis-blit frames as they go
+           ready (off capture.hReduceReady) into the per-surface color time series -- concurrent with,
+           and on independent textures from, the encoder, so neither stalls the other. */
+        capture.hReduceReady = CreateEvent(NULL, FALSE, FALSE, NULL);
+        hReduceDone = CreateEvent(NULL, TRUE, FALSE, NULL);
+        ThemeTestFillSurfacePoints(hwndTop, hwndDialog, hwndStatic, hwndButton, &capture);
+        if (ThemeTestComputeInit(&dxgi, &capture) && capture.hReduceReady && hReduceDone)
+        {
+            SecureZeroMemory(&reduceRun, sizeof(reduceRun));
+            reduceRun.pDxgi = &dxgi;
+            reduceRun.pCap = &capture;
+            reduceRun.hDone = hReduceDone;
+            hReduceThread = CreateThread(NULL, 0, ThemeTestReduceThread, &reduceRun, 0, NULL);
+        }
         if (TRUE)
         {
             hCaptureDone = CreateEvent(NULL, TRUE, FALSE, NULL);
@@ -3368,6 +3766,10 @@ static void ThemeTestRunTransition(BOOL fWriteSystem, LPCTSTR pszTag)
         {
             SetEvent(capture.hEncodeReady);
         }
+        if (capture.hReduceReady)
+        {
+            SetEvent(capture.hReduceReady);   /* wake the reducer to drain the tail and finish */
+        }
         if (hEncodeThread)
         {
             if (ThemeTestPumpUntilDone(hEncodeDone, THEME_RECORD_MS + WAIT_MS))
@@ -3394,6 +3796,26 @@ static void ThemeTestRunTransition(BOOL fWriteSystem, LPCTSTR pszTag)
             CloseHandle(capture.hEncodeStarted);
             capture.hEncodeStarted = NULL;
         }
+        if (hReduceThread)
+        {
+            if (ThemeTestPumpUntilDone(hReduceDone, THEME_RECORD_MS + WAIT_MS))
+            {
+                fReduced = reduceRun.fOk;
+            }
+            WaitForSingleObject(hReduceThread, WAIT_MS);
+            CloseHandle(hReduceThread);
+            hReduceThread = NULL;
+        }
+        if (hReduceDone)
+        {
+            CloseHandle(hReduceDone);
+            hReduceDone = NULL;
+        }
+        if (capture.hReduceReady)
+        {
+            CloseHandle(capture.hReduceReady);
+            capture.hReduceReady = NULL;
+        }
         cExpectedFrames = ThemeTestExpectedNativeFrames(&dxgi);
         if (fEncodedFrames)
         {
@@ -3407,9 +3829,10 @@ static void ThemeTestRunTransition(BOOL fWriteSystem, LPCTSTR pszTag)
         fNoMixedFrames = FALSE;
         fSawMenuIntermediateFrame = FALSE;
         fSawTargetFrame = FALSE;
+        /* Analysis runs off the GPU-reduced per-surface color time series (fReduced), NOT a CPU decode
+           of the MP4 -- the MP4 is still written for reference, just no longer the analysis source. */
         fAnalyzedFrames = fCapturedFrames &&
-                          fEncodedFrames &&
-                          ThemeTestDecodeCapturedVideo(&dxgi, &capture) &&
+                          fReduced &&
                           ThemeTestAnalyzeCapturedFrames(&capture,
                                                          hwndTop,
                                                          hwndDialog,
@@ -3458,7 +3881,7 @@ static void ThemeTestRunTransition(BOOL fWriteSystem, LPCTSTR pszTag)
         /* Broadcast the restore so the app -- and the rest of the desktop -- returns to the original
            theme; let it settle before tearing the app down so no stale state is left behind. */
         (void)ThemeTestBroadcastImmersiveColorSet();
-        ThemeTestPumpForMs(THEME_RECORD_MS);
+        ThemeTestPumpForMs(THEME_SETTLE_MS);
     }
 
     /* These are another process's windows -- never DestroyWindow them; terminate the app instead. */
@@ -3494,20 +3917,19 @@ static void ThemeTestRunTransition(BOOL fWriteSystem, LPCTSTR pszTag)
         OutF(TEXT("[INFO] T6 caption luma max: %u\n"), capture.iFirstIntermediateFrame);
     }
     ThemeTestCheck(fRestored, TEXT("T6 restores AppsUseLightTheme"));
+    ThemeTestComputeFree(&dxgi);
     ThemeTestDxgiFree(&dxgi);
     ThemeTestCaptureFree(&capture);
     ReleaseMutex(hMutex);
     CloseHandle(hMutex);
 }
 
-/* Split on registry toggling: T6a flips AppsUseLightTheme alone; T6b flips both AppsUseLightTheme
-   and SystemUsesLightTheme. Each runs the full capture/analyze transition and restores both DWORDs. */
-static void T_ThemeTransitionAppsOnly(void)
-{
-    ThemeTestRunTransition(FALSE, TEXT("[apps] "));
-}
-
-static void T_ThemeTransitionAppsAndSystem(void)
+/* One straight recording of the real-world switch: flip BOTH AppsUseLightTheme and SystemUsesLightTheme
+   (a full Settings theme change -- DWM additionally runs its own caption crossfade, the hardest surface
+   to keep in band), capture/analyze the single transition, and restore both DWORDs. The app-only
+   variant (AppsUseLightTheme alone, no system caption crossfade) is a strict subset of this path and is
+   dropped so T6 runs a single ~3.5s recording rather than two spaced runs. */
+static void T_ThemeTransition(void)
 {
     ThemeTestRunTransition(TRUE, TEXT("[apps+system] "));
 }

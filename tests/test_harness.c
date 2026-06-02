@@ -61,10 +61,27 @@
 #define THEME_ENCODE_QUEUE_FRAMES 12u
 #define THEME_DXGI_TIMEOUT_MS   WAIT_MS
 #define THEME_DRAIN_MS          1000u
-/* Capture/settle window: the immersive crossfade runs well under a second (transition + DWM caption +
-   slack). 1100ms captures the whole transition with margin without padding each run with a needless
-   extra second of plateau -- decoupled from WAIT_MS (the 2s hang timeout) so timeouts stay generous. */
-#define THEME_RECORD_MS         1000u
+/* Record window: ONE straight capture spanning the whole transition (flip -> crossfade -> settle), so
+   T6 runs a single recording instead of two. Decoupled from WAIT_MS (the 2s hang timeout) so timeouts
+   stay generous, and from THEME_SETTLE_MS (the brief post-restore settle) so restoring the original
+   theme does not pad the run with a second full-length record. */
+#define THEME_RECORD_MS         1100u
+/* Post-restore settle: after broadcasting the theme restore we only need the desktop to begin
+   repainting before the app is torn down -- not a whole transition -- so this is short, not RECORD_MS. */
+#define THEME_SETTLE_MS         300u
+/* WindowsProject launch size in physical px, handed to it via STARTF_USESIZE (the app honors
+   STARTUPINFO size in CalculateWindowStartupPosition, falling back to 3/4 work area otherwise). Small
+   enough to keep the single straight recording's frame region and decode light; large enough that the
+   main client stays visible around the centered modal About dialog so every sampled surface is
+   unoccluded (client sampled at (24,96), dialog caption needs >=190px width). */
+#define THEME_APP_WIDTH         800u
+#define THEME_APP_HEIGHT        600u
+/* Max sampled surfaces the reduction compute shader handles per frame (must equal THEME_MAX_SURF in
+   theme_reduce.hlsl). Half-extent of the square pixel patch averaged per surface sample point: a patch
+   (vs a single texel) is the discrete box-convolution that makes each surface's per-frame color robust
+   to AA/subpixel noise -- and the GPU sums it exactly in integers, so the result is deterministic. */
+#define THEME_MAX_SURF          8u
+#define THEME_SURF_HALF         6
 
 typedef struct
 {
@@ -81,11 +98,19 @@ typedef struct
     BYTE* pbFrames;
     ID3D11Texture2D** ppFrames;
     ID3D11Texture2D** ppEncodeFrames;
+    ID3D11Texture2D** ppAnalysisFrames;   /* independent blit set the compute thread reduces, so the
+                                             reduction never waits on the encoder for a shared texture */
     HANDLE hEncodeReady;
     HANDLE hEncodeStarted;
+    HANDLE hReduceReady;                   /* signalled as each analysis frame is blitted ready         */
     volatile LONG cReadyFrames;
     volatile LONG cEncodedFrames;
+    volatile LONG cReducedFrames;          /* frames the compute thread has reduced so far              */
     volatile LONG fCaptureComplete;
+    UINT     cSurf;                        /* surfaces populated in rgSurfPt (<= THEME_MAX_SURF)         */
+    POINT    rgSurfPt[THEME_MAX_SURF];     /* per-surface sample center, SCREEN space                   */
+    BOOL     rgSurfActive[THEME_MAX_SURF]; /* surface present this run (absent dialog/children -> FALSE)*/
+    COLORREF* pSurfColor;                  /* [cFrames*THEME_MAX_SURF] GPU-reduced mean colors (readback)*/
     BOOL  fEncodeOverflow;
     UINT  cQueueFrames;
     UINT  cFrames;
@@ -107,6 +132,12 @@ typedef struct
     ID3D11DeviceContext* pContext;
     IDXGIOutputDuplication* pDup;
     ID3D11Texture2D*     pStaging;
+    ID3D11ComputeShader*       pReduceCS;        /* theme_reduce.hlsl, embedded bytecode             */
+    ID3D11Buffer*              pReduceParams;    /* dynamic CB: surf count, frame slot, surface rects */
+    ID3D11Buffer*              pReduceResults;   /* structured RWBuffer<uint4>, one slot per frame*surf*/
+    ID3D11UnorderedAccessView* pReduceResultsUAV;
+    ID3D11Buffer*              pReduceStaging;   /* CPU-read copy of pReduceResults                   */
+    BOOL                       fComputeReady;    /* compute path initialized (FL11+, buffers created) */
     LONG                 xOutput;
     LONG                 yOutput;
     UINT                 cxDesktop;
@@ -135,6 +166,25 @@ typedef struct
     DWORD          dwThreadId;
     BOOL           fOk;
 } THEME_ENCODE_RUN;
+
+/* Mirrors theme_reduce.hlsl's cbuffer ThemeReduceParams exactly (16B header + uint4[8] = 144B). */
+typedef struct
+{
+    UINT gSurfCount;
+    UINT gFrameSlot;
+    UINT gPad0;
+    UINT gPad1;
+    UINT gRects[THEME_MAX_SURF][4];   /* per surface: x, y, w, h (capture-space px) */
+} THEME_REDUCE_PARAMS;
+
+typedef struct
+{
+    THEME_DXGI*    pDxgi;
+    THEME_CAPTURE* pCap;
+    HANDLE         hDone;
+    DWORD          dwThreadId;
+    BOOL           fOk;
+} THEME_REDUCE_RUN;
 
 typedef void (*PFN_TEST)(void);
 
@@ -195,6 +245,9 @@ static void Skip(LPCTSTR pszName, LPCTSTR pszWhy)
     Out(TEXT("\n"));
 }
 
+/* Build-generated: const BYTE g_themeReduceCS[] -- compiled bytecode of theme_reduce.hlsl. */
+#include "theme_reduce_cs.h"
+
 #include "tests.inl"
 
 static PFN_TEST volatile g_rgTests[] =
@@ -204,8 +257,7 @@ static PFN_TEST volatile g_rgTests[] =
     T_StartupRect,
     T_Hardening,
     T_Position,
-    T_ThemeTransitionAppsOnly,
-    T_ThemeTransitionAppsAndSystem
+    T_ThemeTransition
 };
 
 void __cdecl TestEntry(void)
