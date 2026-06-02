@@ -1,0 +1,534 @@
+================================================================================
+WIN32 THEME / PAINT / MESSAGE CONTRACT  --  DISASSEMBLY-BACKED REFERENCE
+Target: WindowsProject (CRT-free, manually-themed Win32 app) performing a live
+        light<->dark transition. Every claim is backed by a disassembly listing
+        or a named source line. No documentation paraphrase; no guessing.
+================================================================================
+
+EVIDENCE SOURCES (local module dumps, dumpbin /DISASM[:NOBYTES]; .rdata/strings
+NOT emitted unless noted -> per-class string/name attribution needs public PDBs):
+
+  module          dump file                  pref. base    symbols
+  ntdll.dll       ntdll.disasm.txt           0x180000000   export-only
+  user32.dll      user32.disasm.txt          0x180000000   export-only
+  win32kfull.sys  win32kfull.disasm.txt      0x140000000   none
+  dwmapi.dll      dwmapi.disasm.txt          0x180000000   export-only
+  uxtheme.dll     uxtheme-disasm.txt         0x180000000   export-only
+  comctl32 v5.82  comctl32.disasm.txt        0x180000000   ordinal-only (UNTHEMED stub)
+  comctl32 v6.10  v6.disasm.txt              0x180000000   none (themed; WinSxS)
+
+Listings normalized (whitespace collapsed). Hex addresses at the module's
+preferred base.
+
+================================================================================
+0. DISPATCH MODEL -- DefWindowProc is a kernel thunk
+================================================================================
+
+  ; dumpbin /EXPORTS user32.dll
+    1676  AC          DefWindowProcW (forwarded to NTDLL.NtdllDefWindowProc_W)
+  ; ntdll: NtdllDefWindowProc_W and neighbours form a pfn table -- jmps only:
+    18015FCF0: jmp qword ptr [1801E6200h]
+    18015FD30: jmp qword ptr [1801E6210h]   <- NtdllDefWindowProc_W
+    18015FD50: jmp qword ptr [1801E6218h]
+
+  Grep for any WRITER of 1E6200..1E6228 in ntdll: only the jmp lines. The slot
+  is bound cross-module at runtime; the real worker is in win32u/win32kfull
+  (kernel).
+
+  CONTRACT: DefWindowProc NC/frame/menu/owner-draw handling is kernel-resident.
+            Three legal moves only: act-before-forward, forward-then-repair-after,
+            or do-not-forward. There is no third user-mode layer to patch.
+  NEVER:    assume a message you don't pass to DefWindowProc is handled. Return 0
+            to WM_NCPAINT and the frame + menu never draw.
+
+================================================================================
+1. MENU + OWNER-DRAW -- kernel sends, ALL CONDITIONAL (win32kfull)
+================================================================================
+The kernel menu/NC draw sends the undocumented UAH messages and WM_DRAWITEM via
+xxxSendMessage wrappers (call 14013C620 / 14003A6F0); `mov edx,<id>` = message id.
+EVERY send is gated -- none unconditional, none guaranteed per WM_NCPAINT/tick.
+
+WM_UAHDRAWMENU (0x91) @ 0x140082F7C
+    140082EFF: call 140082698        ; menu-state helper -> eax
+    140082F04: test eax,eax
+    140082F06: je   140082F60        ; eax==0 -> r15b=0 (suppress)
+    140082F08: mov  r15b,r12b        ; eax!=0 -> arm send
+    140082F71: test r15b,r15b        ; GATE
+    140082F74: je   140082F8E        ; r15b==0 -> SKIP send
+    140082F7C: mov  edx,91h          ; WM_UAHDRAWMENU
+    140082F84: call 14013C620        ; xxxSendMessage
+
+WM_UAHDRAWMENUITEM (0x92) @ 0x140084CE4
+    140084C64: test cl,20h           ; menu-state bit 0x20 in [+10654h]
+    140084C67: jne  140084D36        ; set -> bail
+    140084C79: cmp  [rax+10654h],r12d
+    140084C80: jge  140084D36        ; counter past end -> bail
+    140084CE4: mov  edx,92h          ; WM_UAHDRAWMENUITEM
+    140084CEC: call 14003A6F0
+
+WM_UAHINITMENU       (0x93) @ 0x1400826CA  -- gated on a resolvable menu object.
+WM_UAHMEASUREMENUITEM(0x94) @ 0x140083AA2  -- gated on predicate 14009831C!=0 AND target!=0.
+WM_UAHNCPAINTMENUPOPUP(0x95)@ 0x14017B69E  -- gated on 14009831C!=0; else legacy NC paint.
+
+WM_DRAWITEM (0x2B) @ 0x140089DAC
+    140089C61: test dl,dl            ; GATE: owner-draw selector (2nd arg)
+    140089C63: jne  140089D23        ; dl!=0 -> owner-draw send path
+    140089DAC: mov  edx,2Bh          ; WM_DRAWITEM
+    140089DB1: call 14033BA60
+
+FALSE POSITIVE (corrected): `mov edx,90h @ 0x1400A5455` is NOT WM_UAHDESTROYWINDOW.
+It is a DPI-metric SELECTOR fed to the scale helper 1400A434C (not an xxxSendMessage
+wrapper); it sits in a straight run 98h,99h,89h,8Ah,8Ch,8Dh,8Fh,90h,9Eh of metric
+indices. Numeric collision only.
+
+  CONTRACT: UAH/owner-draw callbacks fire only when the kernel decides to repaint
+            the bar AND its state gate passes -- NOT every NCPAINT, NOT every tick.
+  DO  (during animation): DefWindowProc(WM_NCPAINT) first, then repaint the menu
+            band yourself each tick off your clock; the UAH cadence is stale.
+  NEVER:    rely on UAH alone mid-fade (removing the per-tick overpaint regressed
+            the bar to ~120% off the caption). Fill a parent client over child
+            windows without WS_CLIPCHILDREN (paint-fight flicker).
+
+================================================================================
+2. DWM -- dwmapi (caption attribute + caption-button NC)
+================================================================================
+DwmSetWindowAttribute @ 0x180004E20
+    180004E44: test r8,r8           ; pvAttribute != NULL  (else E_INVALIDARG 80070057)
+    180004E6F: cmp  ebp,4           ; cbAttribute >= 4     (else E_INVALIDARG)
+    180004E79: cmp  ebx,0Eh         ; special-cases 0x0E (HOSTBACKDROPBRUSH), 0x0F, 0x26
+    180004EA6: call qword ptr [18001A588h]   ; marshal to DWM service object (not inline LPC)
+  DWMWA_USE_IMMERSIVE_DARK_MODE (0x14) is NOT special-cased here -> generic
+  marshalling path to the DWM service.
+
+DwmDefWindowProc @ 0x180002E10  -- handles EXACTLY 4 messages:
+    180002E44: cmp edx,84h         ; WM_NCHITTEST   -> caption-button hit-test (svc 180004480)
+    18000306B: cmp ebx,0A1h        ; WM_NCLBUTTONDOWN -> reuses hit-test gate @180002E50
+    180003063: cmp ebx,2A2h        ; WM_NCMOUSELEAVE  -> hover/leave notify (180004558)
+    180003079: cmp ebx,2A3h        ; WM_NCMOUSEHOVER  -> hover/leave notify
+    180003081: mov eax,edi         ; default -> return FALSE
+  Accepted hit regions (the sub rax,.. ladder): 8 HTMINBUTTON, 9 HTMAXBUTTON,
+  0x14 HTHELP, 0x15 HTCLOSE. Gated on DWM composition enabled ([18001A550h]==1).
+
+  CONTRACT: caption shade is a binary attribute; DWM composites its crossfade on
+            the VBLANK clock, in another process. DwmDefWindowProc is ONLY caption-
+            button NC interaction -- it does NOT touch frame paint / NCCALCSIZE /
+            NCACTIVATE / sizing.
+  DO:       flip DWMWA_USE_IMMERSIVE_DARK_MODE at transition start so DWM's fade
+            runs concurrently with yours.
+  NEVER:    pass cbAttribute<4 or null value (hard E_INVALIDARG). DwmFlush on the
+            GUI thread (blocks a whole composition). Expect <=1-frame match @180Hz.
+
+================================================================================
+3. UXTHEME / VISUAL STYLES -- the msstyles renderer
+================================================================================
+OpenThemeData @ 0x18000CF40 -- CAN RETURN NULL (theming off / no activation ctx)
+    18000CF4A: mov  eax,[18009F434h]   ; g_fThemingDisabled (process)
+    18000CF74: call [1800715E0h]       ; activation-context / theming-state probe
+    18000CF84: test byte ptr [rsp+34h],1
+    18000CFAA: cmp  dword ptr [18009EB88h],0  ; g_fThemeActive
+    18000CFB1: jne  18000CF8B           ; live -> worker 18000CFC0 -> HTHEME
+    18000CFB3: xor  eax,eax             ; else return NULL
+  A NULL return means visual styles are OFF for this caller (theming disabled OR
+  v6 activation context inactive) -- not an allocation failure.
+
+DrawThemeTextEx @ 0x18001AFB0 -- requires DTTOPTS; renders the msstyles part glow
+    18001AFE3: test rdx,rdx            ; DTTOPTS required
+    18001AFE6: je   18001B250          ; null -> error (DrawThemeText = different entry)
+    18001B02A: mov  eax,[rax]          ; DTTOPTS.dwSize must be 0x38..0x48
+    18001B03F: call 18001C3A0          ; normalize DTTOPTS (consumes DTT_TEXTCOLOR 0x1, DTT_GLOWSIZE 0x800)
+    18001B044: mov  rbp,[18009EBA0h]   ; g_pThemeClassDataTable; HTHEME=LOWORD idx + HIWORD cookie
+  Text drawn through the msstyles part; DTT_TEXTCOLOR only recolors, the part's
+  GLOW still renders. DTT_GLOWSIZE + iGlowSize=0 suppresses it.
+
+DrawThemeBackground @ 0x18001DC90 -- same HTHEME table/cookie validation, then
+  per part/state msstyles draw.
+
+BeginBufferedAnimation @ 0x180022A90 / BufferedPaintRenderAnimation @ 0x180022C40
+    1800242C2: mov  ecx,[18009D6F0h]  ; TLS slot g_dwAnimationTls
+    1800242CF: call [180071C38h]      ; TlsGetValue -> per-thread active-animation list
+    180022C92: cmp  [rdx+0F8h],rdi    ; entry.hwnd == hwnd ?
+    180022C9B: cmp  byte ptr [rdx+100h],bl ; entry active flag set ?
+    180022CAA: call 180022138         ; render this window's frame
+  Buffered-paint animations live in a TLS-keyed list keyed by hwnd ([+0xF8]),
+  tag 3 ([+8]), active flag ([+0x100]). A window has AT MOST ONE. uxtheme advances
+  it on the composition clock and auto-invalidates.
+
+  CONTRACT: NULL-check OpenThemeData. Themed text = msstyles part incl. glow.
+  DO:       render menu/themed text with DrawThemeTextEx (matches system AA);
+            during a fade add DTT_GLOWSIZE/iGlowSize=0 -- the glow re-blending
+            against a moving bar each tick is the shimmer ("result of the msstyle").
+  NEVER:    mix raw GDI DrawTextW with themed draws of one surface (different
+            rasterization -> shimmer). Start a second BeginBufferedAnimation on a
+            window already animating its client (reviving it for the client
+            regressed the round-trip to ~176%).
+
+================================================================================
+4. COMMON CONTROLS -- custom-draw / owner-draw (comctl32)
+================================================================================
+TWO comctl32 exist. C:\Windows\System32\comctl32.dll is v5.82 -- the legacy,
+UN-THEMED SxS stub: zero uxtheme binding, imports only ntdll/advapi32/gdi32/
+kernel32/user32. The THEMED controls live in the v6 assembly under
+C:\Windows\WinSxS\...common-controls_..._6.0.* (activated by app.manifest, S6).
+Custom/owner-draw evidence (0x18002.. addrs) is from the v5 System32 dump; the
+theme/animation contract (S4b) is from v6. v6 imports UxTheme.dll BOTH statically
+AND delay-load (it has a .didat section) -> named, recoverable imports.
+
+NM_CUSTOMDRAW (notify -12 = 0xFFFFFFF4) -- single chokepoint @ 0x18002DF98 (v5)
+    18002DF9C: bt   edx,10h          ; CDDS_ITEM (bit 16) ?
+    18002DFAC: mov  [r8+18h],edx     ; NMCUSTOMDRAW.dwDrawStage
+    18002DFB0: mov  edx,0FFFFFFF4h   ; NM_CUSTOMDRAW
+    18002DFB5: call 18002D08C        ; internal WM_NOTIFY dispatcher:
+      18002D653: mov edx,4Eh         ;   WM_NOTIFY
+      18002D658: call [18008FED8h]   ;   SendMessage(parent, WM_NOTIFY, id, &NMCUSTOMDRAW)
+    18002DFBA: test eax,0FE01h       ; mask returned CDRF_* bits (the one CDRF gate)
+  CDDS stages feed the same helper: mov edx,10001h (CDDS_ITEMPREPAINT) x14 sites,
+  mov edx,10002h (CDDS_ITEMPOSTPAINT) x14. Sites check `cmp eax,4`(CDRF_SKIPDEFAULT).
+
+Owner-draw sends (v5):
+    18004C60D: mov edx,2Bh           ; WM_DRAWITEM    -> call [180090168h]
+    180074FA6: mov edx,2Ch           ; WM_MEASUREITEM -> call [18008FED8h]
+
+  CONTRACT (custom-draw): a themed common control asks the parent per item via
+            WM_NOTIFY/NM_CUSTOMDRAW; the parent's CDRF_* return controls
+            font/skip/post-paint.
+  DO:       return CDRF_DODEFAULT unless intentionally overriding; honor 0xFE01.
+  CONTRACT (owner-draw): WM_DRAWITEM/WM_MEASUREITEM only fire for *_OWNERDRAW
+            controls. NEVER assume owner-draw unless the style requested it.
+
+================================================================================
+4b. COMMON CONTROLS v6 -- the CANONICAL themed cross-fade  (PATTERN TO COPY)
+================================================================================
+v6 controls (incl. the dialog OK button) cross-fade a themed part between two
+states via uxtheme's buffered animation. v6 uxtheme delay-IAT pfn map:
+
+  OpenThemeData               0x180242450    BeginBufferedAnimation        0x180242520
+  DrawThemeBackground         0x180242458    EndBufferedAnimation          0x180242518
+  BeginBufferedPaint          0x1802424A8    BufferedPaintRenderAnimation  0x180242528
+  EndBufferedPaint            0x1802424A0    BufferedPaintInit             0x180242530
+  GetThemeColor               0x180242590    GetThemeTransitionDuration    0x1802425A0
+  IsAppThemed                 0x180242420    CloseThemeData                0x180242468
+
+Four structurally-identical cross-fade routines (one per animated control class) --
+button cluster @0x99xxx (others @0x6Dxxx, 0xB2xxx, 0xC75xx). Annotated
+(rbx=control instance, r12=HDC, r13=rect, [rbx+0x38]=HWND, [rbx+0x15C]=stateId,
+[rbx+0x17C]=init flags, [rbx+0x1C4/1C8]=last-state, [rbx+0x198]=from-theme):
+
+    1800996A5: test dword ptr [rbx+17Ch],edi  ; edi=0x100000 (BufferedPaintInit-done flag)
+    180099933: call qword ptr [180242530h]    ;     BufferedPaintInit()  (lazy, once)
+    1800996B8: call qword ptr [180242528h]    ; (1) BufferedPaintRenderAnimation(hwnd,hdc) FIRST
+    1800996C6: jne  180099842                  ;     animation live -> it blitted this frame -> DONE
+    1800996CE: mov  dword ptr [rbp-21h],10h    ; BP_ANIMATIONPARAMS.cbSize=0x10
+    1800996DC: mov  eax,1                       ; BPAS_LINEAR
+    1800998C4: call qword ptr [1802425A0h]    ; (2) GetThemeTransitionDuration(...) on state change
+    1800997D5: call qword ptr [180242520h]    ; (3) BeginBufferedAnimation -> hdcFrom, hdcTo
+        ; paint OLD state into hdcFrom, NEW state into hdcTo via DrawThemeBackground
+    180099823: call qword ptr [180242518h]    ; (4) EndBufferedAnimation(hbp, TRUE) -> uxtheme owns timeline
+    180099835: mov  [rbx+1C8h],eax             ;     record last-painted state (won't re-trigger)
+
+THE CONTRACT (DO -- copy this for any per-tick cross-fade):
+  1. lazily BufferedPaintInit once (per-control flag guard);
+  2. on each WM_PAINT call BufferedPaintRenderAnimation(hwnd,hdc) FIRST -- nonzero
+     means an animation is in flight and it rendered the frame; STOP. THIS is what
+     continues the fade across paints -- NOT a wall-clock timer;
+  3. only when no animation is running and the state changed: GetThemeTransitionDuration
+     -> BeginBufferedAnimation (captures from/to surfaces) -> paint old into hdcFrom,
+     new into hdcTo;
+  4. EndBufferedAnimation(hbp, TRUE) -- uxtheme drives the timeline on the composition
+     clock and re-invalidates; subsequent paints flow back through step 2.
+
+This is the COMPOSITION-SYNCED cross-fade. The earlier failed revive (round-trip
+176%) did NOT follow this exact shape (render-first, continue-across-paints,
+state-gated single Begin). The OK button's "own clock" IS this uxtheme timeline --
+vblank-driven, not an independent wall clock.
+NEVER: Begin without first letting RenderAnimation continue an in-flight one.
+       Re-Begin every tick.
+
+================================================================================
+5. PER-CLASS IDENTITY -- still needs symbols
+================================================================================
+The 14/14 CDDS sites (S4) and the 4 v6 cross-fade clusters (S4b) map to distinct
+classes (ListView/TreeView/Header/Toolbar/Tab/Trackbar/Rebar/Pager/Button) but
+WHICH cluster is which class cannot be proven from symbol-less dumps (class names
+are lea reg,[rip+disp] into .rdata). The button is ONE of the four S4b clusters,
+inferred structurally. Definitive attribution needs comctl32.pdb (MS Symbol
+Server). Scratch v6 disasm: C:\dev\Win32X\v6.disasm.txt.
+
+================================================================================
+6. ACTIVATION CONTEXT  (cross-cutting)
+================================================================================
+- examples/app.manifest:10 declares Microsoft.Windows.Common-Controls 6.0.0.0.
+- OpenThemeData's gate (S3) + comctl32's v6 SxS binding mean themed/UAH draw only
+  happens with the v6 activation context active on the SERVICING thread.
+NEVER: run a themed draw or service a UAH/custom-draw callback without the v6
+  actctx active -- without it the whole themed path collapses to flat. Suspected
+  cause of the intermittent all-surfaces-together failures (still to confirm at
+  runtime).
+
+================================================================================
+7. THE CONTRACT IN ONE TABLE  (DO / NEVER / EVIDENCE)
+================================================================================
+ Surface        DO                                  NEVER                              Evidence
+ Dispatch       act-before/repair-after/no-forward  assume unforwarded msg handled     S0 ntdll jmp table
+ Menu/ownerdraw overpaint bar each tick off clock    rely on UAH alone mid-fade         S1 gates
+ Client paint   WS_CLIPCHILDREN; double-buffer       fill over children;                S1, code
+                children (WM_PRINTCLIENT+blit)        InvalidateRect children mid-fade
+ DWM caption    flip attribute at start              DwmFlush on GUI thread;            S2
+                                                     expect <=1-frame match @180Hz
+ Themed text    DrawThemeTextEx; DTT_GLOWSIZE=0 fade  mix DrawTextW w/ themed;           S3
+                                                     assume OpenThemeData ok
+ Buffered anim  RenderAnimation-first; Begin only     2nd Begin on same hwnd;           S3, S4b
+                on state change; one per window        re-Begin every tick
+ Common ctrls   target sub-theme from frame 1;        defer sub-theme to end;           S4/S4b, code
+                honor CDRF_*; ride uxtheme anim        hold OK button to tight band
+ Actctx         keep v6 ctx active for every          service themed draw w/o it        S6
+                themed/UAH/custom-draw call
+
+================================================================================
+8. LIMITS OF STATIC EVIDENCE  (what needs PDBs / runtime)
+================================================================================
+- Full per-message DefWindowProc switch: kernel-resident (win32kfull
+  xxxDefWindowProcWorker), symbol-less; only the WM_NCPAINT->menu path is anchored
+  here (the UAH sends, S1).
+- Per-control-class procs (which cluster = which class): symbol-less; needs
+  comctl32.pdb.
+- To close: pull public PDBs (win32kfull.pdb, comctl32.pdb, uxtheme.pdb) and
+  re-disassemble symbolized, and/or capture a runtime per-message trace of the
+  transition.
+
+================================================================================
+9. APPLICATION TO THIS CODEBASE  (results so far, tied to the contract)
+================================================================================
+Fixed and verified against the contract:
+ - Client from-color FLASH: a theme switch re-broadcasts ImmersiveColorSet >1x;
+   ThemePublishBroadcastPaintState re-stamped the shared clock to t=0 on the
+   duplicate -> 1-frame from-color flash on client+menu. Gated the side-effect tail
+   on whether a transition actually (re)armed. Recording verified monotonic; flash
+   gone. (matches S0/S1: duplicate broadcasts are real; don't re-run paint state.)
+ - Dialog static BG snap: WM_CTLCOLOR* now returns an interpolated brush on the
+   shared clock; controls re-themed to target at transition START (was deferred to
+   end -> dark->light lagged). (S4 "sub-theme from frame 1".)
+ - Child-control flicker: double-buffered via WM_PRINTCLIENT into a memory DC +
+   single blit; parent set WS_CLIPCHILDREN so its fill never lands on child pixels.
+   (S "client paint".)
+ - Menu text shimmer: switched menu label render from GDI DrawTextW to
+   DrawThemeTextEx, and (the "result of the msstyle") added DTT_GLOWSIZE/iGlowSize=0
+   to suppress the part glow. (S3.)
+ - Menu bar overpaint kept (NOT removed): the kernel UAH send is conditional (S1),
+   so a UAH-only bar is stale mid-fade; the per-tick overpaint is required.
+
+Regressions that the contract now EXPLAINS (do not repeat):
+ - Removing the menu overpaint -> bar stuck ~120% off (UAH not per-tick; S1).
+ - Reviving client BeginBufferedAnimation naively -> round-trip 176% (did not follow
+   the S4b render-first / state-gated-single-Begin / continue-across-paints shape).
+ - GetPixel-sampling the live caption to drive surfaces -> unreliable (8 vs 100+
+   across identical runs); the composited caption read is intermittently wrong.
+ - Indiscriminate per-tick child invalidation (RDW_ALLCHILDREN) -> paint-fight
+   flicker (violates "double-buffer children", S "client paint").
+
+Open against the contract:
+ - Run-to-run band variance (clean runs ~5-9 PASS; spikes 30-160 uniformly across
+   ALL surfaces) -> consistent with the S6 activation-context collapsing the whole
+   themed path on some transitions. HIGHEST-LEVERAGE unverified NEVER.
+ - The owner-painted client/menu still ride a WM_TIMER (~10ms floor) instead of the
+   S4b uxtheme composition-synced buffered-animation pattern. The plan is to
+   re-architect the client/menu cross-fade onto the S4b pattern (RenderAnimation-
+   first), the same timeline DWM's caption and v6 controls already use.
+
+================================================================================
+10. ACCEPTANCE CRITERIA  (what "done" means -- from T6)
+================================================================================
+AC1 Transition completes: the caption (band reference) spans the full shade change.
+AC2 Curve-INDEPENDENT (sync): every active surface starts its fade together, ends
+    the forward leg together, AND completes the restore leg together, each spread
+    <= THEME_SYNC_FRAMES.
+AC3 Curve-DEPENDENT (band): every theme-engine-painted surface stays within
+    THEME_BAND_TOL (9%) of the caption's normalized progress EVERY frame, BOTH legs
+    (forward initial->target, restore target->initial). OK button = wider band (own
+    timeline).
+AC4 No flicker: no surface erase-flash, no paint-fight, no glow shimmer.
+AC5 Reliable: AC1-AC4 hold run-to-run (no intermittent all-surfaces collapse).
+
+Surfaces under test: [0]main caption(DWM ref) [1]dialog caption(DWM) [2]menu bar
+[3]main client [4]dialog client [5]dialog static text [6]OK button.
+
+================================================================================
+11. ROOT ARCHITECTURE DECISION -- one vblank heartbeat, kill WM_TIMER
+================================================================================
+PROBLEM (root cause of AC3 failure): owner-painted surfaces are repainted on a
+WM_TIMER. USER_TIMER_MINIMUM floor ~10ms => ~2 frames between repaints @180Hz =>
+they sample the shared clock stale => trail the vblank-composited caption => band
+fails; and the cadence jitters => AC5 fails. (Evidence: S2 caption is vblank/DWM;
+measured client lag at steep entry; run-to-run 5..160 swing.)
+
+DECISION D0: drive ALL owner repaints from uxtheme's buffered-animation
+auto-invalidation (vblank cadence), NOT WM_TIMER.
+  - Each top-level + dialog runs ONE client buffered animation (S3: one per hwnd).
+  - While live, uxtheme auto-invalidates the client every vblank -> WM_PAINT. In
+    that SAME WM_PAINT cycle we also (a) force the NC menu repaint and (b) invalidate
+    child controls. => menu + client + children all repaint at vblank, all read the
+    shared clock SAMPLED AT THAT vblank paint (fresh) => all track the caption.
+  - The OK button (child hwnd) runs ITS OWN v6 buffered animation (S4b) -> already
+    vblank.
+RATIONALE: every surface ends up on the same composition clock the caption uses;
+the only residual offset is the inherent <=1-vblank compositing phase (S2). Removes
+the timer floor (AC3) and the cadence jitter (AC5).
+EVIDENCE: S4b (the canonical RenderAnimation-first pattern comctl32 v6 itself uses);
+S3 (buffered anim auto-invalidates while live; one per hwnd); S2 (caption clock).
+FALLBACK: if buffered paint unavailable / OpenThemeData NULL (theming off, S3/S6)
+=> degrade to the eased WM_TIMER fill (functional, not band-accurate).
+
+================================================================================
+12. DECISION TREE  (per event; IF -> THEN; [evidence])
+================================================================================
+ON WM_SETTINGCHANGE("ImmersiveColorSet"):
+  - duplicate broadcast (effective dark unchanged / same-direction live)?
+      YES -> IGNORE: do not re-stamp clock, do not re-invalidate. [S0/S9 flash]
+      NO  -> ARM:
+            1 read target dark/light;
+            2 ThemeApplyRegisteredFrames -> DwmSetWindowAttribute(0x14) flip caption
+              NOW (concurrent DWM fade). [S2]
+            3 SetWindowTheme(target sub-theme) on ALL registered controls NOW (not
+              deferred). [S4 "frame 1"; S9 dark->light lag]
+            4 SetClassLongPtr brushes = target.
+            5 stamp shared clock (start tick); cache GetThemeTransitionDuration per
+              direction. [S4b duration source]
+            6 for each top-level + dialog: prime a client buffered animation on the
+              next paint (start state captured).
+            7 ensure v6 activation context active for the above. [S6]
+
+ON WM_PAINT (a window with a live transition):
+  IF themed buffered paint available [S3 OpenThemeData!=NULL, BufferedPaintInit ok]:
+     1 BeginPaint; BufferedPaintRenderAnimation(hwnd,hdc) FIRST. [S4b step2]
+         returns NONZERO -> a frame was blitted -> client done this paint.
+         returns ZERO    -> no anim live:
+              IF state changed since last: GetThemeTransitionDuration ->
+                 BeginBufferedAnimation(from=old client color, to=new client color)
+                 -> fill hdcFrom(old), hdcTo(new) -> EndBufferedAnimation(TRUE).
+                 [S4b steps 1,3,4]  uxtheme now owns + auto-invalidates.
+              ELSE (animation finished): paint final solid; mark transition surface
+                 complete (terminal frame). [S3 "no terminal WM_PAINT" caveat]
+     2 In this SAME cycle, drive the non-client + children at the CURRENT progress
+       sampled now (vblank-fresh): SendMessage(WM_NCPAINT) for the menu; invalidate
+       child controls. [D0]
+  ELSE (fallback): solid fill at eased(shared-clock) color. [S3 fallback]
+
+ON WM_NCPAINT (top-level with menu, transition live):
+  1 DefWindowProc(WM_NCPAINT) -> frame + (conditional, stale) UAH menu draw. [S0,S1]
+  2 Overpaint the menu band yourself at the shared progress sampled NOW:
+      - bar bg = lerp(menuFrom,menuTo,progress); [S1 UAH stale -> must overpaint]
+      - labels via DrawThemeTextEx, DTT_TEXTCOLOR=interp, DTT_GLOWSIZE iGlowSize=0.
+        [S3 glow shimmer]
+  3 restamp the 1px seam to match.
+  NEVER skip the overpaint mid-fade (UAH is conditional/stale). [S1]
+
+ON WM_CTLCOLORDLG / WM_CTLCOLORSTATIC (dialog/static, transition live):
+  -> SetBkColor=clientAnimColor(progress); SetTextColor=textAnimColor(progress);
+     SetBkMode OPAQUE; return cached interp brush. [S4 "frame 1"; S "client paint"]
+  Static repaint itself is double-buffered (WM_PRINTCLIENT into mem DC + 1 blit) so
+  text/icon never erase-flash. [S "client paint"; S9 child flicker]
+
+CHILD CONTROL DECISION (per class):
+  - STATIC TEXT (LTEXT): not theme-animated by comctl32; WE crossfade bg+text via
+    WM_CTLCOLORSTATIC, repainted in the dialog's vblank cycle, double-buffered.
+    Band sample = right-edge BACKGROUND of the SHORTEST text label (left-aligned
+    text leaves clean bg; glyph patch is degenerate; icon is a fixed bitmap). [S9]
+  - STATIC ICON (SS_ICON): bitmap fixed (cannot crossfade); only its bg crossfades
+    via WM_CTLCOLORSTATIC. Exclude its glyph from band sampling. [S9]
+  - BUTTON (DEFPUSHBUTTON, v6 themed): rides comctl32 v6's OWN buffered animation on
+    its child hwnd. [S4b] To make it animate on THEME change, ensure it re-themes
+    (SetWindowTheme target) AND gets a paint (invalidate it in the dialog vblank
+    cycle) so its S4b RenderAnimation/Begin path runs. Held to WIDE band (own
+    timeline). [S4b; AC3 button]
+  - EDIT/COMBO/LIST (not in this dialog): same as button class -- v6 self-animates;
+    we only re-theme + invalidate; never owner-fill their faces. [S4b/S5]
+
+ON ANIMATION COMPLETE (BufferedPaintRenderAnimation==0 AND duration elapsed):
+  -> ThemeFinishAllBackgroundAnimation: set final class brushes/colors, apply
+     deferred theme state, one terminal repaint, stop. [S3 terminal-frame caveat]
+
+================================================================================
+13. SURFACE x DIRECTION x PHASE MATRIX  (expected -> mechanism)
+================================================================================
+Legend: FWD=initial->target leg, RST=target->initial leg. "track" = within band.
+ Surface         to-dark(FWD)   to-light(FWD)   RST          mechanism
+ caption[0]      DWM fade       DWM fade        DWM fade      attr flip @start (D12.ARM.2)
+ dlg caption[1]  DWM fade       DWM fade        DWM fade      same; band ref when modal
+ menu[2]         overpaint      overpaint       overpaint     WM_NCPAINT @vblank progress (D12.NCPAINT)
+ main client[3]  buf-anim       buf-anim        buf-anim*     WM_PAINT RenderAnim-first (D12.PAINT)
+ dlg client[4]   buf-anim       buf-anim        buf-anim*     same on dialog hwnd
+ static text[5]  CTLCOLOR       CTLCOLOR        CTLCOLOR      interp brush @vblank, dbl-buffered
+ OK button[6]    v6 self-anim   v6 self-anim    v6 self-anim  re-theme+invalidate; wide band
+ * RST = a SECOND transition (target->initial): a fresh broadcast re-arms; the
+   round-trip is two independent animations, NOT one reversed. Each leg primes its
+   own BeginBufferedAnimation. [S4b state-gated single Begin; S9 176% regression was
+   reversing one anim]
+ Asymmetry note: DWM caption to-dark != to-light duration. The buffered-animation
+ duration comes from GetThemeTransitionDuration (the SAME source DWM/v6 use) per
+ direction => client/menu inherit the correct per-direction timing automatically
+ (this is WHY D0 beats a hand-tuned ease: no per-direction constant to guess). [S4b]
+
+================================================================================
+14. COMBINATIONS  (environment / control population)
+================================================================================
+C1 main window only (no dialog): surfaces 0,2,3. Menu+client as above; no children.
+C2 main + modal About dialog: all 0..6. Modal dialog disables/dims the main caption
+   (inactive) -> band reference is the ACTIVE dialog caption[1]. [test setup]
+C3 theming AVAILABLE + v6 actctx active (the manifested app, normal): full D0 path.
+C4 theming OFF or OpenThemeData==NULL or actctx inactive: D0 fallback (eased fill);
+   AC3 not met but no crash/flat-only. MUST detect (null-check) not assume. [S3/S6]
+C5 duplicate/again broadcasts mid-fade: ignored (D12.ARM duplicate). [S0/S9]
+C6 high refresh (180Hz) vs 60Hz: D0 removes the frame-count sensitivity (vblank
+   cadence is intrinsic); the residual <=1-vblank phase is refresh-bound, so the
+   band's adjacent-frame tolerance must be refresh-scaled, not fixed +-1. [S2]
+
+================================================================================
+15. ACCEPTANCE MAPPING  (criterion -> decisions that satisfy it + evidence)
+================================================================================
+AC1 (caption spans): D12.ARM.2 flips the attr at start; DWM fades full range. [S2]
+AC2 (sync both legs): all surfaces driven by the same vblank heartbeat from the
+    client buffered animation (D0); they start when the animation primes, end when
+    RenderAnimation returns 0; the round-trip is two armed legs (D13) so RST syncs
+    too. [S4b/S3]
+AC3 (band both legs): D0 puts every owner surface on the composition clock = the
+    caption's clock; per-direction duration from GetThemeTransitionDuration removes
+    the curve/duration mismatch; glow off removes shimmer error. Residual = inherent
+    <=1-vblank phase, covered by refresh-scaled adjacent-frame tolerance (C6). OK
+    button on wide band (own anim). [S4b/S2/S3]
+AC4 (no flicker): WS_CLIPCHILDREN (no parent-over-child fight); double-buffered
+    child + menu paints (no erase-flash); DTT_GLOWSIZE=0 (no shimmer); no
+    WM_TIMER overpaint racing uxtheme. [S1/S3/S9]
+AC5 (reliable): D12.ARM.7 keeps the v6 actctx active so the themed path never
+    silently collapses to flat (the suspected intermittent-failure cause); no
+    WM_TIMER jitter. [S6]  <-- the one branch still to be RUNTIME-CONFIRMED.
+
+================================================================================
+16. RISKS / OPEN VERIFICATIONS  (before/while implementing)
+================================================================================
+R1 (highest) Activation context: confirm at runtime that OpenThemeData!=NULL and
+   the v6 actctx is active on the transition thread for EVERY run; if not, wrap the
+   transition in ActivateActCtx of the process v6 context. Verifies AC5. [S6]
+R2 Menu vblank coupling: confirm uxtheme's client buffered-anim auto-invalidation
+   actually fires the WM_PAINT cycle we hang the NC menu + child repaints on, at
+   vblank, for the WHOLE duration (incl. the terminal frame). If the auto-invalidate
+   gaps, add a minimal vblank pump (NOT a 10ms WM_TIMER). [S3 caveat]
+R3 Button on theme change: confirm comctl32 v6 actually runs its S4b buffered
+   animation on WM_THEMECHANGED (vs only hot/pushed). If it snaps, either invalidate
+   to force it or accept the wide-band exclusion. [S4b/S5 -- needs comctl32.pdb to
+   be certain which cluster is the button]
+R4 Round-trip terminal frame: BufferedPaintRenderAnimation gives no terminal
+   WM_PAINT (S3); ensure the leg finalizes (final colors) so the next leg's Begin
+   captures a correct "from". [S3/S9]
+R5 Per-class identity unproven without PDBs (S5/S8): pull comctl32.pdb +
+   win32kfull.pdb to confirm the button cluster and the full DefWindowProc switch
+   before relying on R3.
+
+================================================================================
+PLAN-OF-RECORD (derived): replace the WM_TIMER cross-fade engine with the S4b
+buffered-animation engine (D0): client/dialog via BeginBufferedAnimation +
+RenderAnimation-first; menu + statics repainted in the same vblank cycle at the
+shared progress; button left to its own v6 animation; v6 actctx asserted around the
+transition; duration per-direction from GetThemeTransitionDuration. Verify R1-R4 at
+runtime against AC1-AC5.
+================================================================================
+END
+================================================================================

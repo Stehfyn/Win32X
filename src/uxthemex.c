@@ -92,6 +92,7 @@ typedef HRESULT(WINAPI* PFN_DRAWTHEMETEXTEX)(
 #define BPPF_ERASE            0x0001
 #define TMT_TRANSITIONDURATIONS 6000
 #define DTT_TEXTCOLOR 0x00000001
+#define DTT_GLOWSIZE  0x00000800
 
 #define THEME_ANIMATION_TIMER_ID ((UINT_PTR)0x57A2)
 #define THEME_ANIMATION_TICK_MS  5u
@@ -1083,6 +1084,47 @@ static BOOL CALLBACK ThemeApplyClientThemeProc(HWND hChild, LPARAM lParam)
     return TRUE;
 }
 
+/* Apply the TARGET control sub-theme (DarkMode_Explorer / Explorer) to every registered dialog's child
+   controls at the START of a transition. Without this the sub-theme is only swapped at the end, so a
+   dark->light fade runs with the controls still on DarkMode_Explorer the whole way -- they render dark
+   and lag the lightening body (light->dark is fine because the controls start on Explorer). Reversing
+   the sub-theme up front lets each control re-theme once (SetWindowTheme's own WM_THEMECHANGED repaint;
+   no extra invalidation) and cross-fade toward the target from the first frame. */
+static FORCEINLINE void ThemeSetRegisteredControlThemes(BOOL fDark)
+{
+    HWND* phwnd;
+    HWND  hwnd;
+    UINT  c;
+
+    /* Every control under every registered window -- dialogs AND top-levels -- gets the target
+       sub-theme, so none is left on the wrong (e.g. DarkMode_Explorer) theme during the fade. */
+    phwnd = g_theme.rgDialogs;
+    c = g_theme.cDialogs;
+    while (0u != c)
+    {
+        hwnd = *phwnd;
+        if (IsWindow(hwnd))
+        {
+            EnumChildWindows(hwnd, ThemeApplyClientThemeProc, (LPARAM)fDark);
+        }
+        ++phwnd;
+        --c;
+    }
+
+    phwnd = g_theme.rgTopLevels;
+    c = g_theme.cTopLevels;
+    while (0u != c)
+    {
+        hwnd = *phwnd;
+        if (IsWindow(hwnd))
+        {
+            EnumChildWindows(hwnd, ThemeApplyClientThemeProc, (LPARAM)fDark);
+        }
+        ++phwnd;
+        --c;
+    }
+}
+
 static BOOL CALLBACK ThemeInvalidateWindowProc(HWND hwnd, LPARAM lParam)
 {
     BOOL fErase;
@@ -1526,6 +1568,10 @@ static FORCEINLINE BOOL ThemePublishBroadcastPaintState(void)
         g_theme.dwAnimationSnapTick = g_theme.dwAnimationStartTick;
     }
     ThemeSetRegisteredClassBrushes(fEffectiveDark);
+    /* Reverse the dialog control sub-theme to the target now (DarkMode_Explorer -> Explorer on the way
+       to light), so the controls cross-fade from the first frame instead of staying dark until the end
+       -- the dark->light direction otherwise lags. */
+    ThemeSetRegisteredControlThemes(fEffectiveDark);
     ThemeInvalidateRegisteredWindows();
     return fEffectiveDark;
 }
@@ -1903,27 +1949,60 @@ static FORCEINLINE void ThemePaintMenuBarColor(HWND hwnd, COLORREF crBar, COLORR
     }
     ThemePaintSolidColor(hdc, &rcBar, crBar);
 
-    /* The fill erased the item labels DefWindowProc drew; redraw each top-level label over it in the
-       menu font at the interpolated text color so "File"/"Help" stay visible and cross-fade with the
-       bar instead of vanishing until the swap completes. */
+    /* The fill erased the item labels DefWindowProc drew; redraw each top-level label over it at the
+       interpolated text color so "File"/"Help" stay visible and cross-fade with the bar. Render with
+       uxtheme's DrawThemeTextEx -- the SAME themed text path DefWindowProc/WM_UAHDRAWMENUITEM uses (the
+       Menu theme's MENU_BARITEM glyphs, anti-aliased the theme's way) -- not raw GDI DrawTextW. Plain
+       DrawTextW rasterizes the label differently than the system's themed draw, so the two renderings
+       disagree frame to frame and the text shimmers (fights the system draw). Themed text matches it. */
     hFont = ThemeMenuBarFont();
     hOldFont = hFont ? SelectObject(hdc, hFont) : NULL;
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, crText);
-    /* Constant loop bound (a bounded pre-tested loop is C5045-safe); GetMenuItemRect fails past the
-       real top-level item count, so the body simply skips. DrawTextW is called unconditionally -- a
-       zero-length GetMenuStringW result draws nothing -- so no comparison-checked value feeds a call. */
-    for (i = 0; i < THEME_MAX_MENU_ITEMS; ++i)
     {
-        if (!GetMenuItemRect(hwnd, hMenu, (UINT)i, &rcItem))
+        HTHEME hThemeMenu;
+
+        hThemeMenu = (g_theme.pfnOpenThemeData && g_theme.pfnDrawThemeTextEx && g_theme.pfnCloseThemeData)
+                     ? g_theme.pfnOpenThemeData(hwnd, L"Menu") : NULL;
+        /* Constant loop bound (a bounded pre-tested loop is C5045-safe); GetMenuItemRect fails past the
+           real top-level item count, so the body simply skips. */
+        for (i = 0; i < THEME_MAX_MENU_ITEMS; ++i)
         {
-            continue;
+            if (!GetMenuItemRect(hwnd, hMenu, (UINT)i, &rcItem))
+            {
+                continue;
+            }
+            OffsetRect(&rcItem, -rcWindow.left, -rcWindow.top);
+            szText[0] = 0;
+            cch = GetMenuStringW(hMenu, (UINT)i, szText, (int)ARRAYSIZE(szText) - 1, MF_BYPOSITION);
+            if (hThemeMenu)
+            {
+                DTTOPTS opts;
+
+                SecureZeroMemory(&opts, sizeof(opts));
+                opts.dwSize  = (DWORD)sizeof(opts);
+                /* DTT_GLOWSIZE + iGlowSize 0 suppresses the msstyles MENU_BARITEM text glow. With only
+                   DTT_TEXTCOLOR the part's glow still renders, and as the bar cross-fades the glow
+                   re-blends against a changing background every tick -- the menu-text shimmer ("a result
+                   of the msstyle"). Zeroing the glow keeps uxtheme's themed AA but removes the shimmer. */
+                opts.dwFlags = DTT_TEXTCOLOR | DTT_GLOWSIZE;
+                opts.crText  = crText;
+                opts.iGlowSize = 0;
+                (void)g_theme.pfnDrawThemeTextEx(hThemeMenu, hdc, MENU_BARITEM, MBI_NORMAL,
+                                                 szText, cch,
+                                                 DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_HIDEPREFIX,
+                                                 &rcItem, &opts);
+            }
+            else
+            {
+                (void)DrawTextW(hdc, szText, cch, &rcItem,
+                                DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_HIDEPREFIX);
+            }
         }
-        OffsetRect(&rcItem, -rcWindow.left, -rcWindow.top);
-        szText[0] = 0;
-        cch = GetMenuStringW(hMenu, (UINT)i, szText, (int)ARRAYSIZE(szText) - 1, MF_BYPOSITION);
-        (void)DrawTextW(hdc, szText, cch, &rcItem,
-                        DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_HIDEPREFIX);
+        if (hThemeMenu)
+        {
+            g_theme.pfnCloseThemeData(hThemeMenu);
+        }
     }
     if (hOldFont)
     {
@@ -1935,10 +2014,10 @@ static FORCEINLINE void ThemePaintMenuBarColor(HWND hwnd, COLORREF crBar, COLORR
 
 /*
  * Non-client repaint of the owner-drawn menu bar, the DwmDefWindowProc way: the caller lets
- * DefWindowProc render the frame first, then this repaints the menu band. While the background is
- * cross-fading we paint the whole bar ourselves off the shared snapshot clock (so it tracks the client
- * to the frame, not the stale WM_UAHDRAWMENU cadence); otherwise the system's WM_UAHDRAWMENU has filled
- * the bar and we only restamp the 1px seam DefWindowProc drew in the stock shade.
+ * DefWindowProc render the frame first, then this repaints the menu band. WM_UAHDRAWMENU does NOT
+ * re-fire every animation tick, so a UAH-only bar holds a stale paint and reads far off the client --
+ * therefore while cross-fading we paint the whole bar ourselves off the shared clock each tick; outside
+ * a transition the system's WM_UAHDRAWMENU has filled the bar and we only restamp the 1px seam.
  */
 static FORCEINLINE void ThemeNcRepaintMenuBar(HWND hwnd)
 {
@@ -2320,6 +2399,13 @@ FORCEINLINE void WINAPI MenuBarOnDrawMenuItem(HWND                        hwnd,
             opts.dwSize  = (DWORD)sizeof(opts);
             opts.dwFlags = DTT_TEXTCOLOR;
             opts.crText  = clrText;
+            if (g_theme.fAnimatingBackground)
+            {
+                /* Suppress the msstyles text glow while cross-fading -- it re-blends against the moving
+                   bar each tick and shimmers. Outside the fade keep the native glow. */
+                opts.dwFlags |= DTT_GLOWSIZE;
+                opts.iGlowSize = 0;
+            }
             (void)g_theme.pfnDrawThemeTextEx(hTheme, pUDMI->um.hdc, MENU_BARITEM, iState,
                                                  szText, -1, uFormat, &rcItem, &opts);
             g_theme.pfnCloseThemeData(hTheme);
