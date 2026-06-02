@@ -2001,7 +2001,10 @@ FORCEINLINE void WINAPI MenuBarPalette(BOOL fDark, MENUBAR_PALETTE* pPalette)
     }
     else
     {
-        pPalette->clrBar        = GetSysColor(COLOR_MENUBAR);
+        /* Light, ACTIVE chrome: the owner-drawn aero menu bar matches the window/caption surface
+           (COLOR_WINDOW, ~white), not the legacy COLOR_MENUBAR (~#F0/medium gray) which renders the
+           bar visibly darker than the active light caption and client it sits between. */
+        pPalette->clrBar        = GetSysColor(COLOR_WINDOW);
         pPalette->clrText       = GetSysColor(COLOR_MENUTEXT);
         pPalette->clrTextDim    = GetSysColor(COLOR_GRAYTEXT);
         pPalette->clrItemHot    = GetSysColor(COLOR_MENUHILIGHT);

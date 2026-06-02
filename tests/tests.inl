@@ -845,7 +845,7 @@ static BOOL ThemeTestCaptureRect(HWND hwndTop, HWND hwndDialog, RECT* prc)
     RECT rcTop;
     RECT rcDialog;
 
-    if (!GetWindowRect(hwndTop, &rcTop) || !GetWindowRect(hwndDialog, &rcDialog))
+    if (!GetWindowRect(hwndTop, &rcTop))
     {
         return FALSE;
     }
@@ -853,21 +853,25 @@ static BOOL ThemeTestCaptureRect(HWND hwndTop, HWND hwndDialog, RECT* prc)
     prc->top = rcTop.top;
     prc->right = rcTop.right;
     prc->bottom = rcTop.bottom;
-    if (rcDialog.left < prc->left)
+    /* Union in the dialog only if one was opened (main-window-only capture passes NULL). */
+    if (hwndDialog && GetWindowRect(hwndDialog, &rcDialog))
     {
-        prc->left = rcDialog.left;
-    }
-    if (rcDialog.top < prc->top)
-    {
-        prc->top = rcDialog.top;
-    }
-    if (rcDialog.right > prc->right)
-    {
-        prc->right = rcDialog.right;
-    }
-    if (rcDialog.bottom > prc->bottom)
-    {
-        prc->bottom = rcDialog.bottom;
+        if (rcDialog.left < prc->left)
+        {
+            prc->left = rcDialog.left;
+        }
+        if (rcDialog.top < prc->top)
+        {
+            prc->top = rcDialog.top;
+        }
+        if (rcDialog.right > prc->right)
+        {
+            prc->right = rcDialog.right;
+        }
+        if (rcDialog.bottom > prc->bottom)
+        {
+            prc->bottom = rcDialog.bottom;
+        }
     }
     prc->left -= 8;
     prc->top -= 8;
@@ -1797,6 +1801,7 @@ static BOOL ThemeTestAnalyzeCapturedFrames(THEME_CAPTURE* pCap,
     UINT  rgEndFrame[7];
     BOOL  rgStarted[7];
     BOOL  rgEnded[7];
+    BOOL  rgActive[7];
     BOOL  fAllStarted;
     BOOL  fAllEnded;
     UINT  uMinStart;
@@ -1809,22 +1814,48 @@ static BOOL ThemeTestAnalyzeCapturedFrames(THEME_CAPTURE* pCap,
     UINT  uBandFrame;
     BOOL  fFound;
 
+    /* The main window's menu bar and client are always present; the dialog and its children are
+       optional (main-window-only capture passes them NULL). Each surface carries an 'active' flag so
+       absent surfaces are simply excluded from the band and the start/end-sync checks rather than
+       failing the analysis. */
+    for (k = 0u; k < 7u; ++k)
+    {
+        rgActive[k] = FALSE;
+    }
+    SecureZeroMemory(rgSurf, sizeof(rgSurf));
     if (!ThemeTestMenuPoints(hwndTop, rgMenu, &cMenu) ||
-        !ThemeTestSamplePoint(hwndTop, 24, 96, &rgSurf[1]) ||
-        !ThemeTestSamplePoint(hwndDialog, 180, 84, &rgSurf[2]) ||
-        !ThemeTestSamplePoint(hwndStatic, 8, 8, &rgSurf[3]) ||
-        !ThemeTestSamplePoint(hwndButton, 12, 8, &rgSurf[4]))
+        !ThemeTestSamplePoint(hwndTop, 24, 96, &rgSurf[1]))
     {
         return FALSE;
     }
-    if (!GetWindowRect(hwndTop, &rcTop) || !GetWindowRect(hwndDialog, &rcDialog))
+    if (!GetWindowRect(hwndTop, &rcTop))
     {
         return FALSE;
     }
+    SecureZeroMemory(&rcDialog, sizeof(rcDialog));
     ptRef.x = rcTop.left + 120;
     ptRef.y = rcTop.top + 12;
-    rgSurf[0].x = rcDialog.left + 190;
-    rgSurf[0].y = rcDialog.top + 12;
+    rgActive[0] = TRUE;   /* main caption (reference, always active -- no modal dialog dims it) */
+    rgActive[2] = TRUE;   /* menu bar     */
+    rgActive[3] = TRUE;   /* main client  */
+    if (hwndDialog && GetWindowRect(hwndDialog, &rcDialog))
+    {
+        rgSurf[0].x = rcDialog.left + 190;
+        rgSurf[0].y = rcDialog.top + 12;
+        rgActive[1] = TRUE;
+        if (ThemeTestSamplePoint(hwndDialog, 180, 84, &rgSurf[2]))
+        {
+            rgActive[4] = TRUE;
+        }
+    }
+    if (hwndStatic && ThemeTestSamplePoint(hwndStatic, 8, 8, &rgSurf[3]))
+    {
+        rgActive[5] = TRUE;
+    }
+    if (hwndButton && ThemeTestSamplePoint(hwndButton, 12, 8, &rgSurf[4]))
+    {
+        rgActive[6] = TRUE;
+    }
 
     /* Establish each surface's pre-transition plateau from a frame that is past the capture's black
        ramp-in and still before the theme flip (the worker only broadcasts well after capture starts,
@@ -1900,6 +1931,10 @@ static BOOL ThemeTestAnalyzeCapturedFrames(THEME_CAPTURE* pCap,
             int iProg;
             int iDev;
 
+            if (!rgActive[k])
+            {
+                continue;
+            }
             iLuma = ThemeTestSurfaceLuma(pCap, i, k, ptRef, rgSurf, rgMenu, cMenu);
             if (0 > iLuma)
             {
@@ -1953,6 +1988,10 @@ static BOOL ThemeTestAnalyzeCapturedFrames(THEME_CAPTURE* pCap,
     uMaxEnd = 0u;
     for (k = 0u; k < 7u; ++k)
     {
+        if (!rgActive[k])
+        {
+            continue;
+        }
         if (!rgStarted[k])
         {
             fAllStarted = FALSE;
@@ -3016,10 +3055,13 @@ static void ThemeTestKillApp(void)
     g_hThemeAppProcess = NULL;
 }
 
-/* Launch WindowsProject.exe, find its main window, open its About dialog, and return the four windows
-   the analysis samples (main, dialog, dialog's OK button, a dialog static). Kept as its own function
-   so its path/STARTUPINFO/PROCESS_INFORMATION buffers stay off ThemeTestRunTransition's already-large
-   stack frame (a >1-page frame would emit __chkstk, which this /NODEFAULTLIB build cannot resolve). */
+/* Launch WindowsProject.exe, find its main window, open its About dialog, and return all four windows
+   the analysis samples: main window, About dialog, the dialog's OK button, and a dialog static. The
+   About box is modal, which disables the owner and renders the MAIN caption inactive (dimmed) -- so
+   the analyzer references the ACTIVE dialog caption and excludes the inactive main caption from the
+   band (active-state awareness). Kept as its own function so its path/STARTUPINFO/PROCESS_INFORMATION
+   buffers stay off ThemeTestRunTransition's already-large stack frame (a >1-page frame emits __chkstk,
+   which this /NODEFAULTLIB build cannot resolve). */
 static BOOL ThemeTestLaunchWindowsProject(HWND* phwndTop, HWND* phwndDialog, HWND* phwndStatic, HWND* phwndButton)
 {
     TCHAR               szExe[MAX_PATH];
@@ -3051,7 +3093,7 @@ static BOOL ThemeTestLaunchWindowsProject(HWND* phwndTop, HWND* phwndDialog, HWN
     {
         return FALSE;
     }
-    /* Post (not Send) IDM_ABOUT: the app opens a modal About box, which would block a SendMessage. */
+    /* Post (not Send) IDM_ABOUT: the app opens a MODAL About box; a SendMessage would block here. */
     PostMessage(*phwndTop, WM_COMMAND, (WPARAM)THEME_IDM_ABOUT, 0);
     *phwndDialog = ThemeTestWaitForWindow(pi.dwProcessId, TEXT("#32770"), TRUE, FALSE, WAIT_MS);
     if (!*phwndDialog)
@@ -3060,6 +3102,10 @@ static BOOL ThemeTestLaunchWindowsProject(HWND* phwndTop, HWND* phwndDialog, HWN
     }
     *phwndButton = GetDlgItem(*phwndDialog, IDOK);
     *phwndStatic = ThemeTestFindChild(*phwndDialog, TEXT("Static"));
+    /* The modal dialog is already the active/foreground window; its caption transitions over the full
+       active span and is the band reference. */
+    BringWindowToTop(*phwndDialog);
+    SetForegroundWindow(*phwndDialog);
     return (NULL != *phwndButton) && (NULL != *phwndStatic);
 }
 
@@ -3225,11 +3271,6 @@ static void ThemeTestRunTransition(BOOL fWriteSystem, LPCTSTR pszTag)
     ThemeTestCheck(TRUE, TEXT("T6 launches WindowsProject.exe and opens its About dialog"));
 
     GetWindowRect(hwndTop, &rcTopCreated);
-    /* The dialog is owned by the main window, so making it foreground renders the owner's caption
-       active too -- both captions then crossfade over the full active span (an inactive caption barely
-       changes shade, collapsing the band reference into noise). */
-    BringWindowToTop(hwndDialog);
-    SetForegroundWindow(hwndDialog);
     UpdateWindow(hwndTop);
     UpdateWindow(hwndDialog);
     ThemeTestPumpMessages();

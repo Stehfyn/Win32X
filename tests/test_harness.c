@@ -61,7 +61,10 @@
 #define THEME_ENCODE_QUEUE_FRAMES 12u
 #define THEME_DXGI_TIMEOUT_MS   WAIT_MS
 #define THEME_DRAIN_MS          1000u
-#define THEME_RECORD_MS         WAIT_MS
+/* Capture/settle window: the immersive crossfade runs well under a second (transition + DWM caption +
+   slack). 1100ms captures the whole transition with margin without padding each run with a needless
+   extra second of plateau -- decoupled from WAIT_MS (the 2s hang timeout) so timeouts stay generous. */
+#define THEME_RECORD_MS         1100u
 
 typedef struct
 {
