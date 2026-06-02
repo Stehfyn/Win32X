@@ -1850,6 +1850,21 @@ static BOOL ThemeTestAnalyzeCapturedFrames(THEME_CAPTURE* pCap,
     if (0 > iRefAmp) { iRefAmp = -iRefAmp; }
     *pfTransitioned = (iRefAmp >= THEME_MIN_SPAN);
 
+    /* [CURVE] dump: caption progress vs the linear client progress across the transition, so the
+       shape difference (S-curve caption vs linear client) is visible directly, not inferred. */
+    for (i = iBase; (i < pCap->cCaptured) && (i < iBase + 84u); i += 3u)
+    {
+        int icap = ThemeTestProgress(ThemeTestLumaAt(pCap, i, ptRef), rgStart[0], rgEnd[0]);
+        int icli = ThemeTestProgress(ThemeTestLumaAt(pCap, i, rgSurf[1]), rgStart[3], rgEnd[3]);
+        int imnu = ThemeTestProgress(ThemeTestMenuLumaAt(pCap, i, rgMenu, cMenu), rgStart[2], rgEnd[2]);
+        if ((icap > 1) && (icap < 99))
+        {
+            OutF(TEXT("[CURVE] cap=%d\n"), icap);
+            OutF(TEXT("[CURVE] cli=%d\n"), icli);
+            OutF(TEXT("[CURVE] mnu=%d\n"), imnu);
+        }
+    }
+
     /* Single pass over every frame from the plateau on. For each surface compute its own normalized
        progress; record the frame it first crosses 15% (transition start) and 85% (transition end),
        and the worst gap between its progress and the caption's progress at the same frame. */

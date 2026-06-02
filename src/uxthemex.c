@@ -18,6 +18,8 @@
 #pragma check_stack(off)
 
 typedef HRESULT(WINAPI* PFN_DWMSETWINDOWATTRIBUTE)(HWND, DWORD, LPCVOID, DWORD);
+typedef HRESULT(WINAPI* PFN_DWMFLUSH)(void);
+typedef UINT(WINAPI* PFN_TIMEPERIOD)(UINT);
 typedef HRESULT(WINAPI* PFN_SETWINDOWTHEME)(HWND, LPCWSTR, LPCWSTR);
 typedef BOOL(WINAPI* PFN_ALLOWDARKMODEFORWINDOW)(HWND, BOOL);
 typedef BOOL(WINAPI* PFN_ALLOWDARKMODEFORAPP_1809)(BOOL);
@@ -92,12 +94,13 @@ typedef HRESULT(WINAPI* PFN_DRAWTHEMETEXTEX)(
 #define DTT_TEXTCOLOR 0x00000001
 
 #define THEME_ANIMATION_TIMER_ID ((UINT_PTR)0x57A2)
-#define THEME_ANIMATION_TICK_MS  15u
+#define THEME_ANIMATION_TICK_MS  5u
 #define THEME_ANIMATION_SLACK_MS 90u
 
 typedef struct THEME_STATE
 {
     PFN_DWMSETWINDOWATTRIBUTE            pfnDwmSetWindowAttribute;
+    PFN_DWMFLUSH                         pfnDwmFlush;
     PFN_SETWINDOWTHEME                   pfnSetWindowTheme;
     PFN_ALLOWDARKMODEFORWINDOW           pfnAllowDarkModeForWindow;
     PFN_ALLOWDARKMODEFORAPP_1809         pfnAllowDarkModeForApp1809;
@@ -121,9 +124,12 @@ typedef struct THEME_STATE
     PFN_GETIMMERSIVECOLORTYPEFROMNAME      pfnGetImmersiveColorTypeFromName;
     PFN_GETIMMERSIVECOLORFROMCOLORSETEX    pfnGetImmersiveColorFromColorSetEx;
     PFN_DRAWTHEMETEXTEX                  pfnDrawThemeTextEx;
+    PFN_TIMEPERIOD                            pfnTimeBeginPeriod;
+    PFN_TIMEPERIOD                            pfnTimeEndPeriod;
     HMODULE                                   hUxtheme;
     HMODULE                                   hDwmapi;
     HMODULE                                   hAdvapi32;
+    HMODULE                                   hWinmm;
     HBRUSH                                    hbrDarkBg;
     COLORREF                                  crDarkBg;
     DWORD                                     dwBackgroundTransitionMs;
@@ -140,7 +146,7 @@ typedef struct THEME_STATE
     BOOL                                      fAnimatingBackground;
     BOOL                                      fAnimationFromDark;
     BOOL                                      fAnimationToDark;
-    BOOL                                      fAnimationCaptionApplied;
+    BOOL                                      fTimerPeriodRaised;
     HWND                                      rgTopLevels[THEME_MAX_TOPLEVELS];
     HWND                                      rgDialogs[THEME_MAX_DIALOGS];
     HWND                                      rgAnimationWindows[THEME_MAX_TOPLEVELS + THEME_MAX_DIALOGS];
@@ -159,6 +165,8 @@ typedef union THEME_PROC
 {
     FARPROC fp;
     PFN_DWMSETWINDOWATTRIBUTE pfnDwmSetWindowAttribute;
+    PFN_DWMFLUSH pfnDwmFlush;
+    PFN_TIMEPERIOD pfnTimePeriod;
     PFN_SETWINDOWTHEME pfnSetWindowTheme;
     PFN_ALLOWDARKMODEFORWINDOW pfnAllowDarkModeForWindow;
     PFN_ALLOWDARKMODEFORAPP_1809 pfnAllowDarkModeForApp1809;
@@ -244,6 +252,15 @@ static FORCEINLINE void ThemeResolve(void)
     g_theme.hUxtheme  = ThemeLoadSystemDll(TEXT("uxtheme.dll"));
     g_theme.hDwmapi   = ThemeLoadSystemDll(TEXT("dwmapi.dll"));
     g_theme.hAdvapi32 = ThemeLoadSystemDll(TEXT("advapi32.dll"));
+    g_theme.hWinmm    = ThemeLoadSystemDll(TEXT("winmm.dll"));
+
+    if (IsNonNull(g_theme.hWinmm))
+    {
+        u.fp = GetProcAddress(g_theme.hWinmm, "timeBeginPeriod");
+        g_theme.pfnTimeBeginPeriod = u.pfnTimePeriod;
+        u.fp = GetProcAddress(g_theme.hWinmm, "timeEndPeriod");
+        g_theme.pfnTimeEndPeriod = u.pfnTimePeriod;
+    }
 
     if (IsNonNull(g_theme.hAdvapi32))
     {
@@ -311,6 +328,8 @@ static FORCEINLINE void ThemeResolve(void)
     {
         u.fp = GetProcAddress(g_theme.hDwmapi, "DwmSetWindowAttribute");
         g_theme.pfnDwmSetWindowAttribute = u.pfnDwmSetWindowAttribute;
+        u.fp = GetProcAddress(g_theme.hDwmapi, "DwmFlush");
+        g_theme.pfnDwmFlush = u.pfnDwmFlush;
     }
 
     if (IsEqual(ThemePolicyWin10_1809, g_theme.policy))
@@ -632,12 +651,12 @@ static FORCEINLINE DWORD ThemeBackgroundTransitionMs(void)
 }
 
 /*
- * DWM does not fade the immersive caption linearly -- it uses a front-loaded (ease-out) curve, so a
- * straight luma lerp on the client/menu trails the caption mid-transition. This maps linear elapsed
- * time onto a matching ease-out (rational p = t / (0.6 + 0.4t), i.e. 5e*d / (3d + 2e)) and returns
- * the effective elapsed value the linear lerp should consume, so the client and menu track the
- * caption's progress. The 0.6 weight was fit to the measured caption curve (the group otherwise sits
- * ~10% behind the eased caption at the steep part of the fade).
+ * DWM does not fade the immersive caption linearly -- it uses a mildly front-loaded (ease-out) curve,
+ * so a straight luma lerp on the client/menu trails the caption mid-transition. This maps linear
+ * elapsed time onto a matching ease-out (rational p = t / (0.75 + 0.25t), i.e. 4e*d / (3d + e)) and
+ * returns the effective elapsed value the linear lerp should consume, so the client and menu track
+ * the caption's progress. The 0.75 weight was fit to the measured caption curve: the linear client
+ * otherwise sits ~7% behind the caption at t~0.34 (cap 41% vs cli 34%); p(0.34)=0.41 closes it.
  */
 static FORCEINLINE DWORD ThemeEaseElapsed(DWORD dwElapsed, DWORD dwDuration)
 {
@@ -647,12 +666,12 @@ static FORCEINLINE DWORD ThemeEaseElapsed(DWORD dwElapsed, DWORD dwDuration)
     {
         return dwDuration;
     }
-    ullDen = ((DWORDLONG)3u * (DWORDLONG)dwDuration) + ((DWORDLONG)2u * (DWORDLONG)dwElapsed);
+    ullDen = ((DWORDLONG)3u * (DWORDLONG)dwDuration) + (DWORDLONG)dwElapsed;
     if (0u == ullDen)
     {
         return 0u;
     }
-    return (DWORD)(((DWORDLONG)5u * (DWORDLONG)dwElapsed * (DWORDLONG)dwDuration) / ullDen);
+    return (DWORD)(((DWORDLONG)4u * (DWORDLONG)dwElapsed * (DWORDLONG)dwDuration) / ullDen);
 }
 
 /*
@@ -780,7 +799,6 @@ static FORCEINLINE void ThemeArmBackgroundAnimationWindows(void)
     g_theme.fAnimatingBackground = (0u != g_theme.cAnimationWindows);
 
     ThemeStopAnimationTimer();
-    g_theme.fAnimationCaptionApplied = FALSE;
     if (g_theme.fAnimatingBackground)
     {
         g_theme.dwAnimationStartTick = GetTickCount();
@@ -1287,7 +1305,10 @@ static FORCEINLINE void ThemeOnAnimationTick(void)
             UpdateWindow(hwnd);
             if (GetMenu(hwnd))
             {
-                DrawMenuBar(hwnd);
+                /* Force a synchronous WM_NCPAINT this tick; the theme handler repaints the menu bar
+                   over DefWindowProc's frame off the current snapshot, in lockstep with the client.
+                   RDW_INVALIDATE is required for RDW_FRAME to actually mark the non-client area and
+                   deliver WM_NCPAINT. */
                 RedrawWindow(hwnd, NULL, NULL, RDW_FRAME | RDW_INVALIDATE | RDW_UPDATENOW | RDW_NOCHILDREN);
             }
         }
@@ -1332,10 +1353,9 @@ static FORCEINLINE BOOL ThemePublishBroadcastPaintState(void)
        flip, so DWM's own caption crossfade runs concurrently with the client/menu crossfade instead
        of starting late and lagging ~30 frames behind. Caption and client then animate in sync. */
     ThemeApplyRegisteredFrames(fEffectiveDark);
-    /* Re-stamp the animation clock to the instant the caption attribute flips, so the client/menu
-       elapsed clock and DWM's caption fade share the same t=0 -- this removes the systematic offset
-       between the (earlier) arm time and the caption flip, leaving only DWM's sub-frame compose
-       latency. */
+    /* Stamp the client/menu clock at the caption flip so both share t=0. (DwmFlush here was a
+       mistake: it blocks a whole composition, starting our clock a frame LATE so the caption is
+       already ~20% in before the group moves.) */
     if (g_theme.fAnimatingBackground)
     {
         g_theme.dwAnimationStartTick = GetTickCount();
@@ -1602,6 +1622,107 @@ FORCEINLINE BOOL WINAPI ThemeEraseBackground(HWND hwnd, HDC hdc, BOOL fDark)
     return TRUE;
 }
 
+/*
+ * Paint the owner-drawn menu-bar background at a given color through the window DC. This is the same
+ * direct GetWindowDC technique the non-client bottom line uses (cf. adzm's UAHDrawMenuNCBottomLine):
+ * the menu bar lives in the non-client band above the client, so during the cross-fade we paint it
+ * ourselves in lockstep with the client rather than waiting for the system to re-issue WM_UAHDRAWMENU
+ * on its own cadence (which renders it a tick or two stale and drifts it out of the caption's band).
+ */
+static FORCEINLINE void ThemePaintMenuBarColor(HWND hwnd, COLORREF crBar, COLORREF crText)
+{
+    MENUBARINFO     mbi;
+    NONCLIENTMETRICS ncm;
+    RECT            rcWindow;
+    RECT            rcBar;
+    RECT            rcItem;
+    HDC             hdc;
+    HMENU           hMenu;
+    HFONT           hFont;
+    HGDIOBJ         hOldFont;
+    WCHAR           szText[64];
+    int             cItems;
+    int             i;
+    int             cch;
+
+    hMenu = GetMenu(hwnd);
+    if (!hMenu)
+    {
+        return;
+    }
+    SecureZeroMemory(&mbi, sizeof(mbi));
+    mbi.cbSize = (DWORD)sizeof(mbi);
+    if (!GetMenuBarInfo(hwnd, OBJID_MENU, 0, &mbi))
+    {
+        return;
+    }
+    GetWindowRect(hwnd, &rcWindow);
+    rcBar = mbi.rcBar;
+    OffsetRect(&rcBar, -rcWindow.left, -rcWindow.top);
+    rcBar.left = 0;
+    rcBar.right = rcWindow.right - rcWindow.left;
+    rcBar.bottom = rcBar.bottom + 1;
+    hdc = GetWindowDC(hwnd);
+    if (!hdc)
+    {
+        return;
+    }
+    ThemePaintSolidColor(hdc, &rcBar, crBar);
+
+    /* The fill just erased the item text DefWindowProc drew. Redraw each top-level item's label over
+       it in the menu font at the interpolated text color, so "File"/"Help" stay visible (and cross-
+       fade) through the transition instead of vanishing until the swap completes. */
+    SecureZeroMemory(&ncm, sizeof(ncm));
+    ncm.cbSize = (DWORD)sizeof(ncm);
+    hFont = NULL;
+    if (SystemParametersInfo(SPI_GETNONCLIENTMETRICS, (UINT)sizeof(ncm), &ncm, 0))
+    {
+        hFont = CreateFontIndirect(&ncm.lfMenuFont);
+    }
+    hOldFont = hFont ? SelectObject(hdc, hFont) : NULL;
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, crText);
+    cItems = GetMenuItemCount(hMenu);
+    for (i = 0; i < cItems; ++i)
+    {
+        if (GetMenuItemRect(hwnd, hMenu, (UINT)i, &rcItem))
+        {
+            OffsetRect(&rcItem, -rcWindow.left, -rcWindow.top);
+            szText[0] = 0;
+            cch = GetMenuStringW(hMenu, (UINT)i, szText, (int)ARRAYSIZE(szText) - 1, MF_BYPOSITION);
+            if (0 < cch)
+            {
+                (void)DrawTextW(hdc, szText, cch, &rcItem,
+                                DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_HIDEPREFIX);
+            }
+        }
+    }
+    if (hOldFont)
+    {
+        SelectObject(hdc, hOldFont);
+    }
+    if (hFont)
+    {
+        DeleteObject(hFont);
+    }
+    ReleaseDC(hwnd, hdc);
+}
+
+/* The menu item text color, cross-faded on the same clock as the bar. */
+static FORCEINLINE COLORREF ThemeMenuTextAnimationColor(void)
+{
+    MENUBAR_PALETTE palFrom;
+    MENUBAR_PALETTE palTo;
+    DWORD           dwDuration;
+    DWORD           dwElapsed;
+
+    MenuBarPalette(g_theme.fAnimationFromDark, &palFrom);
+    MenuBarPalette(g_theme.fAnimationToDark, &palTo);
+    dwDuration = ThemeBackgroundTransitionMs();
+    dwElapsed = g_theme.dwAnimationSnapTick - g_theme.dwAnimationStartTick;
+    return ThemeLerpColor(palFrom.clrText, palTo.clrText, dwElapsed, dwDuration);
+}
+
 static BOOL ThemeHandlePaintMessage(HWND hwnd, LRESULT* plr)
 {
     PAINTSTRUCT ps;
@@ -1622,6 +1743,30 @@ static BOOL ThemeHandlePaintMessage(HWND hwnd, LRESULT* plr)
     EndPaint(hwnd, &ps);
     *plr = 0;
     return TRUE;
+}
+
+/*
+ * Non-client repaint of the owner-drawn menu bar, the DwmDefWindowProc way: the caller lets
+ * DefWindowProc render the frame first, then this repaints the menu band. While the background is
+ * cross-fading we paint the whole bar ourselves off the shared clock snapshot (so it tracks the
+ * client to the frame); otherwise the system's WM_UAHDRAWMENU has already filled the bar and we only
+ * need to restamp the 1px seam DefWindowProc drew in the stock shade (adzm's UAHDrawMenuNCBottomLine).
+ */
+static FORCEINLINE void ThemeNcRepaintMenuBar(HWND hwnd)
+{
+    MENUBAR_PALETTE pal;
+
+    if (!GetMenu(hwnd))
+    {
+        return;
+    }
+    if (g_theme.fAnimatingBackground && ThemeWindowHasBackgroundAnimation(hwnd))
+    {
+        ThemePaintMenuBarColor(hwnd, ThemeMenuAnimationColor());
+        return;
+    }
+    MenuBarPalette(ThemeIsDarkMode(), &pal);
+    MenuBarPaintSeam(hwnd, &pal);
 }
 
 static BOOL ThemeHandleSettingChangeMessage(HWND hwnd, LPARAM lParam, UINT uDeferredMsg, LRESULT* plr)
@@ -1667,6 +1812,23 @@ BOOL WINAPI ThemeHandleWindowMessage(
 
         case WM_SETTINGCHANGE:
             return ThemeHandleSettingChangeMessage(hwnd, lParam, uDeferredMsg, plr);
+
+        case WM_NCACTIVATE:
+        case WM_NCPAINT:
+            /* DwmDefWindowProc-style: let DefWindowProc render the frame, then repaint the owner-drawn
+               menu band over it (full bar while cross-fading, otherwise the 1px seam). The literal
+               message id -- not the switch-narrowed uMsg -- feeds DefWindowProc so no range-checked
+               value reaches it (C5045-safe). */
+            if (WM_NCACTIVATE == uMsg)
+            {
+                *plr = DefWindowProc(hwnd, WM_NCACTIVATE, wParam, lParam);
+            }
+            else
+            {
+                *plr = DefWindowProc(hwnd, WM_NCPAINT, wParam, lParam);
+            }
+            ThemeNcRepaintMenuBar(hwnd);
+            return TRUE;
 
         case WM_ERASEBKGND:
             *plr = (LRESULT)ThemeEraseBackground(hwnd, (HDC)wParam, ThemeIsDarkMode());
