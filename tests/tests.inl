@@ -4544,45 +4544,6 @@ static BOOL ThemeTestComboHostIsForeground(IUIAutomationElement* pCombo)
     return (NULL != hRootAtPt) && (NULL != hFg) && (hRootAtPt == GetAncestor(hFg, GA_ROOT));
 }
 
-/* Diagnostic: dump the input-gate state (combo rect, foreground window class, window-at-combo-point
-   class, root match) so an interruption can be explained rather than guessed at. */
-static DECLSPEC_NOINLINE void ThemeTestDumpInputGateDiag(IUIAutomation* pAuto)
-{
-    IUIAutomationElement* pCombo;
-    RECT  rc;
-    POINT pt;
-    HWND  hFg;
-    HWND  hPt;
-    BOOL  fHadCombo;
-    TCHAR szFg[64];
-    TCHAR szPt[64];
-    TCHAR szLine[256];
-
-    SecureZeroMemory(&rc, sizeof(rc));
-    pCombo = UiaFindColorModeCombo(pAuto);
-    fHadCombo = (NULL != pCombo);
-    if (pCombo)
-    {
-        (void)IUIAutomationElement_get_CurrentBoundingRectangle(pCombo, &rc);
-        IUIAutomationElement_Release(pCombo);
-    }
-    pt.x = (rc.left + rc.right) / 2;
-    pt.y = (rc.top + rc.bottom) / 2;
-    hFg  = GetForegroundWindow();
-    hPt  = WindowFromPoint(pt);
-    szFg[0] = TEXT('\0');
-    szPt[0] = TEXT('\0');
-    if (hFg) { (void)GetClassName(hFg, szFg, (int)ARRAYSIZE(szFg)); }
-    if (hPt) { (void)GetClassName(hPt, szPt, (int)ARRAYSIZE(szPt)); }
-    wnsprintf(szLine, (int)ARRAYSIZE(szLine),
-              TEXT("[INFO] T7 gate combo?=%d rc=(%d,%d,%d,%d) match=%d\n"),
-              (int)fHadCombo, (int)rc.left, (int)rc.top, (int)rc.right, (int)rc.bottom,
-              (int)(hFg && hPt && (GetAncestor(hFg, GA_ROOT) == GetAncestor(hPt, GA_ROOT))));
-    Out(szLine);
-    wnsprintf(szLine, (int)ARRAYSIZE(szLine), TEXT("[INFO] T7 gate fgCls=%s ptCls=%s\n"), szFg, szPt);
-    Out(szLine);
-}
-
 /* Hand the foreground to the Settings window that hosts the combo (NOT our app). Our app's launch
    forcibly activates it; this reclaims foreground for the real target so the canonical "app inactive,
    Settings active" state holds. The combo is parked unoccluded (corner-launched app), so WindowFromPoint
@@ -4849,7 +4810,6 @@ static void T_ThemeSettingsToggle(void)
         (void)ThemeTestForegroundSettings(pAuto);
     }
     fSettingsForeground = fComboReady && ThemeTestWaitForComboForeground(pAuto, WAIT_MS * 2u);
-    ThemeTestDumpInputGateDiag(pAuto);   /* gate state after handing foreground to Settings */
 
     iOriginalMode = UiaColorModeSelectedIndex(pAuto);
 
