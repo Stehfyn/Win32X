@@ -2200,15 +2200,20 @@ static BOOL ThemeTestAnalyzeCapturedFrames(THEME_CAPTURE* pCap,
     int   rgEnd[7];
     UINT  rgStartFrame[7];
     UINT  rgEndFrame[7];
+    UINT  rgReturnFrame[7];
     BOOL  rgStarted[7];
     BOOL  rgEnded[7];
+    BOOL  rgReturned[7];
     BOOL  rgActive[7];
     BOOL  fAllStarted;
     BOOL  fAllEnded;
+    BOOL  fAllReturned;
     UINT  uMinStart;
     UINT  uMaxStart;
     UINT  uMinEnd;
     UINT  uMaxEnd;
+    UINT  uMinReturn;
+    UINT  uMaxReturn;
     int   iMaxBand;
     int   iBandSurf;
     int   iRefAmp;
@@ -2273,13 +2278,16 @@ static BOOL ThemeTestAnalyzeCapturedFrames(THEME_CAPTURE* pCap,
         rgStart[k] = ThemeTestSurfaceLuma(pCap, iBase, k, ptRef, rgSurf, rgMenu, cMenu);
         rgStartFrame[k] = 0u;
         rgEndFrame[k] = 0u;
+        rgReturnFrame[k] = 0u;
         rgStarted[k] = FALSE;
         rgEnded[k] = FALSE;
+        rgReturned[k] = FALSE;
     }
-    /* The recording spans the full round-trip (initial -> target -> initial); the FORWARD transition
-       ends at the caption's turning point -- the frame whose caption luma is farthest from the start
-       plateau. Analyze only iBase..iLast (the forward leg); the restore leg is in the video for
-       reference but not banded (its end would otherwise read back at the initial shade -> zero span). */
+    /* The recording spans the full round-trip (initial -> target -> initial). rgEnd is the TARGET
+       plateau, found at the caption's turning point (the frame whose caption luma is farthest from the
+       start plateau), NOT the last frame (which has restored to the initial shade -> zero span). With
+       rgStart = initial and rgEnd = target, each surface's normalized progress runs 0 -> 100 -> 0 across
+       the two legs, so the per-frame band check (below) tracks the caption over BOTH legs. */
     {
         int iBestDev;
 
@@ -2312,7 +2320,7 @@ static BOOL ThemeTestAnalyzeCapturedFrames(THEME_CAPTURE* pCap,
     iMaxBand = 0;
     iBandSurf = -1;
     uBandFrame = 0u;
-    for (i = iBase; i <= iLast; ++i)
+    for (i = iBase; i < pCap->cCaptured; ++i)   /* span BOTH legs: forward (0->100) and restore (100->0) */
     {
         int  iRefProg;
         int  iRefPrev;
@@ -2328,7 +2336,7 @@ static BOOL ThemeTestAnalyzeCapturedFrames(THEME_CAPTURE* pCap,
            the curve-match within the band is still strictly enforced, only the unavoidable one-frame
            compositing phase is allowed -- never a larger lead/lag. */
         iPrev = (i > iBase) ? (i - 1u) : iBase;
-        iNext = (i < iLast) ? (i + 1u) : i;   /* stay within the forward leg, not the restore frames */
+        iNext = ((i + 1u) < pCap->cCaptured) ? (i + 1u) : i;
         iRefProg = ThemeTestProgress(ThemeTestSurfaceLuma(pCap, i, 0u, ptRef, rgSurf, rgMenu, cMenu), rgStart[0], rgEnd[0]);
         iRefPrev = ThemeTestProgress(ThemeTestSurfaceLuma(pCap, iPrev, 0u, ptRef, rgSurf, rgMenu, cMenu), rgStart[0], rgEnd[0]);
         iRefNext = ThemeTestProgress(ThemeTestSurfaceLuma(pCap, iNext, 0u, ptRef, rgSurf, rgMenu, cMenu), rgStart[0], rgEnd[0]);
@@ -2357,6 +2365,14 @@ static BOOL ThemeTestAnalyzeCapturedFrames(THEME_CAPTURE* pCap,
             {
                 rgEnded[k] = TRUE;
                 rgEndFrame[k] = i;
+            }
+            /* Restore leg: after reaching the target (>=85%) the surface falls back; record when it
+               returns to the initial shade (<=15%). The sync check then verifies every surface not only
+               starts/finishes the forward leg together but also completes the restore leg together. */
+            if (rgEnded[k] && !rgReturned[k] && (15 >= iProg))
+            {
+                rgReturned[k] = TRUE;
+                rgReturnFrame[k] = i;
             }
             /* The OK button (k==6) is a push button whose face is cross-faded by uxtheme's own
                internal state animation -- its own clock, like DWM's caption -- so it is held to the
@@ -2389,10 +2405,13 @@ static BOOL ThemeTestAnalyzeCapturedFrames(THEME_CAPTURE* pCap,
        matter here, only when each surface is in motion. */
     fAllStarted = TRUE;
     fAllEnded = TRUE;
+    fAllReturned = TRUE;
     uMinStart = 0xFFFFFFFFu;
     uMaxStart = 0u;
     uMinEnd = 0xFFFFFFFFu;
     uMaxEnd = 0u;
+    uMinReturn = 0xFFFFFFFFu;
+    uMaxReturn = 0u;
     for (k = 0u; k < 7u; ++k)
     {
         if (!rgActive[k])
@@ -2417,13 +2436,24 @@ static BOOL ThemeTestAnalyzeCapturedFrames(THEME_CAPTURE* pCap,
             if (rgEndFrame[k] < uMinEnd) { uMinEnd = rgEndFrame[k]; }
             if (rgEndFrame[k] > uMaxEnd) { uMaxEnd = rgEndFrame[k]; }
         }
+        if (!rgReturned[k])
+        {
+            fAllReturned = FALSE;
+        }
+        else
+        {
+            if (rgReturnFrame[k] < uMinReturn) { uMinReturn = rgReturnFrame[k]; }
+            if (rgReturnFrame[k] > uMaxReturn) { uMaxReturn = rgReturnFrame[k]; }
+        }
     }
 
     /* pfNoFlicker carries the curve-independent duration/sync verdict; pfCoherent carries the
-       curve-dependent caption-banded verdict. */
-    *pfNoFlicker = fAllStarted && fAllEnded &&
+       curve-dependent caption-banded verdict. Both legs must sync: surfaces begin the forward leg
+       together, finish it together, and complete the restore leg together. */
+    *pfNoFlicker = fAllStarted && fAllEnded && fAllReturned &&
                    ((uMaxStart - uMinStart) <= THEME_SYNC_FRAMES) &&
-                   ((uMaxEnd - uMinEnd) <= THEME_SYNC_FRAMES);
+                   ((uMaxEnd - uMinEnd) <= THEME_SYNC_FRAMES) &&
+                   ((uMaxReturn - uMinReturn) <= THEME_SYNC_FRAMES);
     *pfCoherent = (iMaxBand <= THEME_BAND_TOL);
 
     pCap->iFirstMixedFrame = uBandFrame;
