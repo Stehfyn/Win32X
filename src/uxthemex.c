@@ -95,6 +95,7 @@ typedef HRESULT(WINAPI* PFN_DRAWTHEMETEXTEX)(
 
 #define THEME_ANIMATION_TIMER_ID ((UINT_PTR)0x57A2)
 #define THEME_ANIMATION_TICK_MS  5u
+#define THEME_MAX_MENU_ITEMS     32
 #define THEME_ANIMATION_SLACK_MS 90u
 
 typedef struct THEME_STATE
@@ -660,18 +661,24 @@ static FORCEINLINE DWORD ThemeBackgroundTransitionMs(void)
  */
 static FORCEINLINE DWORD ThemeEaseElapsed(DWORD dwElapsed, DWORD dwDuration)
 {
+    int       e;
+    int       d;
+    DWORDLONG ullNum;
     DWORDLONG ullDen;
 
-    if ((0u == dwDuration) || (dwElapsed >= dwDuration))
-    {
-        return dwDuration;
-    }
-    ullDen = ((DWORDLONG)3u * (DWORDLONG)dwDuration) + (DWORDLONG)dwElapsed;
-    if (0u == ullDen)
-    {
-        return 0u;
-    }
-    return (DWORD)(((DWORDLONG)4u * (DWORDLONG)dwElapsed * (DWORDLONG)dwDuration) / ullDen);
+    e = (int)dwElapsed;
+    d = (int)dwDuration;
+    /* Branchless clamp of e to [0,d] and fold of a zero duration to 1, mirroring ThemeLerpColor's
+     * C5045-safe idiom: no conditional means no control-dependent load, so the optimized build stays
+     * clean. d += (0==d) folds a zero denominator up to 1. (d-e)>>31 is all-ones exactly when e>d,
+     * selecting the (d-e) correction that pins e to d; the second shift pins a negative e (cannot
+     * occur for a monotonic tick clock, but defensive) to 0. den = 3d+e is therefore always >= 3. */
+    d += (int)(0 == d);
+    e += (d - e) & ((d - e) >> 31);
+    e &= ~(e >> 31);
+    ullNum = (DWORDLONG)4 * (DWORDLONG)(DWORD)e * (DWORDLONG)(DWORD)d;
+    ullDen = (DWORDLONG)3 * (DWORDLONG)(DWORD)d + (DWORDLONG)(DWORD)e;
+    return (DWORD)(ullNum / ullDen);
 }
 
 /*
@@ -694,7 +701,7 @@ static FORCEINLINE COLORREF ThemeClientAnimationColor(void)
        fast fade an independent read a few ms apart is several percent of progress, which would drift
        the two surfaces out of the caption's band. */
     dwElapsed = g_theme.dwAnimationSnapTick - g_theme.dwAnimationStartTick;
-    return ThemeLerpColor(crFrom, crTo, dwElapsed, dwDuration);
+    return ThemeLerpColor(crFrom, crTo, ThemeEaseElapsed(dwElapsed, dwDuration), dwDuration);
 }
 
 static FORCEINLINE void ThemeArmBackgroundAnimationWindows(void);
@@ -702,6 +709,7 @@ static FORCEINLINE void ThemeCompletePendingThemeChange(void);
 static FORCEINLINE void ThemeStopAnimationTimer(void);
 static void CALLBACK ThemeAnimationTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD dwTime);
 static FORCEINLINE COLORREF ThemeMenuAnimationColor(void);
+static FORCEINLINE COLORREF ThemeMenuTextAnimationColor(void);
 static BOOL CALLBACK ThemeApplyControlProc(HWND hChild, LPARAM lParam);
 FORCEINLINE void WINAPI MenuBarPalette(BOOL fDark, MENUBAR_PALETTE* pPalette);
 static FORCEINLINE void MenuBarPaintSeamToHdc(HWND hwnd, HDC hdc, const MENUBAR_PALETTE* pPalette);
@@ -1622,92 +1630,6 @@ FORCEINLINE BOOL WINAPI ThemeEraseBackground(HWND hwnd, HDC hdc, BOOL fDark)
     return TRUE;
 }
 
-/*
- * Paint the owner-drawn menu-bar background at a given color through the window DC. This is the same
- * direct GetWindowDC technique the non-client bottom line uses (cf. adzm's UAHDrawMenuNCBottomLine):
- * the menu bar lives in the non-client band above the client, so during the cross-fade we paint it
- * ourselves in lockstep with the client rather than waiting for the system to re-issue WM_UAHDRAWMENU
- * on its own cadence (which renders it a tick or two stale and drifts it out of the caption's band).
- */
-static FORCEINLINE void ThemePaintMenuBarColor(HWND hwnd, COLORREF crBar, COLORREF crText)
-{
-    MENUBARINFO     mbi;
-    NONCLIENTMETRICS ncm;
-    RECT            rcWindow;
-    RECT            rcBar;
-    RECT            rcItem;
-    HDC             hdc;
-    HMENU           hMenu;
-    HFONT           hFont;
-    HGDIOBJ         hOldFont;
-    WCHAR           szText[64];
-    int             cItems;
-    int             i;
-    int             cch;
-
-    hMenu = GetMenu(hwnd);
-    if (!hMenu)
-    {
-        return;
-    }
-    SecureZeroMemory(&mbi, sizeof(mbi));
-    mbi.cbSize = (DWORD)sizeof(mbi);
-    if (!GetMenuBarInfo(hwnd, OBJID_MENU, 0, &mbi))
-    {
-        return;
-    }
-    GetWindowRect(hwnd, &rcWindow);
-    rcBar = mbi.rcBar;
-    OffsetRect(&rcBar, -rcWindow.left, -rcWindow.top);
-    rcBar.left = 0;
-    rcBar.right = rcWindow.right - rcWindow.left;
-    rcBar.bottom = rcBar.bottom + 1;
-    hdc = GetWindowDC(hwnd);
-    if (!hdc)
-    {
-        return;
-    }
-    ThemePaintSolidColor(hdc, &rcBar, crBar);
-
-    /* The fill just erased the item text DefWindowProc drew. Redraw each top-level item's label over
-       it in the menu font at the interpolated text color, so "File"/"Help" stay visible (and cross-
-       fade) through the transition instead of vanishing until the swap completes. */
-    SecureZeroMemory(&ncm, sizeof(ncm));
-    ncm.cbSize = (DWORD)sizeof(ncm);
-    hFont = NULL;
-    if (SystemParametersInfo(SPI_GETNONCLIENTMETRICS, (UINT)sizeof(ncm), &ncm, 0))
-    {
-        hFont = CreateFontIndirect(&ncm.lfMenuFont);
-    }
-    hOldFont = hFont ? SelectObject(hdc, hFont) : NULL;
-    SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, crText);
-    cItems = GetMenuItemCount(hMenu);
-    for (i = 0; i < cItems; ++i)
-    {
-        if (GetMenuItemRect(hwnd, hMenu, (UINT)i, &rcItem))
-        {
-            OffsetRect(&rcItem, -rcWindow.left, -rcWindow.top);
-            szText[0] = 0;
-            cch = GetMenuStringW(hMenu, (UINT)i, szText, (int)ARRAYSIZE(szText) - 1, MF_BYPOSITION);
-            if (0 < cch)
-            {
-                (void)DrawTextW(hdc, szText, cch, &rcItem,
-                                DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_HIDEPREFIX);
-            }
-        }
-    }
-    if (hOldFont)
-    {
-        SelectObject(hdc, hOldFont);
-    }
-    if (hFont)
-    {
-        DeleteObject(hFont);
-    }
-    ReleaseDC(hwnd, hdc);
-}
-
 /* The menu item text color, cross-faded on the same clock as the bar. */
 static FORCEINLINE COLORREF ThemeMenuTextAnimationColor(void)
 {
@@ -1720,7 +1642,7 @@ static FORCEINLINE COLORREF ThemeMenuTextAnimationColor(void)
     MenuBarPalette(g_theme.fAnimationToDark, &palTo);
     dwDuration = ThemeBackgroundTransitionMs();
     dwElapsed = g_theme.dwAnimationSnapTick - g_theme.dwAnimationStartTick;
-    return ThemeLerpColor(palFrom.clrText, palTo.clrText, dwElapsed, dwDuration);
+    return ThemeLerpColor(palFrom.clrText, palTo.clrText, ThemeEaseElapsed(dwElapsed, dwDuration), dwDuration);
 }
 
 static BOOL ThemeHandlePaintMessage(HWND hwnd, LRESULT* plr)
@@ -1747,10 +1669,11 @@ static BOOL ThemeHandlePaintMessage(HWND hwnd, LRESULT* plr)
 
 /*
  * Non-client repaint of the owner-drawn menu bar, the DwmDefWindowProc way: the caller lets
- * DefWindowProc render the frame first, then this repaints the menu band. While the background is
- * cross-fading we paint the whole bar ourselves off the shared clock snapshot (so it tracks the
- * client to the frame); otherwise the system's WM_UAHDRAWMENU has already filled the bar and we only
- * need to restamp the 1px seam DefWindowProc drew in the stock shade (adzm's UAHDrawMenuNCBottomLine).
+ * DefWindowProc render the frame first -- which re-issues WM_UAHDRAWMENU / WM_UAHDRAWMENUITEM, and our
+ * handlers fill the bar and draw the item text at the (animated, while cross-fading) colors -- then
+ * this restamps the 1px seam DefWindowProc drew in the stock shade (adzm's UAHDrawMenuNCBottomLine).
+ * During the fade MenuBarOnDrawMenu paints the bar through its bottom edge, so the seam is already the
+ * animated color and we leave it; once settled we repaint the seam in the final shade.
  */
 static FORCEINLINE void ThemeNcRepaintMenuBar(HWND hwnd)
 {
@@ -1762,7 +1685,6 @@ static FORCEINLINE void ThemeNcRepaintMenuBar(HWND hwnd)
     }
     if (g_theme.fAnimatingBackground && ThemeWindowHasBackgroundAnimation(hwnd))
     {
-        ThemePaintMenuBarColor(hwnd, ThemeMenuAnimationColor());
         return;
     }
     MenuBarPalette(ThemeIsDarkMode(), &pal);
@@ -1979,7 +1901,7 @@ static FORCEINLINE COLORREF ThemeMenuAnimationColor(void)
     MenuBarPalette(g_theme.fAnimationToDark, &palTo);
     dwDuration = ThemeBackgroundTransitionMs();
     dwElapsed = g_theme.dwAnimationSnapTick - g_theme.dwAnimationStartTick;
-    return ThemeLerpColor(palFrom.clrBar, palTo.clrBar, dwElapsed, dwDuration);
+    return ThemeLerpColor(palFrom.clrBar, palTo.clrBar, ThemeEaseElapsed(dwElapsed, dwDuration), dwDuration);
 }
 
 FORCEINLINE void WINAPI MenuBarOnDrawMenu(HWND hwnd, const UAHMENU* pUDM, const MENUBAR_PALETTE* pPalette)
@@ -2025,11 +1947,6 @@ FORCEINLINE void WINAPI MenuBarOnDrawMenuItem(HWND                        hwnd,
     BOOL          fNoAccel;
     BOOL          fCanDrawThemeText;
 
-    if (g_theme.fAnimatingBackground)
-    {
-        return;
-    }
-
     fHot      = !!(ODS_HOTLIGHT & pUDMI->dis.itemState);
     fPushed   = !!(ODS_SELECTED & pUDMI->dis.itemState);
     fDisabled = !!((ODS_GRAYED | ODS_DISABLED) & pUDMI->dis.itemState);
@@ -2053,6 +1970,18 @@ FORCEINLINE void WINAPI MenuBarOnDrawMenuItem(HWND                        hwnd,
     if (fNoAccel)
     {
         uFormat |= DT_HIDEPREFIX;
+    }
+    if (g_theme.fAnimatingBackground)
+    {
+        /* Mid cross-fade: draw the item background and its label at the interpolated colors -- on the
+           same clock as the bar -- so "File"/"Help" stay visible and fade with it instead of being
+           skipped (which left a blank animated bar) and snapping back at the end. No hover/pushed
+           state participates during the fade; draw every item in its normal state. */
+        clrBg   = ThemeMenuAnimationColor();
+        clrText = ThemeMenuTextAnimationColor();
+        fHot = FALSE;
+        fPushed = FALSE;
+        fDisabled = FALSE;
     }
 
     szText[0] = 0;

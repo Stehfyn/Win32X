@@ -32,6 +32,8 @@ static BOOL g_fThemePaintMismatch;
 static DWORD g_dwThemeWorkerValue;
 static BOOL  g_fThemeWorkerWrote;
 static BOOL  g_fThemeWorkerBroadcast;
+static BOOL  g_fThemeWorkerWriteSystem;
+static LPCTSTR g_pszThemeTag = TEXT("");
 static HANDLE g_hThemeStartEvent;
 static HWND   g_hwndThemeTop;
 static HWND   g_hwndThemeDialog;
@@ -451,10 +453,12 @@ static void T_Position(void)
 }
 
 /*
- * A real light/dark switch flips BOTH HKCU Personalize DWORDs: AppsUseLightTheme (app surfaces --
- * what this app's caption/menu/client follow) and SystemUsesLightTheme (taskbar/system chrome).
- * The transition simulation writes both so it matches what Settings actually does, and the original
- * of each is captured and restored so the developer's machine is left exactly as found.
+ * The two HKCU Personalize DWORDs a theme switch can touch: AppsUseLightTheme (app surfaces -- what
+ * this app's caption/menu/client follow) and SystemUsesLightTheme (taskbar/system chrome; when it
+ * flips, DWM also runs its own caption crossfade). The split transition tests exercise each path:
+ * one writes AppsUseLightTheme alone, the other writes both (what Settings does for a full switch).
+ * Regardless of which is written, BOTH originals are captured up front and BOTH are restored at the
+ * end, so the developer's machine is never left in an inconsistent (apps != system) state.
  */
 static BOOL g_fThemeHadSystemValue;
 static DWORD g_dwThemeSystemValue;
@@ -557,12 +561,16 @@ static BOOL ThemeTestReadAppsUseLightTheme(DWORD* pdwValue, BOOL* pfHadValue)
     return ThemeTestReadThemeValue(TEXT("AppsUseLightTheme"), pdwValue, pfHadValue);
 }
 
-static BOOL ThemeTestWriteAppsUseLightTheme(DWORD dwValue)
+static BOOL ThemeTestWriteAppsUseLightTheme(DWORD dwValue, BOOL fWriteSystem)
 {
     BOOL fApps;
     BOOL fSystem;
 
-    fApps   = ThemeTestWriteThemeValue(TEXT("AppsUseLightTheme"), dwValue);
+    fApps = ThemeTestWriteThemeValue(TEXT("AppsUseLightTheme"), dwValue);
+    if (!fWriteSystem)
+    {
+        return fApps;
+    }
     fSystem = ThemeTestWriteThemeValue(TEXT("SystemUsesLightTheme"), dwValue);
     return fApps && fSystem;
 }
@@ -636,7 +644,13 @@ static BOOL ThemeTestRegisterClass(LPCTSTR pszClass)
     wc.hInstance     = GetModuleHandle(NULL);
     wc.lpszClassName = pszClass;
     wc.hbrBackground = pfnTestThemeBackgroundBrush(pfnTestThemeIsDarkMode());
-    return 0 != RegisterClass(&wc);
+    if (0 != RegisterClass(&wc))
+    {
+        return TRUE;
+    }
+    /* The window class is process-global; the second split-transition run reuses what the first
+       registered, so an already-registered class is success, not failure. */
+    return ERROR_CLASS_ALREADY_EXISTS == GetLastError();
 }
 
 static void ThemeTestClearDeferredMessage(HWND hwnd)
@@ -722,7 +736,7 @@ static DWORD WINAPI ThemeTestTransitionThread(LPVOID pv)
 {
     UNREFERENCED_PARAMETER(pv);
     WaitForSingleObject(g_hThemeStartEvent, WAIT_MS);
-    g_fThemeWorkerWrote = ThemeTestWriteAppsUseLightTheme(g_dwThemeWorkerValue);
+    g_fThemeWorkerWrote = ThemeTestWriteAppsUseLightTheme(g_dwThemeWorkerValue, g_fThemeWorkerWriteSystem);
     if (g_fThemeWorkerWrote)
     {
         g_fThemeWorkerBroadcast = ThemeTestBroadcastImmersiveColorSet();
@@ -1850,20 +1864,6 @@ static BOOL ThemeTestAnalyzeCapturedFrames(THEME_CAPTURE* pCap,
     if (0 > iRefAmp) { iRefAmp = -iRefAmp; }
     *pfTransitioned = (iRefAmp >= THEME_MIN_SPAN);
 
-    /* [CURVE] dump: caption progress vs the linear client progress across the transition, so the
-       shape difference (S-curve caption vs linear client) is visible directly, not inferred. */
-    for (i = iBase; (i < pCap->cCaptured) && (i < iBase + 84u); i += 3u)
-    {
-        int icap = ThemeTestProgress(ThemeTestLumaAt(pCap, i, ptRef), rgStart[0], rgEnd[0]);
-        int icli = ThemeTestProgress(ThemeTestLumaAt(pCap, i, rgSurf[1]), rgStart[3], rgEnd[3]);
-        int imnu = ThemeTestProgress(ThemeTestMenuLumaAt(pCap, i, rgMenu, cMenu), rgStart[2], rgEnd[2]);
-        if ((icap > 1) && (icap < 99))
-        {
-            OutF(TEXT("[CURVE] cap=%d\n"), icap);
-            OutF(TEXT("[CURVE] cli=%d\n"), icli);
-            OutF(TEXT("[CURVE] mnu=%d\n"), imnu);
-        }
-    }
 
     /* Single pass over every frame from the plateau on. For each surface compute its own normalized
        progress; record the frame it first crosses 15% (transition start) and 85% (transition end),
@@ -2839,7 +2839,31 @@ static BOOL ThemeTestDrainCompositedFrames(THEME_DXGI* pDxgi)
     }
 }
 
-static void T_ThemeTransition(void)
+/* Tagged result emitters: prepend the active scenario tag (e.g. "[apps] ") to the result name so the
+   apps-only and apps+system runs of the same transition body produce distinct, greppable lines. */
+static void ThemeTestCheck(BOOL fOk, LPCTSTR pszName)
+{
+    TCHAR szBuf[192];
+    wnsprintf(szBuf, ARRAYSIZE(szBuf), TEXT("%s%s"), g_pszThemeTag, pszName);
+    Check(fOk, szBuf);
+}
+
+static void ThemeTestSkipNote(LPCTSTR pszName, LPCTSTR pszWhy)
+{
+    TCHAR szBuf[192];
+    wnsprintf(szBuf, ARRAYSIZE(szBuf), TEXT("%s%s"), g_pszThemeTag, pszName);
+    Skip(szBuf, pszWhy);
+}
+
+/*
+ * The theme-transition body, parameterized over which Personalize DWORD(s) the worker flips:
+ *   fWriteSystem == FALSE -> AppsUseLightTheme only (app theme; DWM caption follows the app's explicit
+ *                            DWMWA_USE_IMMERSIVE_DARK_MODE, no system-driven caption crossfade).
+ *   fWriteSystem == TRUE  -> AppsUseLightTheme and SystemUsesLightTheme (a full Settings switch; DWM
+ *                            additionally runs its own caption crossfade).
+ * pszTag labels the emitted results. Both originals are always restored (see helper comment above).
+ */
+static void ThemeTestRunTransition(BOOL fWriteSystem, LPCTSTR pszTag)
 {
     DWORD             dwOriginalValue;
     DWORD             dwTargetValue;
@@ -2891,17 +2915,20 @@ static void T_ThemeTransition(void)
     THEME_DXGI        dxgi;
     THEME_DIAGNOSTICS diag;
 
+    g_pszThemeTag = pszTag;
+    g_fThemeWorkerWriteSystem = fWriteSystem;
+
     hMutex = CreateMutex(NULL, FALSE, TEXT("Local\\Win32XThemeTransitionTest"));
     if (!hMutex)
     {
-        Skip(TEXT("T6 system theme transition contract"), TEXT("theme transition mutex cannot be created"));
+        ThemeTestSkipNote(TEXT("T6 system theme transition contract"), TEXT("theme transition mutex cannot be created"));
         return;
     }
     dwWait = WaitForSingleObject(hMutex, 0u);
     if ((WAIT_OBJECT_0 != dwWait) && (WAIT_ABANDONED != dwWait))
     {
         CloseHandle(hMutex);
-        Check(FALSE, TEXT("T6 system theme transition contract is not run concurrently"));
+        ThemeTestCheck(FALSE, TEXT("T6 system theme transition contract is not run concurrently"));
         return;
     }
 
@@ -2912,7 +2939,7 @@ static void T_ThemeTransition(void)
     {
         ReleaseMutex(hMutex);
         CloseHandle(hMutex);
-        Skip(TEXT("T6 system theme transition contract"), TEXT("dark-mode uxtheme/DWM contract unavailable"));
+        ThemeTestSkipNote(TEXT("T6 system theme transition contract"), TEXT("dark-mode uxtheme/DWM contract unavailable"));
         return;
     }
 
@@ -2921,7 +2948,7 @@ static void T_ThemeTransition(void)
     {
         ReleaseMutex(hMutex);
         CloseHandle(hMutex);
-        Skip(TEXT("T6 system theme transition contract"), TEXT("AppsUseLightTheme cannot be read"));
+        ThemeTestSkipNote(TEXT("T6 system theme transition contract"), TEXT("AppsUseLightTheme cannot be read"));
         return;
     }
 
@@ -2939,7 +2966,7 @@ static void T_ThemeTransition(void)
     {
         ReleaseMutex(hMutex);
         CloseHandle(hMutex);
-        Skip(TEXT("T6 system theme transition contract"), TEXT("common controls v6 unavailable"));
+        ThemeTestSkipNote(TEXT("T6 system theme transition contract"), TEXT("common controls v6 unavailable"));
         return;
     }
 
@@ -3019,9 +3046,9 @@ static void T_ThemeTransition(void)
 
     if (!hwndTop || !hwndDialog || !hwndStatic || !hwndButton)
     {
-        Check(FALSE, TEXT("T6 creates native windows for theme transition"));
+        ThemeTestCheck(FALSE, TEXT("T6 creates native windows for theme transition"));
         fRestored = ThemeTestRestoreAppsUseLightTheme(fHadOriginalValue, dwOriginalValue);
-        Check(fRestored, TEXT("T6 restores AppsUseLightTheme after create failure"));
+        ThemeTestCheck(fRestored, TEXT("T6 restores AppsUseLightTheme after create failure"));
         if (hwndButton)
         {
             DestroyWindow(hwndButton);
@@ -3048,6 +3075,13 @@ static void T_ThemeTransition(void)
     g_fThemeExpectedDark = fInitialDark;
     ShowWindow(hwndTop, SW_SHOWNORMAL);
     ShowWindow(hwndDialog, SW_SHOWNORMAL);
+    /* Make the dialog the foreground window. Windows draws an owner's caption active while its owned
+       window is active, so BOTH captions then crossfade over the full active-caption span (matching
+       the recorded scenario) instead of the top caption sitting inactive -- an inactive caption barely
+       changes shade, collapsing the reference span and turning the per-frame band into pure noise. */
+    BringWindowToTop(hwndDialog);
+    SetForegroundWindow(hwndDialog);
+    SetActiveWindow(hwndDialog);
     UpdateWindow(hwndTop);
     UpdateWindow(hwndDialog);
     ThemeTestPumpMessages();
@@ -3252,18 +3286,18 @@ static void T_ThemeTransition(void)
     DestroyWindow(hwndDialog);
     DestroyWindow(hwndTop);
 
-    Check(fPublished, TEXT("T6 WM_SETTINGCHANGE publishes target ThemeIsDarkMode before deferred"));
-    Check(fDiagnosticsPublished, TEXT("T6 diagnostics show target state after broadcast"));
-    Check(fClassBrushPublished, TEXT("T6 top-level class brush switches before deferred paint"));
-    Check(fCaptureOffGuiThread, TEXT("T6 captures off the GUI thread"));
-    Check(fEncodeOffGuiThread, TEXT("T6 encodes off the GUI thread"));
-    Check(fCapturedFrames, TEXT("T6 records DXGI desktop-composited frames"));
-    Check(fEncodedFrames, TEXT("T6 encodes queued DXGI textures during capture"));
-    Check(fNoDroppedFrames, TEXT("T6 records at native monitor refresh without frame-count drops"));
-    Check(fSawIntermediateFrame, TEXT("T6 analyzes decoded transition frames in sequence"));
-    Check(fSawTargetFrame, TEXT("T6 transition completes: caption spans the full shade change"));
-    Check(fSawMenuIntermediateFrame, TEXT("T6 curve-independent: every surface starts and ends its transition together (same duration, synchronized)"));
-    Check(fNoMixedFrames, TEXT("T6 curve-dependent: every surface stays within a tight band of the DWM caption's progress, every frame"));
+    ThemeTestCheck(fPublished, TEXT("T6 WM_SETTINGCHANGE publishes target ThemeIsDarkMode before deferred"));
+    ThemeTestCheck(fDiagnosticsPublished, TEXT("T6 diagnostics show target state after broadcast"));
+    ThemeTestCheck(fClassBrushPublished, TEXT("T6 top-level class brush switches before deferred paint"));
+    ThemeTestCheck(fCaptureOffGuiThread, TEXT("T6 captures off the GUI thread"));
+    ThemeTestCheck(fEncodeOffGuiThread, TEXT("T6 encodes off the GUI thread"));
+    ThemeTestCheck(fCapturedFrames, TEXT("T6 records DXGI desktop-composited frames"));
+    ThemeTestCheck(fEncodedFrames, TEXT("T6 encodes queued DXGI textures during capture"));
+    ThemeTestCheck(fNoDroppedFrames, TEXT("T6 records at native monitor refresh without frame-count drops"));
+    ThemeTestCheck(fSawIntermediateFrame, TEXT("T6 analyzes decoded transition frames in sequence"));
+    ThemeTestCheck(fSawTargetFrame, TEXT("T6 transition completes: caption spans the full shade change"));
+    ThemeTestCheck(fSawMenuIntermediateFrame, TEXT("T6 curve-independent: every surface starts and ends its transition together (same duration, synchronized)"));
+    ThemeTestCheck(fNoMixedFrames, TEXT("T6 curve-dependent: every surface stays within a tight band of the DWM caption's progress, every frame"));
     if (!fSawTargetFrame || !fNoMixedFrames || !fSawMenuIntermediateFrame || !fNoDroppedFrames)
     {
         OutF(TEXT("[INFO] T6 captured frames: %u\n"), capture.cCaptured);
@@ -3283,11 +3317,23 @@ static void T_ThemeTransition(void)
         OutF(TEXT("[INFO] T6 caption luma min: %u\n"), capture.iFirstTargetFrame);
         OutF(TEXT("[INFO] T6 caption luma max: %u\n"), capture.iFirstIntermediateFrame);
     }
-    Check(fDeferredStable, TEXT("T6 deferred reconciliation preserves target state"));
-    Check(fDiagnosticsDeferred, TEXT("T6 deferred reconciliation clears pending state"));
-    Check(fRestored, TEXT("T6 restores AppsUseLightTheme"));
+    ThemeTestCheck(fDeferredStable, TEXT("T6 deferred reconciliation preserves target state"));
+    ThemeTestCheck(fDiagnosticsDeferred, TEXT("T6 deferred reconciliation clears pending state"));
+    ThemeTestCheck(fRestored, TEXT("T6 restores AppsUseLightTheme"));
     ThemeTestDxgiFree(&dxgi);
     ThemeTestCaptureFree(&capture);
     ReleaseMutex(hMutex);
     CloseHandle(hMutex);
+}
+
+/* Split on registry toggling: T6a flips AppsUseLightTheme alone; T6b flips both AppsUseLightTheme
+   and SystemUsesLightTheme. Each runs the full capture/analyze transition and restores both DWORDs. */
+static void T_ThemeTransitionAppsOnly(void)
+{
+    ThemeTestRunTransition(FALSE, TEXT("[apps] "));
+}
+
+static void T_ThemeTransitionAppsAndSystem(void)
+{
+    ThemeTestRunTransition(TRUE, TEXT("[apps+system] "));
 }

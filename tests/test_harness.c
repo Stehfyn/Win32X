@@ -201,7 +201,8 @@ static PFN_TEST volatile g_rgTests[] =
     T_StartupRect,
     T_Hardening,
     T_Position,
-    T_ThemeTransition
+    T_ThemeTransitionAppsOnly,
+    T_ThemeTransitionAppsAndSystem
 };
 
 void __cdecl TestEntry(void)
