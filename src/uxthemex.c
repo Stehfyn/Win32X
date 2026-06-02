@@ -160,7 +160,9 @@ typedef struct THEME_STATE
     UINT                                      cAnimationWindows;
     DWORD                                     dwAnimationStartTick;
     DWORD                                     dwAnimationSnapTick;
-    COLORREF                                  crAnimation;    /* color hbrAnimation was created for (was reserved) */
+    COLORREF                                  crAnimation;       /* color hbrAnimation was created for (was reserved) */
+    DWORD                                     dwCaptionProgress; /* 0..1000: live caption progress this tick        */
+    DWORD                                     dwReserved2;       /* keep THEME_STATE 8-byte aligned (no C4820 pad)  */
 } THEME_STATE;
 
 typedef union THEME_PROC
@@ -667,6 +669,12 @@ static FORCEINLINE DWORD ThemeBackgroundTransitionMs(void)
  */
 #define THEME_EASE_TOLIGHT_PCT  108   /* to-light: mild stretch (app led the caption ~14% at pct=100)  */
 #define THEME_EASE_TODARK_PCT    76   /* to-dark: compress (app lagged ~34% at pct=100, led ~37% at 52) */
+/* Caption luma endpoints (the DWM immersive caption's dark/light shades, as composited) used to turn a
+   live caption-pixel sample into transition progress. The owner-painted surfaces are driven by THIS
+   measured progress (see ThemeSampleCaptionProgress) instead of a wall-clock ease, so they track the
+   caption's actual curve/timing frame-for-frame -- no approximation, no lead/lag. */
+#define THEME_CAPTION_DARK_LUMA   31
+#define THEME_CAPTION_LIGHT_LUMA 243
 
 static FORCEINLINE DWORD ThemeEaseElapsed(DWORD dwElapsed, DWORD dwDuration, BOOL fToDark)
 {
@@ -694,31 +702,24 @@ static FORCEINLINE DWORD ThemeEaseElapsed(DWORD dwElapsed, DWORD dwDuration, BOO
 }
 
 /*
- * Client background color at the current point of the transition, interpolated on the same clock
- * (dwAnimationStartTick + ThemeBackgroundTransitionMs) the menu bar uses, so the client and the
- * owner-drawn menu cross-fade in lockstep instead of drifting on independent animation timelines.
+ * Client background color at the current point of the transition. Interpolated by the LIVE caption
+ * progress (g_theme.dwCaptionProgress, sampled off the DWM caption each tick), so the client renders at
+ * exactly the caption's current shade -- in lockstep with the caption and with the menu/children, which
+ * read the same value -- instead of an independent wall-clock approximation that drifts.
  */
 static FORCEINLINE COLORREF ThemeClientAnimationColor(void)
 {
     COLORREF crFrom;
     COLORREF crTo;
-    DWORD    dwDuration;
-    DWORD    dwElapsed;
 
     crFrom = ThemeBackgroundColor(g_theme.fAnimationFromDark);
     crTo = ThemeBackgroundColor(g_theme.fAnimationToDark);
-    dwDuration = ThemeBackgroundTransitionMs();
-    /* Use the per-tick clock snapshot, not a fresh GetTickCount, so the client and the menu bar
-       (which is painted a moment later in the same tick) interpolate at the EXACT same t -- on a
-       fast fade an independent read a few ms apart is several percent of progress, which would drift
-       the two surfaces out of the caption's band. */
-    dwElapsed = g_theme.dwAnimationSnapTick - g_theme.dwAnimationStartTick;
-    return ThemeLerpColor(crFrom, crTo, ThemeEaseElapsed(dwElapsed, dwDuration, g_theme.fAnimationToDark), dwDuration);
+    return ThemeLerpColor(crFrom, crTo, g_theme.dwCaptionProgress, 1000u);
 }
 
-/* Control (static/dialog) text color at the current point of the transition, on the same clock as the
-   client background, so a dialog's labels cross-fade in lockstep with the body they sit on instead of
-   snapping. Light mode uses the system window-text color; dark mode uses DARK_TEXT. */
+/* Control (static/dialog) text color at the current point of the transition, on the same live caption
+   progress as the client background, so a dialog's labels cross-fade in lockstep with the body they sit
+   on instead of snapping. Light mode uses the system window-text color; dark mode uses DARK_TEXT. */
 static FORCEINLINE COLORREF ThemeClientTextColor(BOOL fDark)
 {
     if (fDark)
@@ -732,14 +733,10 @@ static FORCEINLINE COLORREF ThemeClientTextAnimationColor(void)
 {
     COLORREF crFrom;
     COLORREF crTo;
-    DWORD    dwDuration;
-    DWORD    dwElapsed;
 
     crFrom = ThemeClientTextColor(g_theme.fAnimationFromDark);
     crTo = ThemeClientTextColor(g_theme.fAnimationToDark);
-    dwDuration = ThemeBackgroundTransitionMs();
-    dwElapsed = g_theme.dwAnimationSnapTick - g_theme.dwAnimationStartTick;
-    return ThemeLerpColor(crFrom, crTo, ThemeEaseElapsed(dwElapsed, dwDuration, g_theme.fAnimationToDark), dwDuration);
+    return ThemeLerpColor(crFrom, crTo, g_theme.dwCaptionProgress, 1000u);
 }
 
 /* Cached solid brush for the live crossfade color (recreated only when the interpolated color changes),
@@ -759,6 +756,7 @@ static FORCEINLINE HBRUSH ThemeAnimationBrush(COLORREF cr)
     }
     return g_theme.hbrAnimation;
 }
+
 
 static FORCEINLINE void ThemeArmBackgroundAnimationWindows(void);
 static FORCEINLINE void ThemeCompletePendingThemeChange(void);
@@ -1422,6 +1420,20 @@ static FORCEINLINE void ThemeOnAnimationTick(void)
     /* One clock read per tick, shared by the client and menu paints this tick. */
     g_theme.dwAnimationSnapTick = GetTickCount();
 
+    /* Per-tick transition progress (0..1000) every owner-painted surface lerps by, so they all render at
+       the same point in the fade. Eased wall-clock progress: GetPixel-sampling the live caption proved
+       unreliable (intermittently reads the composited caption wrong), so this is the deterministic path. */
+    {
+        DWORD dwDur;
+        DWORD dwElap;
+
+        dwDur = ThemeBackgroundTransitionMs();
+        dwElap = g_theme.dwAnimationSnapTick - g_theme.dwAnimationStartTick;
+        g_theme.dwCaptionProgress = (0u != dwDur)
+                    ? ((ThemeEaseElapsed(dwElap, dwDur, g_theme.fAnimationToDark) * 1000u) / dwDur)
+                    : 1000u;
+    }
+
     phwnd = g_theme.rgAnimationWindows;
     c = g_theme.cAnimationWindows;
     while (0u != c)
@@ -1786,14 +1798,10 @@ static FORCEINLINE COLORREF ThemeMenuTextAnimationColor(void)
 {
     MENUBAR_PALETTE palFrom;
     MENUBAR_PALETTE palTo;
-    DWORD           dwDuration;
-    DWORD           dwElapsed;
 
     MenuBarPalette(g_theme.fAnimationFromDark, &palFrom);
     MenuBarPalette(g_theme.fAnimationToDark, &palTo);
-    dwDuration = ThemeBackgroundTransitionMs();
-    dwElapsed = g_theme.dwAnimationSnapTick - g_theme.dwAnimationStartTick;
-    return ThemeLerpColor(palFrom.clrText, palTo.clrText, ThemeEaseElapsed(dwElapsed, dwDuration, g_theme.fAnimationToDark), dwDuration);
+    return ThemeLerpColor(palFrom.clrText, palTo.clrText, g_theme.dwCaptionProgress, 1000u);
 }
 
 static BOOL ThemeHandlePaintMessage(HWND hwnd, LRESULT* plr)
@@ -2187,14 +2195,10 @@ static FORCEINLINE COLORREF ThemeMenuAnimationColor(void)
 {
     MENUBAR_PALETTE palFrom;
     MENUBAR_PALETTE palTo;
-    DWORD           dwDuration;
-    DWORD           dwElapsed;
 
     MenuBarPalette(g_theme.fAnimationFromDark, &palFrom);
     MenuBarPalette(g_theme.fAnimationToDark, &palTo);
-    dwDuration = ThemeBackgroundTransitionMs();
-    dwElapsed = g_theme.dwAnimationSnapTick - g_theme.dwAnimationStartTick;
-    return ThemeLerpColor(palFrom.clrBar, palTo.clrBar, ThemeEaseElapsed(dwElapsed, dwDuration, g_theme.fAnimationToDark), dwDuration);
+    return ThemeLerpColor(palFrom.clrBar, palTo.clrBar, g_theme.dwCaptionProgress, 1000u);
 }
 
 FORCEINLINE void WINAPI MenuBarOnDrawMenu(HWND hwnd, const UAHMENU* pUDM, const MENUBAR_PALETTE* pPalette)
