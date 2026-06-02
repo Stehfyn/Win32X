@@ -450,7 +450,16 @@ static void T_Position(void)
     Check(fLandedSecond, TEXT("T5 physical STARTF_USEPOSITION lands the startup rect on the second monitor"));
 }
 
-static BOOL ThemeTestReadAppsUseLightTheme(DWORD* pdwValue, BOOL* pfHadValue)
+/*
+ * A real light/dark switch flips BOTH HKCU Personalize DWORDs: AppsUseLightTheme (app surfaces --
+ * what this app's caption/menu/client follow) and SystemUsesLightTheme (taskbar/system chrome).
+ * The transition simulation writes both so it matches what Settings actually does, and the original
+ * of each is captured and restored so the developer's machine is left exactly as found.
+ */
+static BOOL g_fThemeHadSystemValue;
+static DWORD g_dwThemeSystemValue;
+
+static BOOL ThemeTestReadThemeValue(LPCTSTR pszValue, DWORD* pdwValue, BOOL* pfHadValue)
 {
     HKEY    hKey;
     DWORD   dwType;
@@ -476,7 +485,7 @@ static BOOL ThemeTestReadAppsUseLightTheme(DWORD* pdwValue, BOOL* pfHadValue)
 
     dwType  = 0u;
     cbValue = (DWORD)sizeof(*pdwValue);
-    lStatus = RegQueryValueEx(hKey, TEXT("AppsUseLightTheme"), NULL, &dwType, (LPBYTE)pdwValue, &cbValue);
+    lStatus = RegQueryValueEx(hKey, pszValue, NULL, &dwType, (LPBYTE)pdwValue, &cbValue);
     RegCloseKey(hKey);
     if (ERROR_FILE_NOT_FOUND == lStatus)
     {
@@ -491,7 +500,7 @@ static BOOL ThemeTestReadAppsUseLightTheme(DWORD* pdwValue, BOOL* pfHadValue)
     return TRUE;
 }
 
-static BOOL ThemeTestWriteAppsUseLightTheme(DWORD dwValue)
+static BOOL ThemeTestWriteThemeValue(LPCTSTR pszValue, DWORD dwValue)
 {
     HKEY    hKey;
     DWORD   dwDisposition;
@@ -513,7 +522,7 @@ static BOOL ThemeTestWriteAppsUseLightTheme(DWORD dwValue)
         return FALSE;
     }
     lStatus = RegSetValueEx(hKey,
-                            TEXT("AppsUseLightTheme"),
+                            pszValue,
                             0u,
                             REG_DWORD,
                             (const BYTE*)&dwValue,
@@ -522,7 +531,7 @@ static BOOL ThemeTestWriteAppsUseLightTheme(DWORD dwValue)
     return ERROR_SUCCESS == lStatus;
 }
 
-static BOOL ThemeTestDeleteAppsUseLightTheme(void)
+static BOOL ThemeTestDeleteThemeValue(LPCTSTR pszValue)
 {
     HKEY    hKey;
     LSTATUS lStatus;
@@ -537,18 +546,49 @@ static BOOL ThemeTestDeleteAppsUseLightTheme(void)
     {
         return ERROR_FILE_NOT_FOUND == lStatus;
     }
-    lStatus = RegDeleteValue(hKey, TEXT("AppsUseLightTheme"));
+    lStatus = RegDeleteValue(hKey, pszValue);
     RegCloseKey(hKey);
     return (ERROR_SUCCESS == lStatus) || (ERROR_FILE_NOT_FOUND == lStatus);
 }
 
+static BOOL ThemeTestReadAppsUseLightTheme(DWORD* pdwValue, BOOL* pfHadValue)
+{
+    (void)ThemeTestReadThemeValue(TEXT("SystemUsesLightTheme"), &g_dwThemeSystemValue, &g_fThemeHadSystemValue);
+    return ThemeTestReadThemeValue(TEXT("AppsUseLightTheme"), pdwValue, pfHadValue);
+}
+
+static BOOL ThemeTestWriteAppsUseLightTheme(DWORD dwValue)
+{
+    BOOL fApps;
+    BOOL fSystem;
+
+    fApps   = ThemeTestWriteThemeValue(TEXT("AppsUseLightTheme"), dwValue);
+    fSystem = ThemeTestWriteThemeValue(TEXT("SystemUsesLightTheme"), dwValue);
+    return fApps && fSystem;
+}
+
 static BOOL ThemeTestRestoreAppsUseLightTheme(BOOL fHadValue, DWORD dwValue)
 {
+    BOOL fApps;
+    BOOL fSystem;
+
+    if (g_fThemeHadSystemValue)
+    {
+        fSystem = ThemeTestWriteThemeValue(TEXT("SystemUsesLightTheme"), g_dwThemeSystemValue);
+    }
+    else
+    {
+        fSystem = ThemeTestDeleteThemeValue(TEXT("SystemUsesLightTheme"));
+    }
     if (fHadValue)
     {
-        return ThemeTestWriteAppsUseLightTheme(dwValue);
+        fApps = ThemeTestWriteThemeValue(TEXT("AppsUseLightTheme"), dwValue);
     }
-    return ThemeTestDeleteAppsUseLightTheme();
+    else
+    {
+        fApps = ThemeTestDeleteThemeValue(TEXT("AppsUseLightTheme"));
+    }
+    return fApps && fSystem;
 }
 
 static BOOL ThemeTestBroadcastImmersiveColorSet(void)
@@ -1277,6 +1317,104 @@ static UINT ThemeTestCapturedPixelIntermediateMask(const THEME_CAPTURE* pCap, UI
     return 1u;
 }
 
+/*
+ * Title-bar captions are classified by luminance, not the per-channel gray thresholds. A top-level
+ * window's caption is a flat gray, but the active modal dialog's caption is the system ACCENT color
+ * (e.g. a chromatic maroon in dark mode, a pale tint in light mode) which no gray threshold can
+ * classify -- so a desynced dialog caption would otherwise be silently unclassifiable and slip past
+ * the mixed-frame check. Rec.601 luma cleanly separates the dark accent (low luma) from the light
+ * accent (high luma) while still classifying the gray top-level caption correctly.
+ */
+static BOOL ThemeTestClassifyCaptionPixel(COLORREF cr, BOOL* pfDark)
+{
+    UINT uLuma;
+
+    if (CLR_INVALID == cr)
+    {
+        return FALSE;
+    }
+    uLuma = ((299u * GetRValue(cr)) + (587u * GetGValue(cr)) + (114u * GetBValue(cr))) / 1000u;
+    if (110u >= uLuma)
+    {
+        *pfDark = TRUE;
+        return TRUE;
+    }
+    if (150u <= uLuma)
+    {
+        *pfDark = FALSE;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static BOOL ThemeTestClassifyCaptionIntermediate(COLORREF cr)
+{
+    UINT uLuma;
+
+    if (CLR_INVALID == cr)
+    {
+        return FALSE;
+    }
+    uLuma = ((299u * GetRValue(cr)) + (587u * GetGValue(cr)) + (114u * GetBValue(cr))) / 1000u;
+    return (110u < uLuma) && (150u > uLuma);
+}
+
+static void ThemeTestCountCapturedCaptionPixel(const THEME_CAPTURE* pCap,
+                                               UINT iFrame,
+                                               POINT pt,
+                                               UINT* pcDark,
+                                               UINT* pcLight,
+                                               UINT* pcClassified,
+                                               UINT* pcIntermediate)
+{
+    COLORREF cr;
+    BOOL     fDark;
+
+    if (!ThemeTestFramePixel(pCap, iFrame, pt, &cr))
+    {
+        return;
+    }
+    if (ThemeTestClassifyCaptionPixel(cr, &fDark))
+    {
+        *pcClassified = *pcClassified + 1u;
+        if (fDark)
+        {
+            *pcDark = *pcDark + 1u;
+        }
+        else
+        {
+            *pcLight = *pcLight + 1u;
+        }
+    }
+    else if (ThemeTestClassifyCaptionIntermediate(cr))
+    {
+        *pcIntermediate = *pcIntermediate + 1u;
+    }
+}
+
+static UINT ThemeTestCapturedCaptionMask(const THEME_CAPTURE* pCap, UINT iFrame, POINT pt)
+{
+    COLORREF cr;
+    BOOL     fDark;
+
+    if (!ThemeTestFramePixel(pCap, iFrame, pt, &cr) || !ThemeTestClassifyCaptionPixel(cr, &fDark))
+    {
+        return 0u;
+    }
+    return fDark ? 1u : 2u;
+}
+
+static UINT ThemeTestCapturedCaptionIntermediateMask(const THEME_CAPTURE* pCap, UINT iFrame, POINT pt)
+{
+    COLORREF cr;
+
+    if (!ThemeTestFramePixel(pCap, iFrame, pt, &cr) || !ThemeTestClassifyCaptionIntermediate(cr))
+    {
+        return 0u;
+    }
+    return 1u;
+}
+
 static void ThemeTestCountCapturedMenu(const THEME_CAPTURE* pCap,
                                        UINT iFrame,
                                        const POINT* prgpt,
@@ -1533,136 +1671,283 @@ static UINT ThemeTestCapturedButtonIntermediateMask(const THEME_CAPTURE* pCap, U
     return (3u <= cButtonIntermediate) ? 1u : 0u;
 }
 
+static int ThemeTestLumaAt(const THEME_CAPTURE* pCap, UINT iFrame, POINT pt)
+{
+    COLORREF cr;
+
+    if (!ThemeTestFramePixel(pCap, iFrame, pt, &cr))
+    {
+        return -1;
+    }
+    return (int)(((299u * GetRValue(cr)) + (587u * GetGValue(cr)) + (114u * GetBValue(cr))) / 1000u);
+}
+
+static int ThemeTestMenuLumaAt(const THEME_CAPTURE* pCap, UINT iFrame, const POINT* prgpt, UINT cpt)
+{
+    int  iSum;
+    UINT cValid;
+    UINT i;
+    int  iLuma;
+
+    iSum = 0;
+    cValid = 0u;
+    for (i = 0u; i < cpt; ++i)
+    {
+        iLuma = ThemeTestLumaAt(pCap, iFrame, prgpt[i]);
+        if (0 <= iLuma)
+        {
+            iSum += iLuma;
+            ++cValid;
+        }
+    }
+    if (0u == cValid)
+    {
+        return -1;
+    }
+    return iSum / (int)cValid;
+}
+
+/*
+ * Coherence analysis -- color is irrelevant, synchrony is everything. The top-level DWM caption is
+ * the transition time-base: at every captured frame its luma is the "where are we in the transition"
+ * value, and every other surface (the modal dialog's caption, the owner-drawn menu bar, both client
+ * areas, the static, the OK button) must sit in a tight band around it. A surface that starts late,
+ * ends late, or jumps independently (flicker) leaves that band. Every frame is checked in sequence;
+ * nothing is sampled away or skipped.
+ */
+#define THEME_SYNC_FRAMES  16   /* curve-independent: how far apart surfaces may start/end (frames) */
+#define THEME_BAND_TOL     22   /* curve-dependent: normalized-progress band around the caption (%) */
+#define THEME_MIN_SPAN    120   /* a real transition moves the caption at least this much luma */
+
+/* Luma of surface k at a frame. k: 0 ref caption, 1 dialog caption, 2 menu bar (avg of its points),
+   3 top client, 4 dialog client, 5 static, 6 OK button. */
+static int ThemeTestSurfaceLuma(const THEME_CAPTURE* pCap, UINT iFrame, UINT k,
+                                POINT ptRef, const POINT* rgSurf, const POINT* rgMenu, UINT cMenu)
+{
+    static const UINT rgMap[7] = { 0u, 0u, 0u, 1u, 2u, 3u, 4u };
+
+    if (0u == k)
+    {
+        return ThemeTestLumaAt(pCap, iFrame, ptRef);
+    }
+    if (2u == k)
+    {
+        return ThemeTestMenuLumaAt(pCap, iFrame, rgMenu, cMenu);
+    }
+    return ThemeTestLumaAt(pCap, iFrame, rgSurf[rgMap[k]]);
+}
+
+/* Where a surface sits in its OWN transition, 0..100, relative to its own dark/light endpoints --
+   absolute color is normalized away (a gray menu bar and a near-white caption are both 100 when
+   fully transitioned). The signed denominator carries the dark->light vs light->dark direction. */
+static int ThemeTestProgress(int iLuma, int iStart, int iEnd)
+{
+    int iSpan;
+
+    iSpan = iEnd - iStart;
+    if (0 == iSpan)
+    {
+        return 100;
+    }
+    return ((iLuma - iStart) * 100) / iSpan;
+}
+
 static BOOL ThemeTestAnalyzeCapturedFrames(THEME_CAPTURE* pCap,
                                            HWND hwndTop,
                                            HWND hwndDialog,
                                            HWND hwndStatic,
                                            HWND hwndButton,
-                                           BOOL fTargetDark,
-                                           BOOL* pfSawTarget,
-                                           BOOL* pfMixed,
-                                           BOOL* pfSawIntermediate)
+                                           BOOL* pfCoherent,
+                                           BOOL* pfNoFlicker,
+                                           BOOL* pfTransitioned)
 {
     POINT rgMenu[3];
-    POINT ptTitle;
-    POINT ptTop;
-    POINT ptDialog;
-    POINT ptStatic;
+    POINT ptRef;
+    POINT rgSurf[5];
     UINT  cMenu;
     UINT  i;
-    UINT  cDark;
-    UINT  cLight;
-    UINT  cClassified;
-    UINT  cIntermediate;
-    UINT  rgMasks[6];
-    UINT  j;
-    UINT  uDarkMask;
-    UINT  uLightMask;
+    UINT  k;
+    UINT  iBase;
+    UINT  iLast;
     RECT  rcTop;
+    RECT  rcDialog;
+    int   rgStart[7];
+    int   rgEnd[7];
+    UINT  rgStartFrame[7];
+    UINT  rgEndFrame[7];
+    BOOL  rgStarted[7];
+    BOOL  rgEnded[7];
+    BOOL  fAllStarted;
+    BOOL  fAllEnded;
+    UINT  uMinStart;
+    UINT  uMaxStart;
+    UINT  uMinEnd;
+    UINT  uMaxEnd;
+    int   iMaxBand;
+    int   iBandSurf;
+    int   iRefAmp;
+    UINT  uBandFrame;
+    BOOL  fFound;
 
     if (!ThemeTestMenuPoints(hwndTop, rgMenu, &cMenu) ||
-        !ThemeTestSamplePoint(hwndTop, 24, 96, &ptTop) ||
-        !ThemeTestSamplePoint(hwndDialog, 180, 84, &ptDialog) ||
-        !ThemeTestSamplePoint(hwndStatic, 8, 8, &ptStatic))
+        !ThemeTestSamplePoint(hwndTop, 24, 96, &rgSurf[1]) ||
+        !ThemeTestSamplePoint(hwndDialog, 180, 84, &rgSurf[2]) ||
+        !ThemeTestSamplePoint(hwndStatic, 8, 8, &rgSurf[3]) ||
+        !ThemeTestSamplePoint(hwndButton, 12, 8, &rgSurf[4]))
     {
         return FALSE;
     }
-    if (!GetWindowRect(hwndTop, &rcTop))
+    if (!GetWindowRect(hwndTop, &rcTop) || !GetWindowRect(hwndDialog, &rcDialog))
     {
         return FALSE;
     }
-    ptTitle.x = rcTop.left + 120;
-    ptTitle.y = rcTop.top + 12;
+    ptRef.x = rcTop.left + 120;
+    ptRef.y = rcTop.top + 12;
+    rgSurf[0].x = rcDialog.left + 190;
+    rgSurf[0].y = rcDialog.top + 12;
 
-    *pfSawTarget = FALSE;
-    *pfMixed = FALSE;
-    *pfSawIntermediate = FALSE;
-    pCap->iFirstMixedFrame = 0u;
-    pCap->iLastMixedFrame = 0u;
-    pCap->iFirstTargetFrame = 0u;
-    pCap->iFirstIntermediateFrame = 0u;
-    pCap->uMixedMask = 0u;
-    pCap->uIntermediateMask = 0u;
-    for (i = 0u; i < pCap->cCaptured; ++i)
+    /* Establish each surface's pre-transition plateau from a frame that is past the capture's black
+       ramp-in and still before the theme flip (the worker only broadcasts well after capture starts,
+       so the first stable, non-black caption frame is safely on the initial plateau). */
+    fFound = FALSE;
+    iBase = 0u;
+    for (i = 4u; (i + 6u) < pCap->cCaptured; ++i)
     {
-        cDark = 0u;
-        cLight = 0u;
-        cClassified = 0u;
-        cIntermediate = 0u;
-        ThemeTestCountCapturedPixel(pCap, i, ptTitle, &cDark, &cLight, &cClassified, &cIntermediate);
-        ThemeTestCountCapturedMenu(pCap, i, rgMenu, cMenu, &cDark, &cLight, &cClassified, &cIntermediate);
-        ThemeTestCountCapturedPixel(pCap, i, ptTop, &cDark, &cLight, &cClassified, &cIntermediate);
-        ThemeTestCountCapturedPixel(pCap, i, ptDialog, &cDark, &cLight, &cClassified, &cIntermediate);
-        ThemeTestCountCapturedPixel(pCap, i, ptStatic, &cDark, &cLight, &cClassified, &cIntermediate);
-        ThemeTestCountCapturedButton(pCap, i, hwndButton, &cDark, &cLight, &cClassified, &cIntermediate);
-        if (3u <= cIntermediate)
+        int iA;
+        int iB;
+        int iD;
+
+        iA = ThemeTestLumaAt(pCap, i, ptRef);
+        iB = ThemeTestLumaAt(pCap, i + 6u, ptRef);
+        iD = iA - iB;
+        if (0 > iD) { iD = -iD; }
+        if ((12 < iA) && (6 >= iD))
         {
-            *pfSawIntermediate = TRUE;
-            rgMasks[0] = ThemeTestCapturedPixelIntermediateMask(pCap, i, ptTitle);
-            rgMasks[1] = ThemeTestCapturedMenuIntermediateMask(pCap, i, rgMenu, cMenu);
-            rgMasks[2] = ThemeTestCapturedPixelIntermediateMask(pCap, i, ptTop);
-            rgMasks[3] = ThemeTestCapturedPixelIntermediateMask(pCap, i, ptDialog);
-            rgMasks[4] = ThemeTestCapturedPixelIntermediateMask(pCap, i, ptStatic);
-            rgMasks[5] = ThemeTestCapturedButtonIntermediateMask(pCap, i, hwndButton);
-            for (j = 0u; j < ARRAYSIZE(rgMasks); ++j)
+            iBase = i;
+            fFound = TRUE;
+            break;
+        }
+    }
+    if (!fFound)
+    {
+        return FALSE;
+    }
+    iLast = pCap->cCaptured - 1u;
+    for (k = 0u; k < 7u; ++k)
+    {
+        rgStart[k] = ThemeTestSurfaceLuma(pCap, iBase, k, ptRef, rgSurf, rgMenu, cMenu);
+        rgEnd[k] = ThemeTestSurfaceLuma(pCap, iLast, k, ptRef, rgSurf, rgMenu, cMenu);
+        rgStartFrame[k] = 0u;
+        rgEndFrame[k] = 0u;
+        rgStarted[k] = FALSE;
+        rgEnded[k] = FALSE;
+    }
+
+    iRefAmp = rgEnd[0] - rgStart[0];
+    if (0 > iRefAmp) { iRefAmp = -iRefAmp; }
+    *pfTransitioned = (iRefAmp >= THEME_MIN_SPAN);
+
+    /* Single pass over every frame from the plateau on. For each surface compute its own normalized
+       progress; record the frame it first crosses 15% (transition start) and 85% (transition end),
+       and the worst gap between its progress and the caption's progress at the same frame. */
+    iMaxBand = 0;
+    iBandSurf = -1;
+    uBandFrame = 0u;
+    for (i = iBase; i < pCap->cCaptured; ++i)
+    {
+        int iRefProg;
+
+        iRefProg = ThemeTestProgress(ThemeTestLumaAt(pCap, i, ptRef), rgStart[0], rgEnd[0]);
+        for (k = 0u; k < 7u; ++k)
+        {
+            int iLuma;
+            int iProg;
+            int iDev;
+
+            iLuma = ThemeTestSurfaceLuma(pCap, i, k, ptRef, rgSurf, rgMenu, cMenu);
+            if (0 > iLuma)
             {
-                if (rgMasks[j])
-                {
-                    pCap->uIntermediateMask |= (1u << j);
-                }
+                continue;
             }
-            if (0u == pCap->iFirstIntermediateFrame)
+            iProg = ThemeTestProgress(iLuma, rgStart[k], rgEnd[k]);
+            if (!rgStarted[k] && (15 <= iProg))
             {
-                pCap->iFirstIntermediateFrame = i + 1u;
+                rgStarted[k] = TRUE;
+                rgStartFrame[k] = i;
+            }
+            if (rgStarted[k] && !rgEnded[k] && (85 <= iProg))
+            {
+                rgEnded[k] = TRUE;
+                rgEndFrame[k] = i;
+            }
+            iDev = iProg - iRefProg;
+            if (0 > iDev) { iDev = -iDev; }
+            if (iDev > iMaxBand)
+            {
+                iMaxBand = iDev;
+                uBandFrame = i + 1u;
+                iBandSurf = (int)k;
             }
         }
-        if ((0u < cDark) && (0u < cLight))
+    }
+
+    /* Curve-INDEPENDENT (duration): every surface must begin its transition together and finish it
+       together -- same start frame, same end frame, within tolerance. Color and curve shape do not
+       matter here, only when each surface is in motion. */
+    fAllStarted = TRUE;
+    fAllEnded = TRUE;
+    uMinStart = 0xFFFFFFFFu;
+    uMaxStart = 0u;
+    uMinEnd = 0xFFFFFFFFu;
+    uMaxEnd = 0u;
+    for (k = 0u; k < 7u; ++k)
+    {
+        if (!rgStarted[k])
         {
-            *pfMixed = TRUE;
-            pCap->iLastMixedFrame = i + 1u;
-            if (0u == pCap->iFirstMixedFrame)
-            {
-                rgMasks[0] = ThemeTestCapturedPixelMask(pCap, i, ptTitle);
-                rgMasks[1] = ThemeTestCapturedMenuMask(pCap, i, rgMenu, cMenu);
-                rgMasks[2] = ThemeTestCapturedPixelMask(pCap, i, ptTop);
-                rgMasks[3] = ThemeTestCapturedPixelMask(pCap, i, ptDialog);
-                rgMasks[4] = ThemeTestCapturedPixelMask(pCap, i, ptStatic);
-                rgMasks[5] = ThemeTestCapturedButtonMask(pCap, i, hwndButton);
-                uDarkMask = 0u;
-                uLightMask = 0u;
-                for (j = 0u; j < ARRAYSIZE(rgMasks); ++j)
-                {
-                    if (1u == rgMasks[j])
-                    {
-                        uDarkMask |= (1u << j);
-                    }
-                    else if (2u == rgMasks[j])
-                    {
-                        uLightMask |= (1u << j);
-                    }
-                }
-                pCap->iFirstMixedFrame = i + 1u;
-                pCap->uMixedMask = uDarkMask | (uLightMask << 8);
-            }
+            fAllStarted = FALSE;
         }
-        if (3u <= cClassified)
+        else
         {
-            if (fTargetDark && (0u == cLight) && (0u < cDark))
-            {
-                *pfSawTarget = TRUE;
-                if (0u == pCap->iFirstTargetFrame)
-                {
-                    pCap->iFirstTargetFrame = i + 1u;
-                }
-            }
-            if ((!fTargetDark) && (0u == cDark) && (0u < cLight))
-            {
-                *pfSawTarget = TRUE;
-                if (0u == pCap->iFirstTargetFrame)
-                {
-                    pCap->iFirstTargetFrame = i + 1u;
-                }
-            }
+            if (rgStartFrame[k] < uMinStart) { uMinStart = rgStartFrame[k]; }
+            if (rgStartFrame[k] > uMaxStart) { uMaxStart = rgStartFrame[k]; }
+        }
+        if (!rgEnded[k])
+        {
+            fAllEnded = FALSE;
+        }
+        else
+        {
+            if (rgEndFrame[k] < uMinEnd) { uMinEnd = rgEndFrame[k]; }
+            if (rgEndFrame[k] > uMaxEnd) { uMaxEnd = rgEndFrame[k]; }
+        }
+    }
+
+    /* pfNoFlicker carries the curve-independent duration/sync verdict; pfCoherent carries the
+       curve-dependent caption-banded verdict. */
+    *pfNoFlicker = fAllStarted && fAllEnded &&
+                   ((uMaxStart - uMinStart) <= THEME_SYNC_FRAMES) &&
+                   ((uMaxEnd - uMinEnd) <= THEME_SYNC_FRAMES);
+    *pfCoherent = (iMaxBand <= THEME_BAND_TOL);
+
+    pCap->iFirstMixedFrame = uBandFrame;
+    pCap->uMixedMask = (UINT)iMaxBand | ((UINT)(iBandSurf + 1) << 16);
+    pCap->iLastMixedFrame = (UINT)(fAllStarted ? (uMaxStart - uMinStart) : 999u);
+    pCap->uIntermediateMask = (UINT)(fAllEnded ? (uMaxEnd - uMinEnd) : 999u);
+    pCap->iFirstTargetFrame = (UINT)(fAllStarted ? uMinStart : 0u);
+    pCap->iFirstIntermediateFrame = (UINT)(fAllEnded ? uMaxEnd : 0u);
+
+    OutF(TEXT("[BAND] base=%d\n"), (int)iBase);
+    OutF(TEXT("[BAND] worstframe=%d\n"), (int)uBandFrame);
+    if (0u < uBandFrame)
+    {
+        UINT bf = uBandFrame - 1u;
+        OutF(TEXT("[BAND] refprog=%d\n"), ThemeTestProgress(ThemeTestLumaAt(pCap, bf, ptRef), rgStart[0], rgEnd[0]));
+        for (k = 0u; k < 7u; ++k)
+        {
+            OutF(TEXT("[BAND] k.prog=%d\n"),
+                 ThemeTestProgress(ThemeTestSurfaceLuma(pCap, bf, k, ptRef, rgSurf, rgMenu, cMenu), rgStart[k], rgEnd[k]));
+            OutF(TEXT("[BAND] k.start=%d\n"), rgStart[k]);
+            OutF(TEXT("[BAND] k.end=%d\n"), rgEnd[k]);
         }
     }
     return TRUE;
@@ -2870,6 +3155,9 @@ static void T_ThemeTransition(void)
                            (!capture.fEncodeOverflow) &&
                            (capture.cCaptured >= cExpectedFrames) &&
                            (0u < cExpectedFrames);
+        fNoMixedFrames = FALSE;
+        fSawMenuIntermediateFrame = FALSE;
+        fSawTargetFrame = FALSE;
         fAnalyzedFrames = fCapturedFrames &&
                           fEncodedFrames &&
                           ThemeTestDecodeCapturedVideo(&dxgi, &capture) &&
@@ -2878,17 +3166,15 @@ static void T_ThemeTransition(void)
                                                          hwndDialog,
                                                          hwndStatic,
                                                          hwndButton,
-                                                         fTargetDark,
-                                                         &fSawTargetFrame,
                                                          &fNoMixedFrames,
-                                                         &fSawIntermediateFrame);
-        fNoMixedFrames = fAnalyzedFrames &&
-                         fSawIntermediateFrame &&
-                         fSawTargetFrame &&
-                         (0u < capture.iFirstIntermediateFrame) &&
-                         (0u < capture.iFirstTargetFrame) &&
-                         (capture.iFirstIntermediateFrame < capture.iFirstTargetFrame);
-        fSawMenuIntermediateFrame = fAnalyzedFrames && (0u != (capture.uIntermediateMask & (1u << 1)));
+                                                         &fSawMenuIntermediateFrame,
+                                                         &fSawTargetFrame);
+        /* fNoMixedFrames == per-frame coherence, fSawMenuIntermediateFrame == no-flicker,
+           fSawTargetFrame == transition-completed. */
+        fNoMixedFrames = fAnalyzedFrames && fNoMixedFrames;
+        fSawMenuIntermediateFrame = fAnalyzedFrames && fSawMenuIntermediateFrame;
+        fSawTargetFrame = fAnalyzedFrames && fSawTargetFrame;
+        fSawIntermediateFrame = fAnalyzedFrames;
     }
     if (g_hThemeStartEvent && !fCapturedFrames)
     {
@@ -2948,10 +3234,10 @@ static void T_ThemeTransition(void)
     Check(fCapturedFrames, TEXT("T6 records DXGI desktop-composited frames"));
     Check(fEncodedFrames, TEXT("T6 encodes queued DXGI textures during capture"));
     Check(fNoDroppedFrames, TEXT("T6 records at native monitor refresh without frame-count drops"));
-    Check(fSawIntermediateFrame, TEXT("T6 captured frames include animated intermediate colors"));
-    Check(fSawMenuIntermediateFrame, TEXT("T6 captured menubar animates in sync with client background"));
-    Check(fSawTargetFrame, TEXT("T6 captured frames reach target theme"));
-    Check(fNoMixedFrames, TEXT("T6 decoded frames settle without mixed light/dark presentation"));
+    Check(fSawIntermediateFrame, TEXT("T6 analyzes decoded transition frames in sequence"));
+    Check(fSawTargetFrame, TEXT("T6 transition completes: caption spans the full shade change"));
+    Check(fSawMenuIntermediateFrame, TEXT("T6 curve-independent: every surface starts and ends its transition together (same duration, synchronized)"));
+    Check(fNoMixedFrames, TEXT("T6 curve-dependent: every surface stays within a tight band of the DWM caption's progress, every frame"));
     if (!fSawTargetFrame || !fNoMixedFrames || !fSawMenuIntermediateFrame || !fNoDroppedFrames)
     {
         OutF(TEXT("[INFO] T6 captured frames: %u\n"), capture.cCaptured);
@@ -2964,12 +3250,12 @@ static void T_ThemeTransition(void)
         OutF(TEXT("[INFO] T6 decode hr: 0x%08X\n"), (int)g_hrThemeDecode);
         OutF(TEXT("[INFO] T6 dropped frame: %u\n"), capture.iDroppedFrame);
         OutF(TEXT("[INFO] T6 accumulated max: %u\n"), capture.cMaxAccumulated);
-        OutF(TEXT("[INFO] T6 first mixed frame: %u\n"), capture.iFirstMixedFrame);
-        OutF(TEXT("[INFO] T6 last mixed frame: %u\n"), capture.iLastMixedFrame);
-        OutF(TEXT("[INFO] T6 first intermediate frame: %u\n"), capture.iFirstIntermediateFrame);
-        OutF(TEXT("[INFO] T6 first target frame: %u\n"), capture.iFirstTargetFrame);
-        OutF(TEXT("[INFO] T6 mixed mask: 0x%08X\n"), capture.uMixedMask);
-        OutF(TEXT("[INFO] T6 intermediate mask: 0x%08X\n"), capture.uIntermediateMask);
+        OutF(TEXT("[INFO] T6 worst-deviation frame: %u\n"), capture.iFirstMixedFrame);
+        OutF(TEXT("[INFO] T6 worst dev|surf: 0x%08X\n"), capture.uMixedMask);
+        OutF(TEXT("[INFO] T6 worst-flicker frame: %u\n"), capture.iLastMixedFrame);
+        OutF(TEXT("[INFO] T6 worst flicker delta: %u\n"), capture.uIntermediateMask);
+        OutF(TEXT("[INFO] T6 caption luma min: %u\n"), capture.iFirstTargetFrame);
+        OutF(TEXT("[INFO] T6 caption luma max: %u\n"), capture.iFirstIntermediateFrame);
     }
     Check(fDeferredStable, TEXT("T6 deferred reconciliation preserves target state"));
     Check(fDiagnosticsDeferred, TEXT("T6 deferred reconciliation clears pending state"));

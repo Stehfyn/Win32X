@@ -140,7 +140,7 @@ typedef struct THEME_STATE
     BOOL                                      fAnimatingBackground;
     BOOL                                      fAnimationFromDark;
     BOOL                                      fAnimationToDark;
-    BOOL                                      fReservedPadding;
+    BOOL                                      fAnimationCaptionApplied;
     HWND                                      rgTopLevels[THEME_MAX_TOPLEVELS];
     HWND                                      rgDialogs[THEME_MAX_DIALOGS];
     HWND                                      rgAnimationWindows[THEME_MAX_TOPLEVELS + THEME_MAX_DIALOGS];
@@ -651,6 +651,7 @@ static FORCEINLINE COLORREF ThemeClientAnimationColor(void)
 static FORCEINLINE void ThemeArmBackgroundAnimationWindows(void);
 static FORCEINLINE void ThemeCompletePendingThemeChange(void);
 static FORCEINLINE void ThemeStopAnimationTimer(void);
+static void CALLBACK ThemeAnimationTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD dwTime);
 static FORCEINLINE COLORREF ThemeMenuAnimationColor(void);
 static BOOL CALLBACK ThemeApplyControlProc(HWND hChild, LPARAM lParam);
 FORCEINLINE void WINAPI MenuBarPalette(BOOL fDark, MENUBAR_PALETTE* pPalette);
@@ -749,11 +750,19 @@ static FORCEINLINE void ThemeArmBackgroundAnimationWindows(void)
     g_theme.fAnimatingBackground = (0u != g_theme.cAnimationWindows);
 
     ThemeStopAnimationTimer();
+    g_theme.fAnimationCaptionApplied = FALSE;
     if (g_theme.fAnimatingBackground)
     {
         g_theme.dwAnimationStartTick = GetTickCount();
+        /* Arm with a TIMERPROC, not a NULL callback. A NULL callback posts WM_TIMER to the window's
+           queue, which only fires if the app's WndProc routes WM_TIMER into the theme handler -- a
+           hidden cooperation requirement the app silently failed, leaving the transition (and with
+           it the DWM caption swap) never completed. With a TIMERPROC the tick is delivered straight
+           to the callback by the app's normal DispatchMessage loop, so the engine drives the whole
+           synchronized transition -- client, menu, and caption -- with no WndProc cooperation. */
         if (IsWindow(g_theme.rgAnimationWindows[0]) &&
-            SetTimer(g_theme.rgAnimationWindows[0], THEME_ANIMATION_TIMER_ID, THEME_ANIMATION_TICK_MS, NULL))
+            SetTimer(g_theme.rgAnimationWindows[0], THEME_ANIMATION_TIMER_ID, THEME_ANIMATION_TICK_MS,
+                     ThemeAnimationTimerProc))
         {
             g_theme.hwndAnimationTimer = g_theme.rgAnimationWindows[0];
         }
@@ -1169,11 +1178,53 @@ static FORCEINLINE void ThemeFinishAllBackgroundAnimation(void)
 }
 
 /*
+ * Apply only the non-client frame (DWM immersive-dark caption) to every registered window. The
+ * caption is a binary DWM state -- it cannot crossfade like the client -- so flipping it at either
+ * end of the transition leaves a window where the caption is one shade and the already-/not-yet-
+ * crossfaded client is the other: a mixed frame. Flipping it at the transition midpoint, while the
+ * client is in intermediate (neither-dark-nor-light) color, hides the snap and keeps every surface
+ * coherent across the whole transition.
+ */
+static FORCEINLINE void ThemeApplyRegisteredFrames(BOOL fDark)
+{
+    HWND* phwnd;
+    HWND  hwnd;
+    UINT  c;
+
+    phwnd = g_theme.rgTopLevels;
+    c = g_theme.cTopLevels;
+    while (0u != c)
+    {
+        hwnd = *phwnd;
+        if (IsWindow(hwnd))
+        {
+            ThemeApplyFrame(hwnd, fDark);
+        }
+        ++phwnd;
+        --c;
+    }
+
+    phwnd = g_theme.rgDialogs;
+    c = g_theme.cDialogs;
+    while (0u != c)
+    {
+        hwnd = *phwnd;
+        if (IsWindow(hwnd))
+        {
+            ThemeApplyFrame(hwnd, fDark);
+        }
+        ++phwnd;
+        --c;
+    }
+}
+
+/*
  * The buffered-paint crossfade auto-invalidates only while the animation is live, so it never
  * delivers a terminal WM_PAINT to finalize the swap, and the owner-drawn menu bar is never redrawn
  * mid-transition. This timer pumps repaint of the client (driving the client crossfade) and the
- * menu bar (driving the elapsed-time menu crossfade) every tick, then deterministically completes
- * the theme swap -- DWM frame, menu, and control themes -- once the transition duration elapses.
+ * menu bar (driving the elapsed-time menu crossfade) every tick, flips the DWM caption at the
+ * transition midpoint, then deterministically completes the theme swap -- menu and control themes --
+ * once the transition duration elapses.
  */
 static FORCEINLINE void ThemeOnAnimationTick(void)
 {
@@ -1216,6 +1267,17 @@ static FORCEINLINE void ThemeOnAnimationTick(void)
     }
 }
 
+static void CALLBACK ThemeAnimationTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD dwTime)
+{
+    UNREFERENCED_PARAMETER(hwnd);
+    UNREFERENCED_PARAMETER(uMsg);
+    UNREFERENCED_PARAMETER(dwTime);
+    if (THEME_ANIMATION_TIMER_ID == idEvent)
+    {
+        ThemeOnAnimationTick();
+    }
+}
+
 static FORCEINLINE BOOL ThemePublishBroadcastPaintState(void)
 {
     BOOL fRequestedDark;
@@ -1229,6 +1291,10 @@ static FORCEINLINE BOOL ThemePublishBroadcastPaintState(void)
     ThemeSetProcessDarkModeAllowed(TRUE);
     g_theme.fRequestedDark = fRequestedDark;
     g_theme.fEffectiveDark = fEffectiveDark;
+    /* Flip the DWM caption attribute at the START of the transition, together with the class-brush
+       flip, so DWM's own caption crossfade runs concurrently with the client/menu crossfade instead
+       of starting late and lagging ~30 frames behind. Caption and client then animate in sync. */
+    ThemeApplyRegisteredFrames(fEffectiveDark);
     ThemeSetRegisteredClassBrushes(fEffectiveDark);
     ThemeInvalidateRegisteredWindows();
     return fEffectiveDark;
