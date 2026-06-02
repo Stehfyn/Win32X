@@ -1098,6 +1098,55 @@ static BOOL CALLBACK ThemeInvalidateWindowProc(HWND hwnd, LPARAM lParam)
     return TRUE;
 }
 
+/* Cross-fade one child control's background DOUBLE-BUFFERED, per animation tick. Plain InvalidateRect
+   makes the control erase-then-draw on screen, so its text/icon shimmer against the changing background
+   every tick (the flicker). Instead, render the control fully into a memory bitmap -- PRF_ERASEBKGND
+   fills the background from the WM_CTLCOLOR brush (the crossfade color this tick), PRF_CLIENT draws the
+   text/icon over it -- then blit the finished image to the screen in ONE BitBlt. The on-screen pixels
+   change exactly once per tick, fully composited, so the background cross-fades smoothly and the
+   text/icon stay crisp with no shimmer. Safe with the parent's WS_CLIPCHILDREN: the parent fill never
+   touches these child rects, so nothing fights this blit. */
+static BOOL CALLBACK ThemeRepaintChildProc(HWND hChild, LPARAM lParam)
+{
+    RECT    rc;
+    HDC     hdc;
+    HDC     hdcMem;
+    HBITMAP hbm;
+    HGDIOBJ hbmOld;
+
+    UNREFERENCED_PARAMETER(lParam);
+    if (!GetClientRect(hChild, &rc) || (0 >= rc.right) || (0 >= rc.bottom))
+    {
+        return TRUE;
+    }
+    hdc = GetDC(hChild);
+    if (!hdc)
+    {
+        return TRUE;
+    }
+    hdcMem = CreateCompatibleDC(hdc);
+    hbm = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
+    if (hdcMem && hbm)
+    {
+        hbmOld = SelectObject(hdcMem, hbm);
+        /* The control renders its own background (from WM_CTLCOLOR* -> the crossfade brush) and content
+           into the off-screen DC; blit the composited result once. */
+        SendMessage(hChild, WM_PRINTCLIENT, (WPARAM)hdcMem, (LPARAM)(PRF_CLIENT | PRF_ERASEBKGND));
+        BitBlt(hdc, 0, 0, rc.right, rc.bottom, hdcMem, 0, 0, SRCCOPY);
+        SelectObject(hdcMem, hbmOld);
+    }
+    if (hbm)
+    {
+        DeleteObject(hbm);
+    }
+    if (hdcMem)
+    {
+        DeleteDC(hdcMem);
+    }
+    ReleaseDC(hChild, hdc);
+    return TRUE;
+}
+
 static FORCEINLINE void ThemeSetRegisteredClassBrushes(BOOL fDark)
 {
     HWND* phwnd;
@@ -1399,6 +1448,11 @@ static FORCEINLINE void ThemeOnAnimationTick(void)
                    not inlined into this timer path. wParam==1 means "whole window region". */
                 SendMessage(hwnd, WM_NCPAINT, (WPARAM)1, 0);
             }
+            /* Repaint child controls (a dialog's static text, the OK button) so they re-issue
+               WM_CTLCOLOR* and cross-fade their background+text in step with the parent client. Targeted
+               to the children only -- not the whole window tree -- and conflict-free because the parent
+               is WS_CLIPCHILDREN (its fill never touches these child rects). */
+            EnumChildWindows(hwnd, ThemeRepaintChildProc, 0);
         }
         ++phwnd;
         --c;
