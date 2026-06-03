@@ -12,6 +12,27 @@
 #include "WindowsProject.h"
 #include "Win32X/dwmframex2.h"   /* V2: ImmersiveWindow-style flip-swapchain caption compositor */
 
+/* The app's CLIENT render, invoked by dwmframex every frame with the ONE swapchain D2D context -- proves
+   the client lives on the SAME surface as the caption. Uses the lib's DwmFrameFillRect2 helper so the app
+   needs no D2D bindings of its own (D2D's C headers don't expose lpVtbl). */
+static void WINAPI AppClientDraw(HWND hwnd, void* pCtx)
+{
+    RECT wr;
+    int  w;
+    int  h;
+    int  capH;
+
+    GetWindowRect(hwnd, &wr);   /* single-source window rect, NOT GetClientRect (it lags on resize) */
+    w = wr.right - wr.left;
+    h = wr.bottom - wr.top;
+    capH = GetSystemMetrics(SM_CYCAPTION) + GetSystemMetrics(SM_CYFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
+
+    /* app client background (distinct blue-grey), filled into the swapchain surface below the caption */
+    DwmFrameFillRect2(pCtx, 0.0f, (float)capH, (float)w, (float)h, 0.09f, 0.16f, 0.28f, 1.0f);
+    /* an accent box, proving live app drawing on the SAME surface */
+    DwmFrameFillRect2(pCtx, 40.0f, (float)capH + 40.0f, 220.0f, (float)capH + 150.0f, 0.85f, 0.35f, 0.12f, 1.0f);
+}
+
 #define MAX_LOADSTRING 100
 #define WMAPP_THEMECHANGED (WM_APP + 1) /* private: deferred retheme, posted from WM_SETTINGCHANGE */
 
@@ -124,13 +145,16 @@ static FORCEINLINE ATOM MyRegisterClass(HINSTANCE hInstance)
 
     SecureZeroMemory(&wcx, sizeof(wcx));
     wcx.cbSize        = sizeof(wcx);
-    wcx.style         = CS_HREDRAW | CS_VREDRAW;
+    /* V2 = pure ImmersiveWindow: the swapchain owns EVERY pixel of the window (caption + client). So NO
+       GDI conflicts -- no CS_HREDRAW/VREDRAW (no resize erase/redraw storms), NO background brush (no
+       WM_ERASEBKGND GDI fill that would fight the swapchain), NO menu (a menu bar is a second, GDI surface). */
+    wcx.style         = CS_DBLCLKS;
     wcx.lpfnWndProc   = WndProc;
     wcx.hInstance     = hInstance;
     wcx.hIcon         = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_WINDOWSPROJECT));
     wcx.hCursor       = LoadCursor(NULL, IDC_ARROW);
-    wcx.hbrBackground = ThemeBackgroundBrush(g_fDark);
-    wcx.lpszMenuName  = MAKEINTRESOURCE(IDC_WINDOWSPROJECT);
+    wcx.hbrBackground = NULL;
+    wcx.lpszMenuName  = NULL;
     wcx.lpszClassName = g_szWindowClass;
     wcx.hIconSm       = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_SMALL));
 
@@ -176,6 +200,7 @@ static FORCEINLINE BOOL InitInstance(HINSTANCE hInstance)
            on the first WM_ACTIVATE during creation, inside DwmFrameHandleMessage2 (DWM's custom-frame
            contract). Invalidate once so a clean WM_PAINT renders the caption after the window is shown. */
         DwmFrameSetDark2(hwnd, g_fDark);
+        DwmFrameSetClientDraw2(hwnd, AppClientDraw);   /* app's client renders into the single swapchain surface */
         InvalidateRect(hwnd, NULL, TRUE);
     }
 
@@ -273,11 +298,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 
     switch (uMsg)
     {
-        /* Keep the DComp caption surface sized to the window and re-render it. */
-        case WM_SIZE:
-            pfnAppDwmFrameResize(hwnd);
-            pfnAppDwmFrameRender(hwnd, g_fDark);
-            break;
+        /* V2: WM_SIZE does NOT paint (ImmersiveWindow's OnSize only handles maximize). Painting during a
+           drag comes from the modal 0x69 timer + WM_WINDOWPOSCHANGED + WM_NCCALCSIZE inside the lib's
+           DwmFrameHandleMessage2; outside the modal loop the main render loop drives it. A WM_SIZE paint
+           here would be a conflicting render path. */
 
         /* Route the non-client frame messages (WM_NCACTIVATE/WM_NCPAINT) through the theme handler too:
            it lets DefWindowProc render the frame, then repaints the owner-drawn menu band -- the FULL

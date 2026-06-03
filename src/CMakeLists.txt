@@ -61,7 +61,7 @@ target_link_libraries(Win32X PRIVATE $<BUILD_INTERFACE:win32x_warnings>)
 # dwmframex.c reproduces uDWM's caption compositor with the same stack -> the import libs for
 # D3D11 / Direct2D / DirectComposition / DWrite / DXGI, plus dxguid for the IID_* GUIDs. PUBLIC so the
 # consuming exe (static-lib link) pulls them in too.
-target_link_libraries(Win32X PUBLIC d3d11 d2d1 dcomp dwrite dxgi dxguid winmm)
+target_link_libraries(Win32X PUBLIC d3d11 d2d1 dcomp dwrite dxgi dxguid winmm gdi32)
 win32x_enable_analysis(Win32X)
 
 # ---------------------------------------------------------------------------
