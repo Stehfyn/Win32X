@@ -7,6 +7,7 @@ add_library(Win32X STATIC
   WinUserX.c
   ShellScalingApiX.c
   uxthemex.c
+  dwmframex.c
   llmath_x86.c
   versionhelpersx.c
   delayhlpx.c
@@ -48,6 +49,11 @@ set_target_properties(Win32X PROPERTIES
 # BUILD_INTERFACE: the warnings policy is a build-only compile dependency; a
 # static lib otherwise promotes PRIVATE links into its export set.
 target_link_libraries(Win32X PRIVATE $<BUILD_INTERFACE:win32x_warnings>)
+
+# dwmframex.c reproduces uDWM's caption compositor with the same stack -> the import libs for
+# D3D11 / Direct2D / DirectComposition / DWrite / DXGI, plus dxguid for the IID_* GUIDs. PUBLIC so the
+# consuming exe (static-lib link) pulls them in too.
+target_link_libraries(Win32X PUBLIC d3d11 d2d1 dcomp dwrite dxgi dxguid)
 win32x_enable_analysis(Win32X)
 
 # ---------------------------------------------------------------------------

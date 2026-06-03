@@ -32,6 +32,14 @@ static void (WINAPI* volatile pfnAppThemeUnregisterWindow)(HWND hwnd) = ThemeUnr
 static void (WINAPI* volatile pfnAppThemeUnregisterDialog)(HWND hwnd) = ThemeUnregisterDialog;
 static BOOL (WINAPI* volatile pfnAppThemeHandleWindowMessage)(
     HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT uDeferredMsg, LRESULT* plr) = ThemeHandleWindowMessage;
+static void (WINAPI* volatile pfnAppThemeEnableCustomFrame)(HWND hwnd, BOOL fEnable) = ThemeEnableCustomFrame;
+static BOOL (WINAPI* volatile pfnAppThemeCustomFrameHandleMessage)(
+    HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, LRESULT* plr) = ThemeCustomFrameHandleMessage;
+static BOOL (WINAPI* volatile pfnAppDwmFrameInit)(HWND hwnd) = DwmFrameInit;
+static void (WINAPI* volatile pfnAppDwmFrameRender)(HWND hwnd, BOOL fDark) = DwmFrameRender;
+static void (WINAPI* volatile pfnAppDwmFrameResize)(HWND hwnd) = DwmFrameResize;
+static BOOL (WINAPI* volatile pfnAppDwmFrameHandleMessage)(
+    HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, void (WINAPI* pfnToggle)(HWND), LRESULT* plr) = DwmFrameHandleMessage;
 static void (WINAPI* volatile pfnAppMenuBarPalette)(BOOL fDark, MENUBAR_PALETTE* pPalette) = MenuBarPalette;
 static void (WINAPI* volatile pfnAppMenuBarOnDrawMenu)(
     HWND hwnd, const UAHMENU* pUDM, const MENUBAR_PALETTE* pPalette) = MenuBarOnDrawMenu;
@@ -110,7 +118,7 @@ static FORCEINLINE BOOL InitInstance(HINSTANCE hInstance)
 
     g_hInst = hInstance;
 
-    hwnd = CreateWindowEx(0,
+    hwnd = CreateWindowEx(WS_EX_NOREDIRECTIONBITMAP,   /* DComp paints the whole window; no GDI redirection surface to occlude it */
                           g_szWindowClass,
                           g_szTitle,
                           WS_OVERLAPPEDWINDOW,
@@ -129,6 +137,24 @@ static FORCEINLINE BOOL InitInstance(HINSTANCE hInstance)
 
     /* Register and theme the top-level window before the first show, so first paint is coherent. */
     ThemeApplyTopLevel(hwnd, g_fDark);
+
+    /* Stand up the in-process DirectComposition caption compositor -- the same D3D11/D2D/DComp/DWrite
+       stack uDWM uses, on a DCompositionTarget we own for this hwnd. Then force the WM_NCCALCSIZE that
+       removes the standard non-client area (handled in DwmFrameHandleMessage) so our caption owns it,
+       and render. */
+    if (pfnAppDwmFrameInit(hwnd))
+    {
+        /* Publish the frame change ONCE at creation: SWP_FRAMECHANGED forces the WM_NCCALCSIZE that removes
+           the standard NC (so our DComp caption owns the whole window) and settles the DWM extended frame
+           set up in DwmFrameInit. Seed the caption shade first, then invalidate the whole window a single
+           time -- the WM_PAINT it raises (after ShowWindow) renders the caption at the right moment, in the
+           right theme. Rendering here, before the frame change is published and before the window is shown,
+           is the mistimed paint that left the caption stale until a resize. */
+        DwmFrameSetDark(hwnd, g_fDark);
+        SetWindowPos(hwnd, NULL, 0, 0, 0, 0,
+                     SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        InvalidateRect(hwnd, NULL, TRUE);
+    }
 
     /* Win32X's DPI-aware first show: size to three-quarters of the launch monitor's work area and
        position per STARTUPINFO -- the successor's upgrade over the template's ShowWindow(nCmdShow). */
@@ -191,12 +217,38 @@ static FORCEINLINE void OnDestroy(HWND hwnd)
     PostQuitMessage(0);
 }
 
+/* Light/dark caption-button click handler. ThemeToggleDarkMode flips the app theme state and invalidates
+   the registered windows, but it does NOT touch g_fDark or re-render the DComp caption -- so without this
+   the caption keeps the old shade until the next event that calls DwmFrameRender (a resize). Refresh the
+   truth (g_fDark) from the now-effective theme and recolor the DComp caption immediately. */
+static void WINAPI AppToggleDark(HWND hwnd)
+{
+    ThemeToggleDarkMode(hwnd);
+    g_fDark = pfnAppThemeIsDarkMode();
+    pfnAppDwmFrameRender(hwnd, g_fDark);
+}
+
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
     LRESULT              lr;
 
+    /* DComp caption frame first: WM_NCCALCSIZE removes the standard NC so our DirectComposition caption
+       (uDWM-stack reproduction) owns it, WM_NCHITTEST follows FindNCHit's order, and the caption buttons
+       (incl. the light/dark toggle, which calls ThemeToggleDarkMode) take their input here. Returns TRUE
+       only for the frame messages it owns; everything else falls through to DefWindowProc below. */
+    if (pfnAppDwmFrameHandleMessage(hwnd, uMsg, wParam, lParam, AppToggleDark, &lr))
+    {
+        return lr;
+    }
+
     switch (uMsg)
     {
+        /* Keep the DComp caption surface sized to the window and re-render it. */
+        case WM_SIZE:
+            pfnAppDwmFrameResize(hwnd);
+            pfnAppDwmFrameRender(hwnd, g_fDark);
+            break;
+
         /* Route the non-client frame messages (WM_NCACTIVATE/WM_NCPAINT) through the theme handler too:
            it lets DefWindowProc render the frame, then repaints the owner-drawn menu band -- the FULL
            bar cross-faded off the shared snapshot clock while a transition is live, the 1px seam
@@ -214,6 +266,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             if (pfnAppThemeHandleWindowMessage(hwnd, uMsg, wParam, lParam, WMAPP_THEMECHANGED, &lr))
             {
                 g_fDark = pfnAppThemeIsDarkMode();
+                pfnAppDwmFrameRender(hwnd, g_fDark);   /* recolor the DComp caption for the new theme */
                 return lr;
             }
             break;

@@ -21,3 +21,4 @@
 
 #include "Win32X/win32x.h"              // the library this sample exercises
 #include "Win32X/uxthemex.h"            // dark-mode / theming helpers (pulls in windowsx2.h crackers)
+#include "Win32X/dwmframex.h"           // in-process DComp caption compositor (uDWM-stack reproduction)

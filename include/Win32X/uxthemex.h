@@ -56,6 +56,15 @@ typedef struct MENUBAR_PALETTE
     COLORREF clrItemPushed;
 } MENUBAR_PALETTE;
 
+/* Custom non-client frame (DWM custom-frame technique, learn.microsoft.com/windows/win32/dwm/customframe).
+   A window opted in with ThemeEnableCustomFrame removes the standard NC frame (WM_NCCALCSIZE), extends the
+   DWM frame for the shadow + resize borders, and owner-draws the caption, the four caption buttons, and --
+   because the NC menu band and its UAH draw messages die with the standard frame -- the menu bar in the
+   client. HTLIGHTDARK is the private WM_NCHITTEST result for the fourth (light/dark) caption button, which
+   sits directly left of Minimize, sized and sequenced exactly like the other three. */
+#define HTLIGHTDARK   0x0000B001
+#define HTMENUITEM0   0x0000C000   /* WM_NCHITTEST result for in-client menu top-level item i = HTMENUITEM0 + i */
+
 typedef enum THEME_OS_POLICY
 {
     ThemePolicyClassic = 0,
@@ -111,6 +120,9 @@ void   WINAPI MenuBarPalette(BOOL fDark, MENUBAR_PALETTE* pPalette);
 void   WINAPI MenuBarOnDrawMenu(HWND hwnd, const UAHMENU* pUDM, const MENUBAR_PALETTE* pPalette);
 void   WINAPI MenuBarOnDrawMenuItem(HWND hwnd, const UAHDRAWMENUITEM* pUDMI, const MENUBAR_PALETTE* pPalette);
 void   WINAPI MenuBarPaintSeam(HWND hwnd, const MENUBAR_PALETTE* pPalette);
+void   WINAPI ThemeEnableCustomFrame(HWND hwnd, BOOL fEnable);
+BOOL   WINAPI ThemeCustomFrameHandleMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, LRESULT* plr);
+void   WINAPI ThemeToggleDarkMode(HWND hwnd);
 
 #ifdef __cplusplus
 }

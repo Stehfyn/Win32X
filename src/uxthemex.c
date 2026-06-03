@@ -94,6 +94,69 @@ typedef HRESULT(WINAPI* PFN_DRAWTHEMETEXTEX)(
 #define DTT_TEXTCOLOR 0x00000001
 #define DTT_GLOWSIZE  0x00000800
 
+/* ---- custom non-client frame (DWM custom-frame technique) ------------------------------------ */
+typedef struct THEME_MARGINS  /* layout-identical to uxtheme/dwmapi MARGINS (not included here) */
+{
+    int cxLeftWidth;
+    int cxRightWidth;
+    int cyTopHeight;
+    int cyBottomHeight;
+} THEME_MARGINS;
+typedef HRESULT(WINAPI* PFN_DWMEXTENDFRAMEINTOCLIENTAREA)(HWND, const THEME_MARGINS*);
+typedef BOOL(WINAPI* PFN_DWMDEFWINDOWPROC)(HWND, UINT, WPARAM, LPARAM, LRESULT*);
+typedef HRESULT(WINAPI* PFN_DRAWTHEMEBACKGROUND)(HTHEME, HDC, int, int, const RECT*, const RECT*);
+typedef HRESULT(WINAPI* PFN_GETTHEMEPARTSIZE)(HTHEME, HDC, int, int, const RECT*, int, SIZE*);
+typedef UINT(WINAPI* PFN_GETDPIFORWINDOW)(HWND);
+typedef int(WINAPI* PFN_GETSYSTEMMETRICSFORDPI)(int, UINT);
+
+/* uxtheme "WINDOW" class parts/states used to render the caption buttons the way DefWindowProc's themed
+   legacy caption path does (evidence: uxtheme.disasm.txt; the renderer DWM falls back to). */
+#define WP_CAPTION        1
+#define WP_MINBUTTON      15
+#define WP_MAXBUTTON      17
+#define WP_CLOSEBUTTON    18
+#define WP_RESTOREBUTTON  21
+#define CBTNS_NORMAL      1   /* shared caption-button state ladder: NORMAL/HOT/PUSHED/DISABLED/INACTIVE */
+#define CBTNS_HOT         2
+#define CBTNS_PUSHED      3
+#define CBTNS_DISABLED    4
+#define CBTNS_INACTIVE    5
+#define TS_TRUE           1   /* THEMESIZE */
+#ifndef TME_NONCLIENT
+#define TME_NONCLIENT     0x00000010
+#endif
+
+/* The four caption buttons, left-to-right in the right cluster. The light/dark toggle is the new leftmost
+   one, directly adjacent to Minimize, computed from the same cell so it is the others' exact size. */
+enum FRAME_BUTTON
+{
+    FB_NONE = 0,
+    FB_LIGHTDARK,
+    FB_MIN,
+    FB_MAX,
+    FB_CLOSE,
+    FB_COUNT
+};
+
+/* Per-window custom-frame interaction state (kept off the window's USERDATA, in g_theme, like the other
+   per-window lists). idHot/idPressed are FRAME_BUTTON values; iHotMenu is a 0-based top-level menu index
+   or -1. */
+typedef struct FRAME_STATE
+{
+    HWND  hwnd;
+    HMENU hMenu;     /* detached from the window (SetMenu NULL); we own its draw + popup tracking */
+    int   idHot;
+    int   idPressed;
+    int   iHotMenu;
+    int   iMenuActive; /* keyboard menu mode: hot top-level index, or -1 (not in menu mode)         */
+    BOOL  fTracking;
+    BOOL  fCapturing;  /* a caption button is pressed; we hold the mouse capture                    */
+    BOOL  fShowAccel;  /* draw menu mnemonic underlines (Alt/F10 cue is up)                         */
+    BOOL  fReserved;   /* keep FRAME_STATE 8-byte aligned (no C4820 pad)                            */
+} FRAME_STATE;
+
+#define THEME_MAX_MENU_TOPITEMS 16
+
 #define THEME_ANIMATION_TIMER_ID ((UINT_PTR)0x57A2)
 #define THEME_ANIMATION_TICK_MS  5u
 
@@ -130,12 +193,19 @@ typedef struct THEME_STATE
     PFN_GETIMMERSIVECOLORTYPEFROMNAME      pfnGetImmersiveColorTypeFromName;
     PFN_GETIMMERSIVECOLORFROMCOLORSETEX    pfnGetImmersiveColorFromColorSetEx;
     PFN_DRAWTHEMETEXTEX                  pfnDrawThemeTextEx;
+    PFN_DWMEXTENDFRAMEINTOCLIENTAREA     pfnDwmExtendFrameIntoClientArea;
+    PFN_DWMDEFWINDOWPROC                 pfnDwmDefWindowProc;
+    PFN_DRAWTHEMEBACKGROUND             pfnDrawThemeBackground;
+    PFN_GETTHEMEPARTSIZE                pfnGetThemePartSize;
+    PFN_GETDPIFORWINDOW                 pfnGetDpiForWindow;
+    PFN_GETSYSTEMMETRICSFORDPI          pfnGetSystemMetricsForDpi;
     PFN_TIMEPERIOD                            pfnTimeBeginPeriod;
     PFN_TIMEPERIOD                            pfnTimeEndPeriod;
     HMODULE                                   hUxtheme;
     HMODULE                                   hDwmapi;
     HMODULE                                   hAdvapi32;
     HMODULE                                   hWinmm;
+    HMODULE                                   hUser32;
     HBRUSH                                    hbrDarkBg;
     HBRUSH                                    hbrAnimation;   /* solid brush for the current crossfade color */
     COLORREF                                  crDarkBg;
@@ -173,6 +243,11 @@ typedef struct THEME_STATE
     COLORREF                                  crAnimation;       /* color hbrAnimation was created for (was reserved) */
     DWORD                                     dwCaptionProgress; /* 0..1000: live caption progress this tick        */
     DWORD                                     dwReserved2;       /* keep THEME_STATE 8-byte aligned (no C4820 pad)  */
+    FRAME_STATE                               rgFrames[THEME_MAX_TOPLEVELS]; /* custom-frame interaction state    */
+    UINT                                      cFrames;
+    BOOL                                      fManualOverrideActive; /* light/dark button drove the mode, not regs */
+    BOOL                                      fManualDark;
+    DWORD                                     dwReserved3;       /* keep THEME_STATE 8-byte aligned (no C4820 pad) */
 } THEME_STATE;
 
 typedef union THEME_PROC
@@ -204,6 +279,12 @@ typedef union THEME_PROC
     PFN_GETIMMERSIVECOLORTYPEFROMNAME pfnGetImmersiveColorTypeFromName;
     PFN_GETIMMERSIVECOLORFROMCOLORSETEX pfnGetImmersiveColorFromColorSetEx;
     PFN_DRAWTHEMETEXTEX pfnDrawThemeTextEx;
+    PFN_DWMEXTENDFRAMEINTOCLIENTAREA pfnDwmExtendFrameIntoClientArea;
+    PFN_DWMDEFWINDOWPROC pfnDwmDefWindowProc;
+    PFN_DRAWTHEMEBACKGROUND pfnDrawThemeBackground;
+    PFN_GETTHEMEPARTSIZE pfnGetThemePartSize;
+    PFN_GETDPIFORWINDOW pfnGetDpiForWindow;
+    PFN_GETSYSTEMMETRICSFORDPI pfnGetSystemMetricsForDpi;
 } THEME_PROC;
 
 
@@ -336,6 +417,10 @@ static FORCEINLINE void ThemeResolve(void)
         g_theme.pfnGetImmersiveColorFromColorSetEx = u.pfnGetImmersiveColorFromColorSetEx;
         u.fp = GetProcAddress(g_theme.hUxtheme, "DrawThemeTextEx");
         g_theme.pfnDrawThemeTextEx = u.pfnDrawThemeTextEx;
+        u.fp = GetProcAddress(g_theme.hUxtheme, "DrawThemeBackground");
+        g_theme.pfnDrawThemeBackground = u.pfnDrawThemeBackground;
+        u.fp = GetProcAddress(g_theme.hUxtheme, "GetThemePartSize");
+        g_theme.pfnGetThemePartSize = u.pfnGetThemePartSize;
     }
 
     if (IsNonNull(g_theme.hDwmapi))
@@ -344,6 +429,21 @@ static FORCEINLINE void ThemeResolve(void)
         g_theme.pfnDwmSetWindowAttribute = u.pfnDwmSetWindowAttribute;
         u.fp = GetProcAddress(g_theme.hDwmapi, "DwmFlush");
         g_theme.pfnDwmFlush = u.pfnDwmFlush;
+        u.fp = GetProcAddress(g_theme.hDwmapi, "DwmExtendFrameIntoClientArea");
+        g_theme.pfnDwmExtendFrameIntoClientArea = u.pfnDwmExtendFrameIntoClientArea;
+        u.fp = GetProcAddress(g_theme.hDwmapi, "DwmDefWindowProc");
+        g_theme.pfnDwmDefWindowProc = u.pfnDwmDefWindowProc;
+    }
+
+    /* GetDpiForWindow / GetSystemMetricsForDpi are Win10 1607+; resolve dynamically (user32 is already
+       loaded -- the app links it) so the library still loads on older systems. */
+    g_theme.hUser32 = GetModuleHandle(TEXT("user32.dll"));
+    if (IsNonNull(g_theme.hUser32))
+    {
+        u.fp = GetProcAddress(g_theme.hUser32, "GetDpiForWindow");
+        g_theme.pfnGetDpiForWindow = u.pfnGetDpiForWindow;
+        u.fp = GetProcAddress(g_theme.hUser32, "GetSystemMetricsForDpi");
+        g_theme.pfnGetSystemMetricsForDpi = u.pfnGetSystemMetricsForDpi;
     }
 
     if (IsEqual(ThemePolicyWin10_1809, g_theme.policy))
@@ -466,6 +566,12 @@ FORCEINLINE BOOL WINAPI ThemeAppsUseDarkMode(void)
     BOOL fDark;
 
     ThemeResolve();
+    /* Once the light/dark caption button is used, the manual choice wins over the system registry setting
+       (the app's own preference); the same transition machinery then runs against this value. */
+    if (g_theme.fManualOverrideActive)
+    {
+        return g_theme.fManualDark;
+    }
     if (g_theme.pfnShouldAppsUseDarkMode)
     {
         return g_theme.pfnShouldAppsUseDarkMode();
@@ -1482,7 +1588,7 @@ static FORCEINLINE void ThemeApplyRegisteredFrames(BOOL fDark)
  * transition midpoint, then deterministically completes the theme swap -- menu and control themes --
  * once the transition duration elapses.
  */
-static FORCEINLINE void ThemeOnAnimationTick(void)
+static DECLSPEC_NOINLINE void ThemeOnAnimationTick(void)
 {
     HWND* phwnd;
     HWND  hwnd;
@@ -2708,6 +2814,1534 @@ FORCEINLINE void WINAPI MenuBarPaintSeam(HWND hwnd, const MENUBAR_PALETTE* pPale
         MenuBarPaintSeamToHdc(hwnd, hdc, pPalette);
     }
     ReleaseDC(hwnd, hdc);
+}
+
+/* ============================================================================================== *
+ *  Custom non-client frame: caption + four caption buttons + in-client menu bar.
+ *
+ *  The window is opted in with ThemeEnableCustomFrame. WM_NCCALCSIZE removes the standard frame so the
+ *  whole window becomes client; DwmExtendFrameIntoClientArea keeps the DWM drop shadow + resize borders;
+ *  WM_NCHITTEST re-supplies the resize/move/button regions; WM_PAINT owner-draws the caption (icon,
+ *  title via DrawThemeTextEx), the four buttons (the three standard ones through the uxtheme WINDOW
+ *  parts -- the renderer DefWindowProc's themed legacy caption uses -- and the new light/dark one to the
+ *  same cell), and the menu bar (its NC band and UAH draw messages die with the standard frame, so it is
+ *  re-hosted in the client and rendered with the existing MenuBarOnDrawMenuItem). The bands fold onto the
+ *  shared dwCaptionProgress clock, so they cross-fade with the client during a live light/dark switch.
+ *
+ *  Runtime-tuning surface (documented, not guessed): exact button cell pixels and the DWM shadow extent
+ *  follow system metrics / a 1px sheet-of-glass and may want per-OS tuning to match uDWM's Win11 cell to
+ *  the pixel (uDWM is not in the disassembly set -- see THEME-PAINT-MESSAGE-CONTRACT §2). The Win11
+ *  snap-layout flyover (DwmDefWindowProc) and full native menu keyboard navigation are not wired in v1.
+ * ============================================================================================== */
+
+typedef struct FRAME_LAYOUT
+{
+    int  cxFrame;     /* side/bottom resize-border thickness used for hit-testing */
+    int  cyFrame;     /* top resize-grab strip thickness                          */
+    int  capH;        /* caption band height (client y: 0 .. capH)                */
+    int  menuH;       /* menu band height   (client y: capH .. capH+menuH)        */
+    int  btnW;        /* one caption-button cell width                            */
+    int  btnH;        /* one caption-button cell height (== capH)                 */
+    int  cxClient;    /* client width                                            */
+    RECT rcButtons[FB_COUNT];
+} FRAME_LAYOUT;
+
+static HFONT g_hThemeCaptionFont;
+static HFONT g_hThemeSymbolFont;
+static int   g_cyThemeSymbolFont;
+
+/* GUI-thread-only paint/hit-test scratch kept off-stack: a 256-byte title buffer and the menu-item
+   rect table on the stack would, once the surrounding NOINLINE frames are laid out, push past the
+   one-page stack-probe threshold and emit __chkstk, which this /NODEFAULTLIB build cannot resolve
+   (same remedy as g_themeNcmScratch). */
+static WCHAR g_themeFrameTitle[128];
+static RECT  g_themeFrameMenuRc[THEME_MAX_MENU_TOPITEMS];
+
+static FORCEINLINE UINT ThemeFrameDpi(HWND hwnd)
+{
+    UINT dpi;
+
+    if (g_theme.pfnGetDpiForWindow)
+    {
+        dpi = g_theme.pfnGetDpiForWindow(hwnd);
+        if (0u != dpi)
+        {
+            return dpi;
+        }
+    }
+    return 96u;
+}
+
+static FORCEINLINE int ThemeFrameMetric(int index, UINT dpi)
+{
+    if (g_theme.pfnGetSystemMetricsForDpi)
+    {
+        return g_theme.pfnGetSystemMetricsForDpi(index, dpi);
+    }
+    return GetSystemMetrics(index);
+}
+
+static FORCEINLINE HFONT ThemeCaptionFont(void)
+{
+    if (g_hThemeCaptionFont)
+    {
+        return g_hThemeCaptionFont;
+    }
+    SecureZeroMemory(&g_themeNcmScratch, sizeof(g_themeNcmScratch));
+    g_themeNcmScratch.cbSize = (DWORD)sizeof(g_themeNcmScratch);
+    if (SystemParametersInfo(SPI_GETNONCLIENTMETRICS, (UINT)sizeof(g_themeNcmScratch), &g_themeNcmScratch, 0))
+    {
+        g_hThemeCaptionFont = CreateFontIndirect(&g_themeNcmScratch.lfCaptionFont);
+    }
+    return g_hThemeCaptionFont;
+}
+
+/* A symbol font (Segoe MDL2 Assets, present Win10+) sized to the caption, for the light/dark glyph. */
+static FORCEINLINE HFONT ThemeSymbolFont(int cyButton)
+{
+    int cyGlyph;
+
+    cyGlyph = (cyButton * 2) / 5;
+    if (cyGlyph < 8)
+    {
+        cyGlyph = 8;
+    }
+    if (g_hThemeSymbolFont && (g_cyThemeSymbolFont == cyGlyph))
+    {
+        return g_hThemeSymbolFont;
+    }
+    if (g_hThemeSymbolFont)
+    {
+        DeleteObject(g_hThemeSymbolFont);
+        g_hThemeSymbolFont = NULL;
+    }
+    g_hThemeSymbolFont = CreateFontW(cyGlyph, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                     DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                     CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
+                                     L"Segoe MDL2 Assets");
+    g_cyThemeSymbolFont = cyGlyph;
+    return g_hThemeSymbolFont;
+}
+
+static FORCEINLINE FRAME_STATE* ThemeFrameFind(HWND hwnd)
+{
+    UINT i;
+
+    for (i = 0u; i < g_theme.cFrames; ++i)
+    {
+        if (g_theme.rgFrames[i].hwnd == hwnd)
+        {
+            return &g_theme.rgFrames[i];
+        }
+    }
+    return NULL;
+}
+
+static FORCEINLINE HMENU ThemeFrameMenu(HWND hwnd)
+{
+    FRAME_STATE* pst;
+
+    pst = ThemeFrameFind(hwnd);
+    return pst ? pst->hMenu : NULL;
+}
+
+static DECLSPEC_NOINLINE void ThemeFrameComputeLayout(HWND hwnd, FRAME_LAYOUT* pL)
+{
+    RECT           rcClient;
+    TITLEBARINFOEX tbi;
+    UINT           dpi;
+    int            pad;
+    int            r;
+    int            w;
+    int            h;
+    BOOL           fExact;
+
+    SecureZeroMemory(pL, sizeof(*pL));
+    GetClientRect(hwnd, &rcClient);
+    dpi = ThemeFrameDpi(hwnd);
+    pad = ThemeFrameMetric(SM_CXPADDEDBORDER, dpi);
+    pL->cxFrame  = ThemeFrameMetric(SM_CXFRAME, dpi) + pad;
+    pL->cyFrame  = ThemeFrameMetric(SM_CYFRAME, dpi) + pad;
+    pL->menuH    = ThemeFrameMenu(hwnd) ? ThemeFrameMetric(SM_CYMENU, dpi) : 0;
+    pL->cxClient = rcClient.right - rcClient.left;
+
+    /* Exact caption-button geometry from the system -- WM_GETTITLEBARINFOEX returns the SAME rects
+       uDWM!CWindowList::GetCaptionButtonBounds / DefWindowProc compute (rgrect[2]=min, [3]=max, [5]=close,
+       screen coords). We map them to client and place the light/dark button one cell left of Minimize,
+       so all four are the system's exact size and position. */
+    SecureZeroMemory(&tbi, sizeof(tbi));
+    tbi.cbSize = (DWORD)sizeof(tbi);
+    (void)SendMessageW(hwnd, WM_GETTITLEBARINFOEX, 0, (LPARAM)&tbi);
+    (void)MapWindowPoints(NULL, hwnd, (POINT*)&tbi.rgrect[2], 2);  /* minimize -> client */
+    (void)MapWindowPoints(NULL, hwnd, (POINT*)&tbi.rgrect[3], 2);  /* maximize -> client */
+    (void)MapWindowPoints(NULL, hwnd, (POINT*)&tbi.rgrect[5], 2);  /* close    -> client */
+
+    fExact = (tbi.rgrect[5].right > tbi.rgrect[5].left) && (tbi.rgrect[5].bottom > tbi.rgrect[5].top);
+    if (fExact)
+    {
+        pL->btnW = tbi.rgrect[5].right - tbi.rgrect[5].left;
+        pL->capH = tbi.rgrect[5].bottom;                  /* caption runs from client top to button bottom */
+        pL->btnH = pL->capH;
+        pL->rcButtons[FB_CLOSE] = tbi.rgrect[5];
+        pL->rcButtons[FB_MAX]   = tbi.rgrect[3];
+        pL->rcButtons[FB_MIN]   = tbi.rgrect[2];
+        pL->rcButtons[FB_LIGHTDARK].left   = tbi.rgrect[2].left - pL->btnW;
+        pL->rcButtons[FB_LIGHTDARK].right  = tbi.rgrect[2].left;
+        pL->rcButtons[FB_LIGHTDARK].top    = tbi.rgrect[2].top;
+        pL->rcButtons[FB_LIGHTDARK].bottom = tbi.rgrect[2].bottom;
+        /* the caption band fills the full width to the top edge */
+        pL->rcButtons[FB_CLOSE].top = 0;
+        pL->rcButtons[FB_MAX].top   = 0;
+        pL->rcButtons[FB_MIN].top   = 0;
+        pL->rcButtons[FB_LIGHTDARK].top = 0;
+        return;
+    }
+
+    /* Fallback (e.g. WM_GETTITLEBARINFOEX returned nothing): metric-based right cluster, same cell. */
+    pL->capH = ThemeFrameMetric(SM_CYCAPTION, dpi) + pL->cyFrame;
+    pL->btnW = ThemeFrameMetric(SM_CXSIZE, dpi);
+    pL->btnH = pL->capH;
+    r = pL->cxClient;
+    w = pL->btnW;
+    h = pL->btnH;
+    pL->rcButtons[FB_CLOSE].left = r - w;     pL->rcButtons[FB_CLOSE].right = r;       r -= w;
+    pL->rcButtons[FB_MAX].left   = r - w;     pL->rcButtons[FB_MAX].right   = r;       r -= w;
+    pL->rcButtons[FB_MIN].left   = r - w;     pL->rcButtons[FB_MIN].right   = r;       r -= w;
+    pL->rcButtons[FB_LIGHTDARK].left = r - w; pL->rcButtons[FB_LIGHTDARK].right = r;
+    pL->rcButtons[FB_CLOSE].top = 0;     pL->rcButtons[FB_CLOSE].bottom = h;
+    pL->rcButtons[FB_MAX].top = 0;       pL->rcButtons[FB_MAX].bottom = h;
+    pL->rcButtons[FB_MIN].top = 0;       pL->rcButtons[FB_MIN].bottom = h;
+    pL->rcButtons[FB_LIGHTDARK].top = 0; pL->rcButtons[FB_LIGHTDARK].bottom = h;
+}
+
+static DECLSPEC_NOINLINE int ThemeFrameMenuItemWidth(HWND hwnd, HMENU hMenu, int i, HDC hdc)
+{
+    WCHAR         sz[64];
+    MENUITEMINFOW mii;
+    SIZE          size;
+    HFONT         hFont;
+    HGDIOBJ       hOld;
+    int           pad;
+
+    UNREFERENCED_PARAMETER(hwnd);
+    sz[0] = 0;
+    SecureZeroMemory(&mii, sizeof(mii));
+    mii.cbSize     = sizeof(mii);
+    mii.fMask      = MIIM_STRING;
+    mii.dwTypeData = sz;
+    mii.cch        = (UINT)(ARRAYSIZE(sz) - 1);
+    /* Returns 0 past the real top-level item count (invalid position), so a constant-bound caller loop
+       stops without a dynamic count comparison feeding the call (C5045-safe, the existing menu idiom). */
+    if (!GetMenuItemInfoW(hMenu, (UINT)i, TRUE, &mii))
+    {
+        return 0;
+    }
+
+    hFont = ThemeMenuBarFont();
+    hOld  = hFont ? SelectObject(hdc, hFont) : NULL;
+    size.cx = 0;
+    size.cy = 0;
+    (void)GetTextExtentPoint32W(hdc, sz, lstrlenW(sz), &size);
+    if (hOld)
+    {
+        SelectObject(hdc, hOld);
+    }
+    pad = GetSystemMetrics(SM_CXMENUCHECK);
+    return size.cx + pad * 2;
+}
+
+static DECLSPEC_NOINLINE void ThemeFrameInvalidateBands(HWND hwnd)
+{
+    FRAME_LAYOUT L;
+    RECT         rc;
+
+    ThemeFrameComputeLayout(hwnd, &L);
+    rc.left   = 0;
+    rc.top    = 0;
+    rc.right  = L.cxClient;
+    rc.bottom = L.capH + L.menuH;
+    InvalidateRect(hwnd, &rc, FALSE);
+}
+
+/* A caption button is shown only when the window's styles enable it (DefWindowProc parity): Minimize
+   needs WS_MINIMIZEBOX, Maximize needs WS_MAXIMIZEBOX; Close and the light/dark toggle are always shown. */
+static FORCEINLINE BOOL ThemeFrameButtonEnabled(HWND hwnd, int id)
+{
+    LONG_PTR style;
+
+    style = GetWindowLongPtr(hwnd, GWL_STYLE);
+    switch (id)
+    {
+        case FB_MIN: return (0 != (style & WS_MINIMIZEBOX)) ? TRUE : FALSE;
+        case FB_MAX: return (0 != (style & WS_MAXIMIZEBOX)) ? TRUE : FALSE;
+        default:     return TRUE;
+    }
+}
+
+/* Segoe MDL2 Assets glyph for each caption button (the same icon font the Win10/11 shell caption uses);
+   matches both light and dark mode, unlike the uxtheme WINDOW parts (light-classic only). */
+static FORCEINLINE WCHAR ThemeFrameButtonGlyph(int id, BOOL fZoomed, BOOL fDark)
+{
+    switch (id)
+    {
+        case FB_MIN:       return (WCHAR)0xE921;                          /* ChromeMinimize          */
+        case FB_MAX:       return (WCHAR)(fZoomed ? 0xE923 : 0xE922);     /* ChromeRestore / Maximize */
+        case FB_CLOSE:     return (WCHAR)0xE8BB;                          /* ChromeClose             */
+        case FB_LIGHTDARK: return (WCHAR)(fDark ? 0xE706 : 0xE708);       /* Brightness / QuietHours  */
+        default:           return 0;
+    }
+}
+
+/* All four buttons drawn uniformly: a flat hover/pressed fill (Close goes red, like the shell) plus the
+   MDL2 glyph in the caption text color. Sized from the shared cell, so the light/dark button is exactly
+   the others' size. */
+static DECLSPEC_NOINLINE void ThemeFramePaintButton(HWND hwnd, HDC hdc, const FRAME_LAYOUT* pL,
+                                                    const FRAME_STATE* pst, int id, BOOL fActive, BOOL fDark,
+                                                    COLORREF crBg, COLORREF crText, COLORREF crDim)
+{
+    RECT     rc;
+    COLORREF crFill;
+    COLORREF crGlyph;
+    HFONT    hFont;
+    HGDIOBJ  hOld;
+    WCHAR    glyph[2];
+    BOOL     fHot;
+    BOOL     fPushed;
+
+    rc      = pL->rcButtons[id];
+    /* Pressed visual only while the cursor is over the captured button (cancel-on-drag-off, like the
+       shell); hover only when nothing is pressed. */
+    fPushed = (pst && (pst->idPressed == id) && (pst->idHot == id)) ? TRUE : FALSE;
+    fHot    = (pst && (pst->idHot == id) && (pst->idPressed == FB_NONE)) ? TRUE : FALSE;
+
+    crFill  = crBg;
+    crGlyph = fActive ? crText : crDim;
+    if (FB_CLOSE == id)
+    {
+        if (fPushed) { crFill = RGB(193, 62, 47);  crGlyph = RGB(255, 255, 255); }
+        else if (fHot) { crFill = RGB(196, 43, 28); crGlyph = RGB(255, 255, 255); }
+    }
+    else
+    {
+        if (fPushed) { crFill = fDark ? RGB(80, 80, 80) : RGB(204, 204, 204); }
+        else if (fHot) { crFill = fDark ? RGB(64, 64, 64) : RGB(229, 229, 229); }
+    }
+    ThemePaintSolidColor(hdc, &rc, crFill);
+
+    glyph[0] = ThemeFrameButtonGlyph(id, IsZoomed(hwnd), fDark);
+    glyph[1] = 0;
+    hFont = ThemeSymbolFont(rc.bottom - rc.top);
+    hOld  = hFont ? SelectObject(hdc, hFont) : NULL;
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, crGlyph);
+    DrawTextW(hdc, glyph, 1, &rc, DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+    if (hOld)
+    {
+        SelectObject(hdc, hOld);
+    }
+}
+
+static DECLSPEC_NOINLINE void ThemeFramePaintMenuBar(HWND hwnd, HDC hdc, const FRAME_LAYOUT* pL,
+                                                     const FRAME_STATE* pst, const MENUBAR_PALETTE* pPal)
+{
+    HMENU    hMenu;
+    int      i;
+    int      x;
+    RECT     rcBand;
+    COLORREF crBar;
+
+    hMenu = ThemeFrameMenu(hwnd);
+    if (!hMenu)
+    {
+        return;
+    }
+
+    crBar = pPal->clrBar;
+    if (g_theme.fAnimatingBackground && ThemeWindowHasBackgroundAnimation(hwnd))
+    {
+        crBar = ThemeMenuAnimationColor();
+    }
+    rcBand.left   = 0;
+    rcBand.top    = pL->capH;
+    rcBand.right  = pL->cxClient;
+    rcBand.bottom = pL->capH + pL->menuH;
+    ThemePaintSolidColor(hdc, &rcBand, crBar);
+
+    /* Constant loop bound (C5045-safe); ThemeFrameMenuItemWidth returns 0 past the last item -> stop. */
+    x = pL->cxFrame;
+    for (i = 0; i < THEME_MAX_MENU_TOPITEMS; ++i)
+    {
+        RECT           rcItem;
+        int            w;
+        UAHDRAWMENUITEM udmi;
+
+        w = ThemeFrameMenuItemWidth(hwnd, hMenu, i, hdc);
+        if (0 == w)
+        {
+            break;
+        }
+        rcItem.left   = x;
+        rcItem.right  = x + w;
+        rcItem.top    = pL->capH;
+        rcItem.bottom = pL->capH + pL->menuH;
+
+        SecureZeroMemory(&udmi, sizeof(udmi));
+        udmi.dis.CtlType   = ODT_MENU;
+        udmi.dis.rcItem    = rcItem;
+        udmi.dis.hDC       = hdc;
+        /* Hide '&' mnemonics until the Alt/F10 keyboard cue is up (DefWindowProc parity). */
+        udmi.dis.itemState = (pst && pst->fShowAccel) ? 0u : (UINT)ODS_NOACCEL;
+        if (pst && ((pst->iHotMenu == i) || (pst->iMenuActive == i)))
+        {
+            udmi.dis.itemState |= ODS_HOTLIGHT;
+        }
+        udmi.um.hmenu      = hMenu;
+        udmi.um.hdc        = hdc;
+        udmi.umi.iPosition = i;
+        MenuBarOnDrawMenuItem(hwnd, &udmi, pPal);
+        x += w;
+    }
+}
+
+static DECLSPEC_NOINLINE void ThemeFramePaint(HWND hwnd, HDC hdc)
+{
+    FRAME_LAYOUT    L;
+    FRAME_STATE*    pst;
+    MENUBAR_PALETTE pal;
+    RECT            rc;
+    COLORREF        crCaption;
+    COLORREF        crText;
+    BOOL            fDark;
+    BOOL            fActive;
+    HTHEME          hWin;
+    int             i;
+    int             leftPad;
+
+    pst = ThemeFrameFind(hwnd);
+    ThemeFrameComputeLayout(hwnd, &L);
+    fDark   = ThemeIsDarkMode();
+    fActive = (GetActiveWindow() == hwnd);
+    MenuBarPalette(fDark, &pal);
+
+    if (g_theme.fAnimatingBackground && ThemeWindowHasBackgroundAnimation(hwnd))
+    {
+        crCaption = ThemeMenuAnimationColor();
+        crText    = ThemeMenuTextAnimationColor();
+    }
+    else
+    {
+        crCaption = pal.clrBar;
+        crText    = pal.clrText;
+    }
+
+    /* Caption band background. */
+    rc.left   = 0;
+    rc.top    = 0;
+    rc.right  = L.cxClient;
+    rc.bottom = L.capH;
+    ThemePaintSolidColor(hdc, &rc, crCaption);
+
+    leftPad = L.cxFrame;
+
+    /* Window small icon. */
+    {
+        HICON hIcon;
+        int   cxIcon;
+        int   cyIcon;
+        int   y;
+
+        hIcon = (HICON)SendMessage(hwnd, WM_GETICON, ICON_SMALL2, 0);
+        if (!hIcon)
+        {
+            hIcon = (HICON)(LONG_PTR)GetClassLongPtr(hwnd, GCLP_HICONSM);
+        }
+        cxIcon = GetSystemMetrics(SM_CXSMICON);
+        cyIcon = GetSystemMetrics(SM_CYSMICON);
+        y      = (L.capH - cyIcon) / 2;
+        if (hIcon)
+        {
+            (void)DrawIconEx(hdc, leftPad, y, hIcon, cxIcon, cyIcon, 0, NULL, DI_NORMAL);
+        }
+    }
+
+    /* Caption title (themed text, caption font, caption text color). The text is passed NUL-terminated
+       (-1), not a range-checked length, so no length comparison feeds the draw call (C5045-safe). The
+       title buffer is the off-stack g_themeFrameTitle (GUI thread only) to keep this frame small. */
+    {
+        RECT    rcTitle;
+        HFONT   hFont;
+        HGDIOBJ hOld;
+
+        g_themeFrameTitle[0] = 0;
+        (void)GetWindowTextW(hwnd, g_themeFrameTitle, ARRAYSIZE(g_themeFrameTitle));
+        rcTitle.left   = leftPad + GetSystemMetrics(SM_CXSMICON) + leftPad;
+        rcTitle.top    = 0;
+        rcTitle.right  = L.rcButtons[FB_LIGHTDARK].left - leftPad;
+        rcTitle.bottom = L.capH;
+        if (g_themeFrameTitle[0] && (rcTitle.right > rcTitle.left))
+        {
+            hFont = ThemeCaptionFont();
+            hOld  = hFont ? SelectObject(hdc, hFont) : NULL;
+            hWin  = g_theme.pfnOpenThemeData ? g_theme.pfnOpenThemeData(hwnd, L"WINDOW") : NULL;
+            if (hWin && g_theme.pfnDrawThemeTextEx)
+            {
+                DTTOPTS o;
+
+                SecureZeroMemory(&o, sizeof(o));
+                o.dwSize    = (DWORD)sizeof(o);
+                o.dwFlags   = DTT_TEXTCOLOR | DTT_GLOWSIZE;
+                o.crText    = crText;
+                o.iGlowSize = 0;
+                (void)g_theme.pfnDrawThemeTextEx(hWin, hdc, WP_CAPTION,
+                                                 fActive ? CBTNS_NORMAL : CBTNS_INACTIVE,
+                                                 g_themeFrameTitle, -1,
+                                                 DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_WORD_ELLIPSIS,
+                                                 &rcTitle, &o);
+                g_theme.pfnCloseThemeData(hWin);
+            }
+            else
+            {
+                SetBkMode(hdc, TRANSPARENT);
+                SetTextColor(hdc, crText);
+                DrawTextW(hdc, g_themeFrameTitle, -1, &rcTitle,
+                          DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_WORD_ELLIPSIS);
+            }
+            if (hOld)
+            {
+                SelectObject(hdc, hOld);
+            }
+        }
+    }
+
+    /* Caption buttons -- hand-drawn uniformly (flat fill + MDL2 glyph), correct in dark and light. Only
+       the buttons the window's styles enable are painted (gated below in the hit-test / here by style). */
+    for (i = FB_LIGHTDARK; i <= FB_CLOSE; ++i)
+    {
+        if (ThemeFrameButtonEnabled(hwnd, i))
+        {
+            ThemeFramePaintButton(hwnd, hdc, &L, pst, i, fActive, fDark, crCaption, crText, pal.clrTextDim);
+        }
+    }
+
+    /* Menu bar (re-hosted in the client). */
+    ThemeFramePaintMenuBar(hwnd, hdc, &L, pst, &pal);
+}
+
+static DECLSPEC_NOINLINE BOOL ThemeFramePaintMessage(HWND hwnd, LRESULT* plr)
+{
+    PAINTSTRUCT ps;
+    HDC         hdc;
+    RECT        rcClient;
+
+    hdc = BeginPaint(hwnd, &ps);
+    if (!hdc)
+    {
+        return FALSE;
+    }
+    GetClientRect(hwnd, &rcClient);
+    if (g_theme.fAnimatingBackground && ThemeWindowHasBackgroundAnimation(hwnd))
+    {
+        ThemePaintSolidColor(hdc, &rcClient, ThemeClientAnimationColor());
+    }
+    else
+    {
+        ThemePaintBackgroundColor(hdc, &rcClient, ThemeIsDarkMode());
+    }
+    ThemeFramePaint(hwnd, hdc);
+    EndPaint(hwnd, &ps);
+    *plr = 0;
+    return TRUE;
+}
+
+static DECLSPEC_NOINLINE LRESULT ThemeFrameOnNcCalcSize(HWND hwnd, LPARAM lParam)
+{
+    NCCALCSIZE_PARAMS* p;
+    RECT*              prc;
+    UINT               dpi;
+    int                cx;
+    int                cy;
+    int                pad;
+
+    p   = (NCCALCSIZE_PARAMS*)lParam;
+    prc = &p->rgrc[0];
+    if (IsZoomed(hwnd))
+    {
+        /* Maximized: a top-level window's frame hangs cx/cy beyond the monitor; inset so the client is
+           the visible work area (and the caption is not clipped off the top). */
+        dpi = ThemeFrameDpi(hwnd);
+        pad = ThemeFrameMetric(SM_CXPADDEDBORDER, dpi);
+        cx  = ThemeFrameMetric(SM_CXFRAME, dpi) + pad;
+        cy  = ThemeFrameMetric(SM_CYFRAME, dpi) + pad;
+        prc->left   += cx;
+        prc->top    += cy;
+        prc->right  -= cx;
+        prc->bottom -= cy;
+    }
+    /* Restored: leave rgrc[0] unchanged -> the entire window is client; resize borders come from the
+       hit-test, the caption + buttons are flush to the window edges. */
+    return 0;
+}
+
+/* Fill rg[0..N) with each top-level menu item's client rect; absent items get an empty rect. Constant
+   loop bound + plain assignment + a single unconditional ReleaseDC -> no index range-check feeds a call
+   (C5045-clean). */
+static DECLSPEC_NOINLINE void ThemeFrameMenuRects(HWND hwnd, const FRAME_LAYOUT* pL, RECT* rg)
+{
+    HMENU hMenu;
+    HDC   hdc;
+    int   i;
+    int   x;
+
+    for (i = 0; i < THEME_MAX_MENU_TOPITEMS; ++i)
+    {
+        rg[i].left = 0; rg[i].top = 0; rg[i].right = 0; rg[i].bottom = 0;
+    }
+    hMenu = ThemeFrameMenu(hwnd);
+    if (!hMenu)
+    {
+        return;
+    }
+    hdc = GetDC(hwnd);
+    x   = pL->cxFrame;
+    for (i = 0; i < THEME_MAX_MENU_TOPITEMS; ++i)
+    {
+        int w = ThemeFrameMenuItemWidth(hwnd, hMenu, i, hdc);
+        if (0 == w)
+        {
+            break;
+        }
+        rg[i].left   = x;
+        rg[i].right  = x + w;
+        rg[i].top    = pL->capH;
+        rg[i].bottom = pL->capH + pL->menuH;
+        x += w;
+    }
+    ReleaseDC(hwnd, hdc);
+}
+
+static DECLSPEC_NOINLINE LRESULT ThemeFrameHitTest(HWND hwnd, LPARAM lParam)
+{
+    FRAME_LAYOUT L;
+    POINT        ptScreen;
+    POINT        ptClient;
+    RECT         rcWin;
+    RECT         rcIcon;
+    LRESULT      border;
+    LRESULT      menuCode;
+    LONG_PTR     mask;
+    LONG_PTR     style;
+    BOOL         fSizable;
+    int          i;
+    int          found;
+    int          row;
+    int          col;
+    BOOL         fOnResizeTop;
+
+    ptScreen.x = (int)(short)LOWORD(lParam);
+    ptScreen.y = (int)(short)HIWORD(lParam);
+    GetWindowRect(hwnd, &rcWin);
+    ThemeFrameComputeLayout(hwnd, &L);
+    style    = GetWindowLongPtr(hwnd, GWL_STYLE);
+    fSizable = (0 != (style & WS_THICKFRAME)) ? TRUE : FALSE;
+
+    ptClient = ptScreen;
+    ScreenToClient(hwnd, &ptClient);
+
+    /* DefWindowProc / DefWndNCHitTest order: the SIZING FRAME is classified FIRST. Classify row/col +
+       the top-strip flag, build the border code via a cmov ladder (no row/col-indexed array). */
+    row          = 1;
+    col          = 1;
+    fOnResizeTop = FALSE;
+    if ((ptScreen.y >= rcWin.top) && (ptScreen.y < rcWin.top + L.capH))
+    {
+        fOnResizeTop = (ptScreen.y < rcWin.top + L.cyFrame);
+        row          = 0;
+    }
+    else if ((ptScreen.y < rcWin.bottom) && (ptScreen.y >= rcWin.bottom - L.cyFrame))
+    {
+        row = 2;
+    }
+    if ((ptScreen.x >= rcWin.left) && (ptScreen.x < rcWin.left + L.cxFrame))
+    {
+        col = 0;
+    }
+    else if ((ptScreen.x < rcWin.right) && (ptScreen.x >= rcWin.right - L.cxFrame))
+    {
+        col = 2;
+    }
+    border = (0 == row)
+                 ? ((0 == col) ? (fSizable ? HTTOPLEFT : HTBORDER)
+                               : (2 == col) ? (fSizable ? HTTOPRIGHT : HTBORDER)
+                                            : ((fOnResizeTop && fSizable) ? HTTOP : HTCAPTION))
+                 : (2 == row)
+                       ? ((0 == col) ? (fSizable ? HTBOTTOMLEFT : HTBORDER)
+                                     : (2 == col) ? (fSizable ? HTBOTTOMRIGHT : HTBORDER)
+                                                  : (fSizable ? HTBOTTOM : HTBORDER))
+                       : ((0 == col) ? (fSizable ? HTLEFT : HTBORDER)
+                                     : (2 == col) ? (fSizable ? HTRIGHT : HTBORDER)
+                                                  : HTCLIENT);
+
+    /* Corners + the left/right/bottom edges win immediately -- THIS is why the top-right corner resizes
+       even though the Close button is drawn there. (The top strip HTTOP is deferred below, so buttons /
+       sysmenu still take priority over top-edge resizing.) */
+    if ((HTTOPLEFT == border) || (HTTOPRIGHT == border) || (HTBOTTOMLEFT == border) ||
+        (HTBOTTOMRIGHT == border) || (HTLEFT == border) || (HTRIGHT == border) ||
+        (HTBOTTOM == border) || (HTBORDER == border))
+    {
+        return border;
+    }
+
+    /* Caption buttons (only those the styles enable). */
+    for (i = FB_LIGHTDARK; i <= FB_CLOSE; ++i)
+    {
+        if (ThemeFrameButtonEnabled(hwnd, i) && PtInRect(&L.rcButtons[i], ptClient))
+        {
+            switch (i)
+            {
+                case FB_MIN:       return HTMINBUTTON;
+                case FB_MAX:       return HTMAXBUTTON;
+                case FB_CLOSE:     return HTCLOSE;
+                case FB_LIGHTDARK: return HTLIGHTDARK;
+                default:           break;
+            }
+        }
+    }
+
+    /* Window icon -> system menu (click opens the system menu, double-click closes). */
+    rcIcon.left   = L.cxFrame;
+    rcIcon.top    = 0;
+    rcIcon.right  = L.cxFrame + GetSystemMetrics(SM_CXSMICON);
+    rcIcon.bottom = L.capH;
+    if (PtInRect(&rcIcon, ptClient))
+    {
+        return HTSYSMENU;
+    }
+
+    /* Top resize strip, after the buttons/sysmenu have had their say. */
+    if (HTTOP == border)
+    {
+        return HTTOP;
+    }
+
+    /* Menu top-level items: accumulate the matched index by ARITHMETIC (no index range-check feeding a
+       call/return -> C5045-clean); otherwise HTCAPTION/HTCLIENT (border). */
+    ThemeFrameMenuRects(hwnd, &L, g_themeFrameMenuRc);
+    found = -1;
+    for (i = 0; i < THEME_MAX_MENU_TOPITEMS; ++i)
+    {
+        int in = (PtInRect(&g_themeFrameMenuRc[i], ptClient) != 0) ? 1 : 0;
+        found += in * (i - found);   /* in==1 -> found=i; in==0 -> unchanged (branchless cmov) */
+    }
+    menuCode = (LRESULT)(HTMENUITEM0 + found);
+    mask     = (LONG_PTR)found >> (int)(8 * sizeof(LONG_PTR) - 1);
+    return (LRESULT)(((LONG_PTR)border & mask) | ((LONG_PTR)menuCode & ~mask));
+}
+
+static FORCEINLINE int ThemeFrameButtonFromHit(WPARAM hit)
+{
+    switch (hit)
+    {
+        case HTMINBUTTON: return FB_MIN;
+        case HTMAXBUTTON: return FB_MAX;
+        case HTCLOSE:     return FB_CLOSE;
+        case HTLIGHTDARK: return FB_LIGHTDARK;
+        default:          return FB_NONE;
+    }
+}
+
+/* Map a WM_NCHITTEST result to a top-level menu index, or -1. Constant-bound equality scan (no range
+   check on an index feeding a call) keeps it C5045-clean. */
+static FORCEINLINE int ThemeFrameMenuFromHit(WPARAM hit)
+{
+    int k;
+
+    for (k = 0; k < THEME_MAX_MENU_TOPITEMS; ++k)
+    {
+        if (hit == (WPARAM)(HTMENUITEM0 + k))
+        {
+            return k;
+        }
+    }
+    return -1;
+}
+
+static DECLSPEC_NOINLINE void ThemeFrameButtonAction(HWND hwnd, int id)
+{
+    switch (id)
+    {
+        case FB_MIN:       (void)PostMessage(hwnd, WM_SYSCOMMAND, SC_MINIMIZE, 0); break;
+        case FB_MAX:       (void)PostMessage(hwnd, WM_SYSCOMMAND, IsZoomed(hwnd) ? SC_RESTORE : SC_MAXIMIZE, 0); break;
+        case FB_CLOSE:     (void)PostMessage(hwnd, WM_SYSCOMMAND, SC_CLOSE, 0); break;
+        case FB_LIGHTDARK: ThemeToggleDarkMode(hwnd); break;
+        default:           break;
+    }
+}
+
+static DECLSPEC_NOINLINE void ThemeFrameTrackLeave(HWND hwnd, FRAME_STATE* pst)
+{
+    TRACKMOUSEEVENT tme;
+
+    if (pst->fTracking)
+    {
+        return;
+    }
+    SecureZeroMemory(&tme, sizeof(tme));
+    tme.cbSize    = (DWORD)sizeof(tme);
+    tme.dwFlags   = TME_LEAVE | TME_NONCLIENT;
+    tme.hwndTrack = hwnd;
+    if (TrackMouseEvent(&tme))
+    {
+        pst->fTracking = TRUE;
+    }
+}
+
+static DECLSPEC_NOINLINE void ThemeFrameOnNcMouseMove(HWND hwnd, WPARAM hit)
+{
+    FRAME_STATE* pst;
+    int          idHot;
+    int          iMenu;
+
+    pst = ThemeFrameFind(hwnd);
+    if (!pst)
+    {
+        return;
+    }
+    idHot = ThemeFrameButtonFromHit(hit);
+    iMenu = ThemeFrameMenuFromHit(hit);
+    ThemeFrameTrackLeave(hwnd, pst);
+    if ((pst->idHot != idHot) || (pst->iHotMenu != iMenu))
+    {
+        pst->idHot    = idHot;
+        pst->iHotMenu = iMenu;
+        ThemeFrameInvalidateBands(hwnd);
+    }
+}
+
+static DECLSPEC_NOINLINE void ThemeFrameOnNcMouseLeave(HWND hwnd)
+{
+    FRAME_STATE* pst;
+
+    pst = ThemeFrameFind(hwnd);
+    if (!pst)
+    {
+        return;
+    }
+    pst->fTracking = FALSE;
+    if ((pst->idHot != FB_NONE) || (pst->idPressed != FB_NONE) || (pst->iHotMenu != -1))
+    {
+        pst->idHot     = FB_NONE;
+        pst->idPressed = FB_NONE;
+        pst->iHotMenu  = -1;
+        ThemeFrameInvalidateBands(hwnd);
+    }
+}
+
+static DECLSPEC_NOINLINE void ThemeFrameTrackMenu(HWND hwnd, int i)
+{
+    FRAME_LAYOUT L;
+    FRAME_STATE* pst;
+    HMENU        hMenu;
+    HMENU        hSub;
+    POINT        pt;
+    HDC          hdc;
+    int          x;
+    int          j;
+
+    hMenu = ThemeFrameMenu(hwnd);
+    if (!hMenu)
+    {
+        return;
+    }
+    hSub = GetSubMenu(hMenu, i);
+    if (!hSub)
+    {
+        return;
+    }
+    ThemeFrameComputeLayout(hwnd, &L);
+    hdc = GetDC(hwnd);
+    /* Sum item widths up to the clicked index. Constant loop bound + equality stop (C5045-safe). */
+    x   = L.cxFrame;
+    for (j = 0; j < THEME_MAX_MENU_TOPITEMS; ++j)
+    {
+        if (j == i)
+        {
+            break;
+        }
+        x += ThemeFrameMenuItemWidth(hwnd, hMenu, j, hdc);
+    }
+    ReleaseDC(hwnd, hdc);
+
+    pt.x = x;
+    pt.y = L.capH + L.menuH;
+    ClientToScreen(hwnd, &pt);
+
+    pst = ThemeFrameFind(hwnd);
+    if (pst)
+    {
+        pst->iHotMenu = i;
+    }
+    ThemeFrameInvalidateBands(hwnd);
+    (void)TrackPopupMenu(hSub, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_LEFTBUTTON, pt.x, pt.y, 0, hwnd, NULL);
+    pst = ThemeFrameFind(hwnd);
+    if (pst)
+    {
+        pst->iHotMenu = -1;
+    }
+    ThemeFrameInvalidateBands(hwnd);
+}
+
+/* Constant-bound count of top-level menu items (width 0 marks the end -> C5045-safe). */
+static FORCEINLINE int ThemeFrameMenuCount(HWND hwnd)
+{
+    HMENU hMenu;
+    HDC   hdc;
+    int   i;
+    int   n;
+
+    hMenu = ThemeFrameMenu(hwnd);
+    if (!hMenu)
+    {
+        return 0;
+    }
+    hdc = GetDC(hwnd);
+    n   = 0;
+    for (i = 0; i < THEME_MAX_MENU_TOPITEMS; ++i)
+    {
+        if (0 == ThemeFrameMenuItemWidth(hwnd, hMenu, i, hdc))
+        {
+            break;
+        }
+        n = i + 1;
+    }
+    ReleaseDC(hwnd, hdc);
+    return n;
+}
+
+static FORCEINLINE LRESULT ThemeFrameHitScreen(HWND hwnd, int x, int y)
+{
+    LPARAM lp;
+
+    lp = (LPARAM)((((DWORD)y & 0xFFFFu) << 16) | ((DWORD)x & 0xFFFFu));
+    return ThemeFrameHitTest(hwnd, lp);
+}
+
+/* Open the window's system menu (DefWindowProc parity for the icon / Alt+Space / right-click caption). */
+static DECLSPEC_NOINLINE void ThemeFrameSysMenu(HWND hwnd, int xScreen, int yScreen)
+{
+    HMENU hSys;
+    int   cmd;
+
+    hSys = GetSystemMenu(hwnd, FALSE);
+    if (!hSys)
+    {
+        return;
+    }
+    cmd = (int)TrackPopupMenu(hSys, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON,
+                              xScreen, yScreen, 0, hwnd, NULL);
+    if (0 != cmd)
+    {
+        (void)PostMessage(hwnd, WM_SYSCOMMAND, (WPARAM)cmd, 0);
+    }
+}
+
+/* Top-level item index whose &-mnemonic matches ch, or -1. Returning the loop index directly from inside
+   a constant-bound loop (no >=0 guard feeding a call) is C5045-clean. */
+static DECLSPEC_NOINLINE int ThemeFrameMnemonic(HWND hwnd, WCHAR ch)
+{
+    HMENU         hMenu;
+    WCHAR         sz[64];
+    MENUITEMINFOW mii;
+    WCHAR         up;
+    int           i;
+    int           j;
+
+    hMenu = ThemeFrameMenu(hwnd);
+    if (!hMenu)
+    {
+        return -1;
+    }
+    up = (WCHAR)(DWORD_PTR)CharUpperW((LPWSTR)(DWORD_PTR)ch);
+    for (i = 0; i < THEME_MAX_MENU_TOPITEMS; ++i)
+    {
+        sz[0] = 0;
+        SecureZeroMemory(&mii, sizeof(mii));
+        mii.cbSize     = sizeof(mii);
+        mii.fMask      = MIIM_STRING;
+        mii.dwTypeData = sz;
+        mii.cch        = (UINT)(ARRAYSIZE(sz) - 1);
+        if (!GetMenuItemInfoW(hMenu, (UINT)i, TRUE, &mii))
+        {
+            break;
+        }
+        for (j = 0; (j + 1 < (int)ARRAYSIZE(sz)) && (0 != sz[j]); ++j)
+        {
+            if ((L'&' == sz[j]) && (0 != sz[j + 1]) && (L'&' != sz[j + 1]))
+            {
+                if ((WCHAR)(DWORD_PTR)CharUpperW((LPWSTR)(DWORD_PTR)sz[j + 1]) == up)
+                {
+                    return i;
+                }
+                break;
+            }
+        }
+    }
+    return -1;
+}
+
+/* While a keyboard-opened popup is up, Left/Right at the menu-bar level should move to the adjacent
+   top-level menu. TrackPopupMenu does not do this, so a thread MSGF_MENU filter ends the current popup
+   and records the direction; ThemeFrameMenuLoop reopens the neighbour. */
+static int   g_themeMenuLoopDir;   /* GUI thread only: -1/0/+1 set by the filter */
+static HHOOK g_themeMenuHook;
+
+static LRESULT CALLBACK ThemeMenuMsgFilter(int code, WPARAM wParam, LPARAM lParam)
+{
+    if (MSGF_MENU == code)
+    {
+        const MSG* pm = (const MSG*)lParam;
+        if (pm && (WM_KEYDOWN == pm->message))
+        {
+            if (VK_LEFT == pm->wParam)  { g_themeMenuLoopDir = -1; EndMenu(); return 1; }
+            if (VK_RIGHT == pm->wParam) { g_themeMenuLoopDir =  1; EndMenu(); return 1; }
+        }
+    }
+    return CallNextHookEx(g_themeMenuHook, code, wParam, lParam);
+}
+
+/* Open the currently-active top-level menu (FRAME_STATE.iMenuActive) and keep it open across Left/Right
+   navigation. The active index is READ FRESH from state inside a constant-bound equality loop (the loop
+   counter feeds TrackMenu; no range-checked local index reaches the call) -> C5045-clean. */
+static DECLSPEC_NOINLINE void ThemeFrameOpenActiveMenu(HWND hwnd)
+{
+    FRAME_STATE* pst;
+    int          n;
+    int          i;
+
+    pst = ThemeFrameFind(hwnd);
+    if (!pst)
+    {
+        return;
+    }
+    n = ThemeFrameMenuCount(hwnd);
+    if (n <= 0)
+    {
+        return;
+    }
+    for (;;)
+    {
+        g_themeMenuLoopDir = 0;
+        g_themeMenuHook    = SetWindowsHookExW(WH_MSGFILTER, ThemeMenuMsgFilter, NULL, GetCurrentThreadId());
+        for (i = 0; i < THEME_MAX_MENU_TOPITEMS; ++i)
+        {
+            if (i == pst->iMenuActive)
+            {
+                ThemeFrameTrackMenu(hwnd, i);
+                break;
+            }
+        }
+        if (g_themeMenuHook)
+        {
+            (void)UnhookWindowsHookEx(g_themeMenuHook);
+            g_themeMenuHook = NULL;
+        }
+        if (0 == g_themeMenuLoopDir)
+        {
+            break;   /* a command was chosen or the popup was cancelled */
+        }
+        pst->iMenuActive = ((pst->iMenuActive + g_themeMenuLoopDir) % n + n) % n;  /* assignment, not a call */
+    }
+}
+
+static DECLSPEC_NOINLINE BOOL ThemeFrameOnNcLButtonDown(HWND hwnd, WPARAM hit, LRESULT* plr)
+{
+    FRAME_STATE* pst;
+    int          id;
+    int          k;
+
+    pst = ThemeFrameFind(hwnd);
+    if (!pst)
+    {
+        return FALSE;
+    }
+    id = ThemeFrameButtonFromHit(hit);
+    if (FB_NONE != id)
+    {
+        /* Press a caption button: capture the mouse so we can cancel on drag-off and fire on the up. */
+        pst->idPressed  = id;
+        pst->idHot      = id;
+        pst->fCapturing = TRUE;
+        (void)SetCapture(hwnd);
+        ThemeFrameInvalidateBands(hwnd);
+        *plr = 0;
+        return TRUE;
+    }
+    if (HTSYSMENU == hit)
+    {
+        RECT         rcWin;
+        FRAME_LAYOUT L;
+
+        GetWindowRect(hwnd, &rcWin);
+        ThemeFrameComputeLayout(hwnd, &L);
+        ThemeFrameSysMenu(hwnd, rcWin.left + L.cxFrame, rcWin.top + L.capH);
+        *plr = 0;
+        return TRUE;
+    }
+    /* Menu top-level click -> open its popup. Constant-bound equality scan (no range-checked index
+       feeding the call) keeps this C5045-clean. */
+    for (k = 0; k < THEME_MAX_MENU_TOPITEMS; ++k)
+    {
+        if (hit == (WPARAM)(HTMENUITEM0 + k))
+        {
+            ThemeFrameTrackMenu(hwnd, k);
+            *plr = 0;
+            return TRUE;
+        }
+    }
+    return FALSE;  /* HTCAPTION / borders -> DefWindowProc moves/sizes. */
+}
+
+static DECLSPEC_NOINLINE BOOL ThemeFrameOnNcLButtonDblClk(HWND hwnd, WPARAM hit, LRESULT* plr)
+{
+    if (HTSYSMENU == hit)
+    {
+        (void)PostMessage(hwnd, WM_SYSCOMMAND, SC_CLOSE, 0);  /* icon double-click closes */
+        *plr = 0;
+        return TRUE;
+    }
+    return FALSE;  /* caption double-click -> DefWindowProc maximizes/restores */
+}
+
+static DECLSPEC_NOINLINE BOOL ThemeFrameOnNcRButtonUp(HWND hwnd, WPARAM hit, LPARAM lParam, LRESULT* plr)
+{
+    if ((HTCAPTION == hit) || (HTSYSMENU == hit))
+    {
+        ThemeFrameSysMenu(hwnd, (int)(short)LOWORD(lParam), (int)(short)HIWORD(lParam));
+        *plr = 0;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static DECLSPEC_NOINLINE void ThemeFrameOnMouseMoveCapture(HWND hwnd, LPARAM lParam)
+{
+    FRAME_STATE* pst;
+    POINT        pt;
+    int          id;
+
+    pst = ThemeFrameFind(hwnd);
+    if (!pst || !pst->fCapturing)
+    {
+        return;
+    }
+    pt.x = (int)(short)LOWORD(lParam);
+    pt.y = (int)(short)HIWORD(lParam);
+    (void)ClientToScreen(hwnd, &pt);
+    id = ThemeFrameButtonFromHit((WPARAM)ThemeFrameHitScreen(hwnd, pt.x, pt.y));
+    if (pst->idHot != id)
+    {
+        pst->idHot = id;
+        ThemeFrameInvalidateBands(hwnd);
+    }
+}
+
+static DECLSPEC_NOINLINE BOOL ThemeFrameOnLButtonUpCapture(HWND hwnd, LPARAM lParam, LRESULT* plr)
+{
+    FRAME_STATE* pst;
+    POINT        pt;
+    int          id;
+    int          pressed;
+
+    pst = ThemeFrameFind(hwnd);
+    if (!pst || !pst->fCapturing)
+    {
+        return FALSE;
+    }
+    pressed = pst->idPressed;
+    pt.x    = (int)(short)LOWORD(lParam);
+    pt.y    = (int)(short)HIWORD(lParam);
+    (void)ClientToScreen(hwnd, &pt);
+    id = ThemeFrameButtonFromHit((WPARAM)ThemeFrameHitScreen(hwnd, pt.x, pt.y));
+
+    pst->fCapturing = FALSE;
+    pst->idPressed  = FB_NONE;
+    (void)ReleaseCapture();
+    ThemeFrameInvalidateBands(hwnd);
+    if ((FB_NONE != pressed) && (pressed == id))
+    {
+        ThemeFrameButtonAction(hwnd, pressed);
+    }
+    *plr = 0;
+    return TRUE;
+}
+
+static DECLSPEC_NOINLINE void ThemeFrameOnCaptureChanged(HWND hwnd)
+{
+    FRAME_STATE* pst;
+
+    pst = ThemeFrameFind(hwnd);
+    if (!pst)
+    {
+        return;
+    }
+    if (pst->fCapturing)
+    {
+        pst->fCapturing = FALSE;
+        pst->idPressed  = FB_NONE;
+        ThemeFrameInvalidateBands(hwnd);
+    }
+}
+
+static DECLSPEC_NOINLINE void ThemeFrameEnterMenuMode(HWND hwnd, int start)
+{
+    FRAME_STATE* pst;
+
+    pst = ThemeFrameFind(hwnd);
+    if (!pst || (ThemeFrameMenuCount(hwnd) <= 0))
+    {
+        return;
+    }
+    pst->iMenuActive = (start < 0) ? 0 : start;
+    pst->fShowAccel  = TRUE;
+    ThemeFrameInvalidateBands(hwnd);
+}
+
+static DECLSPEC_NOINLINE void ThemeFrameExitMenuMode(HWND hwnd)
+{
+    FRAME_STATE* pst;
+
+    pst = ThemeFrameFind(hwnd);
+    if (!pst)
+    {
+        return;
+    }
+    if ((pst->iMenuActive >= 0) || pst->fShowAccel)
+    {
+        pst->iMenuActive = -1;
+        pst->fShowAccel  = FALSE;
+        ThemeFrameInvalidateBands(hwnd);
+    }
+}
+
+static DECLSPEC_NOINLINE BOOL ThemeFrameOnSysKeyDown(HWND hwnd, WPARAM vk, LRESULT* plr)
+{
+    FRAME_STATE* pst;
+
+    if (VK_F10 != vk)
+    {
+        return FALSE;  /* Alt alone -> keyup; Alt+char -> WM_SYSCHAR */
+    }
+    pst = ThemeFrameFind(hwnd);
+    if (pst && (pst->iMenuActive >= 0))
+    {
+        ThemeFrameExitMenuMode(hwnd);
+    }
+    else
+    {
+        ThemeFrameEnterMenuMode(hwnd, 0);
+    }
+    *plr = 0;
+    return TRUE;
+}
+
+static DECLSPEC_NOINLINE BOOL ThemeFrameOnSysKeyUp(HWND hwnd, WPARAM vk, LRESULT* plr)
+{
+    FRAME_STATE* pst;
+
+    if (VK_MENU != vk)
+    {
+        return FALSE;
+    }
+    pst = ThemeFrameFind(hwnd);
+    if (pst && (pst->iMenuActive >= 0))
+    {
+        ThemeFrameExitMenuMode(hwnd);
+    }
+    else
+    {
+        ThemeFrameEnterMenuMode(hwnd, 0);
+    }
+    *plr = 0;
+    return TRUE;
+}
+
+static DECLSPEC_NOINLINE BOOL ThemeFrameOnSysChar(HWND hwnd, WPARAM ch, LRESULT* plr)
+{
+    FRAME_STATE* pst;
+    int          idx;
+
+    idx = ThemeFrameMnemonic(hwnd, (WCHAR)ch);
+    pst = ThemeFrameFind(hwnd);
+    if (pst)
+    {
+        pst->iMenuActive = idx;          /* assignment (idx may be -1; OpenActiveMenu then no-ops) */
+        pst->fShowAccel  = TRUE;
+    }
+    ThemeFrameOpenActiveMenu(hwnd);
+    ThemeFrameExitMenuMode(hwnd);
+    *plr = 0;
+    /* Consume only when a mnemonic matched -- branchless (sign bit), so no range-checked index reaches
+       the return -> C5045-clean. idx in [-1, N): (idx>>31)+1 == 1 iff idx>=0. */
+    return (BOOL)((idx >> 31) + 1);
+}
+
+static DECLSPEC_NOINLINE BOOL ThemeFrameOnKeyDown(HWND hwnd, WPARAM vk, LRESULT* plr)
+{
+    FRAME_STATE* pst;
+    int          n;
+    int          active;
+
+    pst = ThemeFrameFind(hwnd);
+    if (!pst || (pst->iMenuActive < 0))
+    {
+        return FALSE;  /* only while the keyboard menu cue is up */
+    }
+    n = ThemeFrameMenuCount(hwnd);
+    if (n <= 0)
+    {
+        ThemeFrameExitMenuMode(hwnd);
+        return FALSE;
+    }
+    active = pst->iMenuActive;
+    switch (vk)
+    {
+        case VK_LEFT:
+            pst->iMenuActive = (active - 1 + n) % n;
+            ThemeFrameInvalidateBands(hwnd);
+            *plr = 0;
+            return TRUE;
+        case VK_RIGHT:
+            pst->iMenuActive = (active + 1) % n;
+            ThemeFrameInvalidateBands(hwnd);
+            *plr = 0;
+            return TRUE;
+        case VK_DOWN:
+        case VK_RETURN:
+            /* iMenuActive is already the target; OpenActiveMenu reads it fresh (no index passed). */
+            ThemeFrameOpenActiveMenu(hwnd);
+            ThemeFrameExitMenuMode(hwnd);
+            *plr = 0;
+            return TRUE;
+        case VK_ESCAPE:
+            ThemeFrameExitMenuMode(hwnd);
+            *plr = 0;
+            return TRUE;
+        default:
+            return FALSE;
+    }
+}
+
+static DECLSPEC_NOINLINE void ThemeFrameExtend(HWND hwnd)
+{
+    THEME_MARGINS m;
+
+    if (!g_theme.pfnDwmExtendFrameIntoClientArea)
+    {
+        return;
+    }
+    /* A 1px top sheet-of-glass restores the DWM drop shadow + the top resize-border hairline while we own
+       the rest of the caption. (Shadow extent is a tuning knob.) */
+    m.cxLeftWidth    = 0;
+    m.cxRightWidth   = 0;
+    m.cyTopHeight    = 1;
+    m.cyBottomHeight = 0;
+    (void)g_theme.pfnDwmExtendFrameIntoClientArea(hwnd, &m);
+}
+
+void WINAPI ThemeEnableCustomFrame(HWND hwnd, BOOL fEnable)
+{
+    FRAME_STATE* pst;
+    RECT         rc;
+    UINT         i;
+
+    ThemeResolve();
+    if (fEnable)
+    {
+        pst = ThemeFrameFind(hwnd);
+        if (!pst && (g_theme.cFrames < THEME_MAX_TOPLEVELS))
+        {
+            pst              = &g_theme.rgFrames[g_theme.cFrames++];
+            pst->hwnd        = hwnd;
+            pst->hMenu       = GetMenu(hwnd);
+            pst->idHot       = FB_NONE;
+            pst->idPressed   = FB_NONE;
+            pst->iHotMenu    = -1;
+            pst->iMenuActive = -1;
+            pst->fTracking   = FALSE;
+            pst->fCapturing  = FALSE;
+            pst->fShowAccel  = FALSE;
+            pst->fReserved   = FALSE;
+            /* Detach the menu so the system reserves no NC band and never tracks a phantom bar; we own
+               its draw and popup tracking from here (accelerators still post WM_COMMAND independently). */
+            if (pst->hMenu)
+            {
+                (void)SetMenu(hwnd, NULL);
+            }
+        }
+        ThemeFrameExtend(hwnd);
+        GetWindowRect(hwnd, &rc);
+        (void)SetWindowPos(hwnd, NULL, rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top,
+                           SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        InvalidateRect(hwnd, NULL, TRUE);
+        return;
+    }
+    for (i = 0u; i < g_theme.cFrames; ++i)
+    {
+        if (g_theme.rgFrames[i].hwnd == hwnd)
+        {
+            if (g_theme.rgFrames[i].hMenu)
+            {
+                (void)SetMenu(hwnd, g_theme.rgFrames[i].hMenu);  /* re-attach on opt-out */
+            }
+            while ((i + 1u) < g_theme.cFrames)
+            {
+                g_theme.rgFrames[i] = g_theme.rgFrames[i + 1u];
+                ++i;
+            }
+            --g_theme.cFrames;
+            break;
+        }
+    }
+    GetWindowRect(hwnd, &rc);
+    (void)SetWindowPos(hwnd, NULL, rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top,
+                       SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+DECLSPEC_NOINLINE void WINAPI ThemeToggleDarkMode(HWND hwnd)
+{
+    BOOL fOldEffective;
+    BOOL fNewRequested;
+    BOOL fNewEffective;
+    BOOL fStarted;
+
+    UNREFERENCED_PARAMETER(hwnd);
+    ThemeResolve();
+    fOldEffective = g_theme.fEffectiveDark;
+    fNewRequested = !(g_theme.fManualOverrideActive ? g_theme.fManualDark : ThemeAppsUseDarkMode());
+    g_theme.fManualOverrideActive = TRUE;
+    g_theme.fManualDark           = fNewRequested;
+    fNewEffective = fNewRequested && g_theme.fDarkCapable;
+
+    fStarted = ThemeStartBackgroundTransition(fOldEffective, fNewEffective);
+    ThemeSetProcessDarkModeAllowed(TRUE);
+    g_theme.fRequestedDark = fNewRequested;
+    g_theme.fEffectiveDark = fNewEffective;
+
+    ThemeApplyRegisteredFrames(fNewEffective);
+    if (fStarted && g_theme.fAnimatingBackground)
+    {
+        g_theme.dwAnimationStartTick = GetTickCount();
+        g_theme.dwAnimationSnapTick  = g_theme.dwAnimationStartTick;
+        g_theme.dwCaptionProgress    = 0u;
+    }
+    ThemeSetRegisteredClassBrushes(fNewEffective);
+    ThemeSetRegisteredControlThemes(fNewEffective);
+    ThemeInvalidateRegisteredWindows();
+}
+
+BOOL WINAPI ThemeCustomFrameHandleMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, LRESULT* plr)
+{
+    if (!plr)
+    {
+        return FALSE;
+    }
+    if (!ThemeFrameFind(hwnd))
+    {
+        return FALSE;  /* not a custom-frame window */
+    }
+    switch (uMsg)
+    {
+        case WM_NCCALCSIZE:
+            if (wParam)
+            {
+                *plr = ThemeFrameOnNcCalcSize(hwnd, lParam);
+                return TRUE;
+            }
+            return FALSE;
+
+        case WM_NCHITTEST:
+            *plr = ThemeFrameHitTest(hwnd, lParam);
+            return TRUE;
+
+        case WM_NCPAINT:
+            *plr = 0;            /* DWM draws the shadow + resize borders; nothing standard to paint. */
+            return TRUE;
+
+        case WM_NCACTIVATE:
+            /* lParam == -1 means "do not change the non-client area" -> suppress the repaint (parity). */
+            if ((LPARAM)-1 != lParam)
+            {
+                ThemeFrameInvalidateBands(hwnd);
+            }
+            *plr = (LRESULT)TRUE;  /* we own the caption; keep it active-looking */
+            return TRUE;
+
+        case WM_PAINT:
+            return ThemeFramePaintMessage(hwnd, plr);
+
+        /* Let DefWindowProc store the new title/icon, then repaint our caption. The LITERAL message id --
+           not the switch-narrowed uMsg -- feeds DefWindowProc so no range-checked value reaches it
+           (C5045-safe; the same idiom ThemeHandleWindowMessage uses for WM_NCACTIVATE/WM_NCPAINT). */
+        case WM_SETTEXT:
+            *plr = DefWindowProc(hwnd, WM_SETTEXT, wParam, lParam);
+            ThemeFrameInvalidateBands(hwnd);
+            return TRUE;
+
+        case WM_SETICON:
+            *plr = DefWindowProc(hwnd, WM_SETICON, wParam, lParam);
+            ThemeFrameInvalidateBands(hwnd);
+            return TRUE;
+
+        case WM_ACTIVATE:
+        case WM_DWMCOMPOSITIONCHANGED:
+            ThemeFrameExtend(hwnd);
+            ThemeFrameInvalidateBands(hwnd);
+            return FALSE;  /* let default activation proceed too */
+
+        case WM_NCMOUSEMOVE:
+            ThemeFrameOnNcMouseMove(hwnd, wParam);
+            return FALSE;
+
+        case WM_NCMOUSELEAVE:
+            ThemeFrameOnNcMouseLeave(hwnd);
+            return FALSE;
+
+        case WM_NCLBUTTONDOWN:
+            return ThemeFrameOnNcLButtonDown(hwnd, wParam, plr);
+
+        case WM_NCLBUTTONDBLCLK:
+            return ThemeFrameOnNcLButtonDblClk(hwnd, wParam, plr);
+
+        case WM_NCRBUTTONUP:
+            return ThemeFrameOnNcRButtonUp(hwnd, wParam, lParam, plr);
+
+        /* Caption-button press uses mouse capture, so the drag/release arrive as client messages. */
+        case WM_MOUSEMOVE:
+            ThemeFrameOnMouseMoveCapture(hwnd, lParam);
+            return FALSE;
+
+        case WM_LBUTTONUP:
+            return ThemeFrameOnLButtonUpCapture(hwnd, lParam, plr);
+
+        case WM_CAPTURECHANGED:
+            ThemeFrameOnCaptureChanged(hwnd);
+            return FALSE;
+
+        /* Keyboard menu activation (Alt / F10 / mnemonics / arrows). */
+        case WM_SYSKEYDOWN:
+            return ThemeFrameOnSysKeyDown(hwnd, wParam, plr);
+
+        case WM_SYSKEYUP:
+            return ThemeFrameOnSysKeyUp(hwnd, wParam, plr);
+
+        case WM_SYSCHAR:
+            return ThemeFrameOnSysChar(hwnd, wParam, plr);
+
+        case WM_KEYDOWN:
+            return ThemeFrameOnKeyDown(hwnd, wParam, plr);
+
+        default:
+            return FALSE;
+    }
 }
 
 typedef BOOL (WINAPI* PFN_THEMECANUSEDARKMODE)(void);
