@@ -45,6 +45,14 @@ void WINAPI DwmFrameSetDark(HWND hwnd, BOOL fDark);
    Use in place of DwmFrameRender on the light/dark toggle and on a system theme change. */
 void WINAPI DwmFrameAnimateTheme(HWND hwnd, BOOL fDark);
 
+/* Select the window backdrop: 1 = solid caption (native overlapped-window look, the default), 2 = Mica,
+   3 = Acrylic. Mica/Acrylic opt into DWM's system backdrop (DWMWA_SYSTEMBACKDROP_TYPE) with a transparent
+   surface + fully extended frame; DWM composites the material. Switchable at runtime. */
+void WINAPI DwmFrameSetBackdrop(HWND hwnd, int iType);
+#define DWMFRAME_BACKDROP_SOLID    1
+#define DWMFRAME_BACKDROP_MICA     2
+#define DWMFRAME_BACKDROP_ACRYLIC  3
+
 /* Non-client message handler reproducing DefWindowProc's frame: WM_NCCALCSIZE removes the standard NC so
    our DComp caption owns it; WM_NCHITTEST follows win32kfull!FindNCHit's region order; button hover/press
    + click (cancel-on-drag-off, SC_MINIMIZE/MAXIMIZE/RESTORE/CLOSE per xxxTrackCaptionButton; the light/

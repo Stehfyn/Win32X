@@ -19,6 +19,7 @@ static HINSTANCE g_hInst;                          /* current instance          
 static WCHAR     g_szTitle[MAX_LOADSTRING];        /* title bar text                    */
 static WCHAR     g_szWindowClass[MAX_LOADSTRING];  /* main window class name            */
 static BOOL      g_fDark;                           /* current system app theme is dark  */
+static int       g_iBackdrop = DWMFRAME_BACKDROP_SOLID; /* window backdrop: solid / Mica / Acrylic ('M' cycles) */
 
 /* Forward declarations. */
 static ATOM             MyRegisterClass(HINSTANCE hInstance);
@@ -268,6 +269,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                 g_fDark = pfnAppThemeIsDarkMode();
                 DwmFrameAnimateTheme(hwnd, g_fDark);   /* crossfade the DComp caption to the new theme */
                 return lr;
+            }
+            break;
+
+        /* 'M' cycles the window backdrop: solid (native look) -> Mica -> Acrylic -> solid. Demonstrates
+           the DComp caption over both a solid fill and DWM's system backdrop. */
+        case WM_KEYDOWN:
+            if ('M' == wParam)
+            {
+                g_iBackdrop = (g_iBackdrop >= DWMFRAME_BACKDROP_ACRYLIC) ? DWMFRAME_BACKDROP_SOLID
+                                                                         : (g_iBackdrop + 1);
+                DwmFrameSetBackdrop(hwnd, g_iBackdrop);
             }
             break;
 

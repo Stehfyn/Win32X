@@ -211,8 +211,13 @@ typedef HRESULT (WINAPI* PFN_DWF_GETATTR)(HWND, DWORD, void*, DWORD);
 #define DWF_DWMWA_EXTENDED_FRAME_BOUNDS    9
 #define DWF_DWMWA_WINDOW_CORNER_PREFERENCE 33
 #define DWF_DWMWA_BORDER_COLOR             34
+#define DWF_DWMWA_SYSTEMBACKDROP_TYPE      38
 #define DWF_DWMWCP_ROUND                   2
 #define DWF_DWMWA_COLOR_DEFAULT            0xFFFFFFFFu
+/* DWM_SYSTEMBACKDROP_TYPE: composited by DWM (wuceffects luminosity-blend) when the app opts in. */
+#define DWF_DWMSBT_NONE                    1
+#define DWF_DWMSBT_MAINWINDOW             2  /* Mica  (static blurred wallpaper) */
+#define DWF_DWMSBT_TRANSIENTWINDOW        3  /* Acrylic (live host blur) */
 
 static HMODULE         g_dwfDwmapi;
 static PFN_DWF_EXTEND  g_dwfExtend;
@@ -249,6 +254,10 @@ typedef struct DWF_STATE
     BOOL                  fDarkFrom;    /* dark state at crossfade start (the "from" color set) */
     BOOL                  fActiveFrom;  /* window-active state at crossfade start */
     float                 flAnimT;      /* current progress 0..1 (advanced by WM_TIMER) */
+    /* Per-button hover/press highlight opacity (uDWM's CButton 160ms glyph-state crossfade). Indexed by
+       DWB_* (DWB_NONE..DWB_CLOSE = 0..4); [0] unused. The same WM_TIMER advances these toward target. */
+    float                 flBtnOpacity[5];
+    int                   iBackdrop;    /* DWMSBT_*: 0/1=solid caption, 2=Mica, 3=Acrylic */
 } DWF_STATE;
 
 static DWF_STATE g_dwf;
@@ -311,6 +320,21 @@ static FORCEINLINE D2D1_COLOR_F DwfGlyphColor(BOOL fDark, BOOL fActive)
 {
     return DwfColor(fActive ? (fDark ? RGB(255, 255, 255) : RGB(0, 0, 0))
                             : (fDark ? RGB(0xAA, 0xAA, 0xAA) : RGB(0x64, 0x64, 0x64)));
+}
+
+/* Target highlight opacity for a button: 1 when pressed, or hot with no other press; else 0. The
+   per-button opacity ramps toward this over the 160ms timeline (uDWM's CButton glyph-state crossfade). */
+static FORCEINLINE float DwfBtnTarget(int id)
+{
+    if (g_dwf.idPressed == id)
+    {
+        return 1.0f;
+    }
+    if ((g_dwf.idHot == id) && (g_dwf.idPressed == DWB_NONE))
+    {
+        return 1.0f;
+    }
+    return 0.0f;
 }
 
 /* Caption band height in client pixels -- the system's own number (GetTitleBarInfoEx close.bottom),
@@ -493,44 +517,41 @@ static FORCEINLINE void DwfDrawGlyph(ID2D1DeviceContext* pDC, ID2D1Brush* pBrush
           D2D1_DRAW_TEXT_OPTIONS_NONE, DWF_MEASURING_MODE_NATURAL);
 }
 
-/* One caption button: hover/press flat fill (Close goes red, like the shell) + the glyph. State comes
-   from g_dwf.idHot/idPressed. cfGlyph is the normal-state glyph color the caller computed (interpolated
-   during a crossfade); hover/press on Close overrides it to white. fDark selects the neutral hover/press
-   fill shade. */
+/* One caption button: hover/press highlight + the glyph. The highlight is alpha-faded by flHover (the
+   per-button 160ms opacity from the WM_TIMER), so hover/press cross-fade in and out instead of snapping --
+   uDWM's CButton glyph-state crossfade. cfGlyph is the caller's normal-state glyph color (itself crossfaded
+   during a theme/activation change); Close's glyph cross-fades to white as its red highlight fades in.
+   fDark selects the neutral hover/press fill shade; the shade switches by press state, the alpha animates. */
 static DECLSPEC_NOINLINE void DwfDrawButton(ID2D1DeviceContext* pDC, const RECT* prc, int id, WCHAR glyph,
-                                            BOOL fDark, D2D1_COLOR_F cfGlyph)
+                                            BOOL fDark, D2D1_COLOR_F cfGlyph, float flHover)
 {
-    BOOL                  fHot;
     BOOL                  fPressed;
-    BOOL                  fFill;
     COLORREF              crFill;
     D2D1_COLOR_F          cf;
     D2D1_RECT_F           rf;
     ID2D1SolidColorBrush* pb;
 
-    fHot     = (g_dwf.idHot == id) && (g_dwf.idPressed == DWB_NONE);
-    fPressed = (g_dwf.idPressed == id) && (g_dwf.idHot == id);
-    crFill   = 0;
-    fFill    = FALSE;
+    fPressed = (g_dwf.idPressed == id);
     if (DWB_CLOSE == id)
     {
-        if (fPressed) { crFill = RGB(0xC8, 0x3C, 0x2F); cfGlyph = DwfColor(RGB(255, 255, 255)); fFill = TRUE; }
-        else if (fHot) { crFill = RGB(0xC4, 0x2B, 0x1C); cfGlyph = DwfColor(RGB(255, 255, 255)); fFill = TRUE; }
+        crFill  = fPressed ? RGB(0xC8, 0x3C, 0x2F) : RGB(0xC4, 0x2B, 0x1C);
+        cfGlyph = DwfLerp(cfGlyph, DwfColor(RGB(255, 255, 255)), flHover);  /* glyph -> white as red rises */
     }
     else
     {
-        if (fPressed) { crFill = fDark ? RGB(0x50, 0x50, 0x50) : RGB(0xCC, 0xCC, 0xCC); fFill = TRUE; }
-        else if (fHot) { crFill = fDark ? RGB(0x3D, 0x3D, 0x3D) : RGB(0xE9, 0xE9, 0xE9); fFill = TRUE; }
+        crFill = fPressed ? (fDark ? RGB(0x50, 0x50, 0x50) : RGB(0xCC, 0xCC, 0xCC))
+                          : (fDark ? RGB(0x3D, 0x3D, 0x3D) : RGB(0xE9, 0xE9, 0xE9));
     }
 
     rf.left   = (FLOAT)prc->left;
     rf.top    = (FLOAT)prc->top;
     rf.right  = (FLOAT)prc->right;
     rf.bottom = (FLOAT)prc->bottom;
-    if (fFill)
+    if (flHover > 0.001f)
     {
-        cf = DwfColor(crFill);
-        pb = NULL;
+        cf   = DwfColor(crFill);
+        cf.a = flHover;                 /* fade the highlight in/out over the timeline */
+        pb   = NULL;
         (void)CCALL(pDC, CreateSolidColorBrush, &cf, NULL, &pb);
         if (pb)
         {
@@ -703,6 +724,14 @@ static DECLSPEC_NOINLINE void DwfBeginTransition(HWND hwnd, BOOL fDarkTo, BOOL f
     DwmFrameRender(hwnd, fDarkTo);          /* frame 0 at t=0 shows the origin colors, then it animates */
 }
 
+/* A button hover/press state changed: arm the 160ms timer (idempotent) so the per-button highlight
+   opacities animate toward their new targets, and paint the current frame now. */
+static FORCEINLINE void DwfKickAnim(HWND hwnd)
+{
+    (void)SetTimer(hwnd, DWF_ANIM_TIMER_ID, DWF_ANIM_INTERVAL, NULL);
+    DwmFrameRender(hwnd, g_dwf.fDark);
+}
+
 void WINAPI DwmFrameRender(HWND hwnd, BOOL fDark)
 {
     ID2D1DeviceContext*   pDC;
@@ -777,23 +806,34 @@ void WINAPI DwmFrameRender(HWND hwnd, BOOL fDark)
         colGlyph  = DwfLerp(DwfGlyphColor(fDk1, fAc1),    DwfGlyphColor(fDark, fActive),   t);
     }
 
-    /* Whole window = client color; caption band painted on top. */
-    col = colClient;
-    CCALL(pDC, Clear, &col);
+    /* Backdrop. Solid (DWMSBT 0/1): fill the whole window with the client color, caption band on top --
+       identical to a native overlapped window. Mica/Acrylic (DWMSBT 2/3): clear to TRANSPARENT and paint
+       NO opaque fill, so DWM's system backdrop (composited beneath this premultiplied-alpha surface) shows
+       through the whole window; only the title + buttons are drawn on top. */
+    if (g_dwf.iBackdrop >= DWF_DWMSBT_MAINWINDOW)
     {
-        ID2D1SolidColorBrush* pCap;
-        D2D1_RECT_F           rcCap;
-
-        pCap = NULL;
-        (void)CCALL(pDC, CreateSolidColorBrush, &colCap, NULL, &pCap);
-        if (pCap)
+        col.r = 0.0f; col.g = 0.0f; col.b = 0.0f; col.a = 0.0f;
+        CCALL(pDC, Clear, &col);
+    }
+    else
+    {
+        col = colClient;
+        CCALL(pDC, Clear, &col);
         {
-            rcCap.left   = 0.0f;
-            rcCap.top    = 0.0f;
-            rcCap.right  = (FLOAT)g_dwf.cxSurface;
-            rcCap.bottom = (FLOAT)capH;
-            CCALL(pDC, FillRectangle, &rcCap, (ID2D1Brush*)pCap);
-            DwfRelease((IUnknown**)&pCap);
+            ID2D1SolidColorBrush* pCap;
+            D2D1_RECT_F           rcCap;
+
+            pCap = NULL;
+            (void)CCALL(pDC, CreateSolidColorBrush, &colCap, NULL, &pCap);
+            if (pCap)
+            {
+                rcCap.left   = 0.0f;
+                rcCap.top    = 0.0f;
+                rcCap.right  = (FLOAT)g_dwf.cxSurface;
+                rcCap.bottom = (FLOAT)capH;
+                CCALL(pDC, FillRectangle, &rcCap, (ID2D1Brush*)pCap);
+                DwfRelease((IUnknown**)&pCap);
+            }
         }
     }
 
@@ -828,10 +868,10 @@ void WINAPI DwmFrameRender(HWND hwnd, BOOL fDark)
 
         if (DwfButtonRects(hwnd, &rcClose, &rcMax, &rcMin, &rcLD))
         {
-            DwfDrawButton(pDC, &rcLD,    DWB_LIGHTDARK, (WCHAR)(fDark ? 0xE706 : 0xE708), fDark, colGlyph);
-            DwfDrawButton(pDC, &rcMin,   DWB_MIN,       (WCHAR)0xE921,                    fDark, colGlyph);
-            DwfDrawButton(pDC, &rcMax,   DWB_MAX,       (WCHAR)(IsZoomed(hwnd) ? 0xE923 : 0xE922), fDark, colGlyph);
-            DwfDrawButton(pDC, &rcClose, DWB_CLOSE,     (WCHAR)0xE8BB,                    fDark, colGlyph);
+            DwfDrawButton(pDC, &rcLD,    DWB_LIGHTDARK, (WCHAR)(fDark ? 0xE706 : 0xE708), fDark, colGlyph, g_dwf.flBtnOpacity[DWB_LIGHTDARK]);
+            DwfDrawButton(pDC, &rcMin,   DWB_MIN,       (WCHAR)0xE921,                    fDark, colGlyph, g_dwf.flBtnOpacity[DWB_MIN]);
+            DwfDrawButton(pDC, &rcMax,   DWB_MAX,       (WCHAR)(IsZoomed(hwnd) ? 0xE923 : 0xE922), fDark, colGlyph, g_dwf.flBtnOpacity[DWB_MAX]);
+            DwfDrawButton(pDC, &rcClose, DWB_CLOSE,     (WCHAR)0xE8BB,                    fDark, colGlyph, g_dwf.flBtnOpacity[DWB_CLOSE]);
         }
     }
 
@@ -844,6 +884,42 @@ void WINAPI DwmFrameRender(HWND hwnd, BOOL fDark)
 DECLSPEC_NOINLINE void WINAPI DwmFrameAnimateTheme(HWND hwnd, BOOL fDark)
 {
     DwfBeginTransition(hwnd, fDark, g_dwf.fWndActive);
+}
+
+/* Select the caption/window backdrop. iType: 0/1 (DWMSBT_NONE) = solid caption (native overlapped-window
+   look); 2 (DWMSBT_MAINWINDOW) = Mica; 3 (DWMSBT_TRANSIENTWINDOW) = Acrylic. For Mica/Acrylic the render
+   clears the surface transparent and DWM composites the system backdrop beneath it (the app does not draw
+   the blur/tint); the frame is extended fully so the backdrop spans the whole window. Both modes are fully
+   supported and switchable at runtime. */
+DECLSPEC_NOINLINE void WINAPI DwmFrameSetBackdrop(HWND hwnd, int iType)
+{
+    DWF_MARGINS m;
+    UINT        t;
+
+    if (!g_dwf.fActive || (g_dwf.hwnd != hwnd))
+    {
+        return;
+    }
+    g_dwf.iBackdrop = iType;
+    DwfApplyDwmFrame(hwnd);   /* make sure dwmapi is loaded + corner preference applied */
+    if (g_dwfSetAttr)
+    {
+        t = (UINT)iType;
+        (void)g_dwfSetAttr(hwnd, DWF_DWMWA_SYSTEMBACKDROP_TYPE, &t, (DWORD)sizeof(t));
+    }
+    if (g_dwfExtend)
+    {
+        if (iType >= DWF_DWMSBT_MAINWINDOW)
+        {
+            m.cxLeft = -1; m.cxRight = -1; m.cyTop = -1; m.cyBottom = -1;  /* full glass: backdrop everywhere */
+        }
+        else
+        {
+            m.cxLeft = 0; m.cxRight = 0; m.cyTop = 1; m.cyBottom = 0;      /* 1px: shadow/border only */
+        }
+        (void)g_dwfExtend(hwnd, &m);
+    }
+    DwmFrameRender(hwnd, g_dwf.fDark);
 }
 
 void WINAPI DwmFrameResize(HWND hwnd)
@@ -1101,16 +1177,34 @@ BOOL WINAPI DwmFrameHandleMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
         case WM_TIMER:
             if (DWF_ANIM_TIMER_ID == wParam)
             {
-                DWORD el = GetTickCount() - g_dwf.dwAnimStart;
-                float t  = (float)el / (float)DWF_ANIM_DURATION;
-                if (t >= 1.0f)
+                BOOL  fMore = FALSE;
+                float step  = (float)DWF_ANIM_INTERVAL / (float)DWF_ANIM_DURATION;  /* linear, ~160ms */
+                int   i;
+
+                /* Caption theme/activation crossfade: time-based progress. */
+                if (g_dwf.fAnim)
                 {
-                    t = 1.0f;
-                    g_dwf.fAnim = FALSE;
-                    (void)KillTimer(hwnd, DWF_ANIM_TIMER_ID);
+                    DWORD el = GetTickCount() - g_dwf.dwAnimStart;
+                    float t  = (float)el / (float)DWF_ANIM_DURATION;
+                    if (t >= 1.0f) { t = 1.0f; g_dwf.fAnim = FALSE; }
+                    g_dwf.flAnimT = t;
+                    if (g_dwf.fAnim) { fMore = TRUE; }
                 }
-                g_dwf.flAnimT = t;
+
+                /* Per-button hover/press highlight: step each opacity toward its target (DWB_1..DWB_4). */
+                for (i = DWB_LIGHTDARK; i <= DWB_CLOSE; ++i)
+                {
+                    float tgt = DwfBtnTarget(i);
+                    float cur = g_dwf.flBtnOpacity[i];
+                    if (cur < tgt)      { cur += step; if (cur > tgt) { cur = tgt; } }
+                    else if (cur > tgt) { cur -= step; if (cur < tgt) { cur = tgt; } }
+                    g_dwf.flBtnOpacity[i] = cur;
+                    if (cur != tgt) { fMore = TRUE; }
+                }
+
+                g_dwf.flAnimT = g_dwf.fAnim ? g_dwf.flAnimT : 1.0f;
                 DwmFrameRender(hwnd, g_dwf.fDark);
+                if (!fMore) { (void)KillTimer(hwnd, DWF_ANIM_TIMER_ID); }
                 *plr = 0;
                 return TRUE;
             }
@@ -1122,7 +1216,7 @@ BOOL WINAPI DwmFrameHandleMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
             if (g_dwf.idHot != id)
             {
                 g_dwf.idHot = id;
-                DwmFrameRender(hwnd, g_dwf.fDark);
+                DwfKickAnim(hwnd);
             }
             return FALSE;
 
@@ -1131,7 +1225,7 @@ BOOL WINAPI DwmFrameHandleMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
             if (g_dwf.idHot != DWB_NONE)
             {
                 g_dwf.idHot = DWB_NONE;
-                DwmFrameRender(hwnd, g_dwf.fDark);
+                DwfKickAnim(hwnd);
             }
             return FALSE;
 
@@ -1143,7 +1237,7 @@ BOOL WINAPI DwmFrameHandleMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
                 g_dwf.idHot      = id;
                 g_dwf.fCapturing = TRUE;
                 (void)SetCapture(hwnd);
-                DwmFrameRender(hwnd, g_dwf.fDark);
+                DwfKickAnim(hwnd);
                 *plr = 0;
                 return TRUE;
             }
@@ -1159,7 +1253,7 @@ BOOL WINAPI DwmFrameHandleMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
                 if (g_dwf.idHot != id)
                 {
                     g_dwf.idHot = id;
-                    DwmFrameRender(hwnd, g_dwf.fDark);
+                    DwfKickAnim(hwnd);
                 }
             }
             return FALSE;
@@ -1175,7 +1269,7 @@ BOOL WINAPI DwmFrameHandleMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
                 g_dwf.fCapturing = FALSE;
                 g_dwf.idPressed  = DWB_NONE;
                 (void)ReleaseCapture();
-                DwmFrameRender(hwnd, g_dwf.fDark);
+                DwfKickAnim(hwnd);
                 if ((DWB_NONE != pressed) && (pressed == id))
                 {
                     DwfButtonAction(hwnd, pressed, pfnToggle);
@@ -1190,7 +1284,7 @@ BOOL WINAPI DwmFrameHandleMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
             {
                 g_dwf.fCapturing = FALSE;
                 g_dwf.idPressed  = DWB_NONE;
-                DwmFrameRender(hwnd, g_dwf.fDark);
+                DwfKickAnim(hwnd);
             }
             return FALSE;
 
