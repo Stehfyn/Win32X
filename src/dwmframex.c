@@ -153,6 +153,11 @@ typedef struct ID2D1DeviceContextVtbl
     void    (STDMETHODCALLTYPE* SetTransform)(ID2D1DeviceContext*, const D2D1_MATRIX_3X2_F*); /* slot 30 */
     void*   rsvd4[16];  /* slots 31..46: GetTransform..PopAxisAlignedClip */
     void    (STDMETHODCALLTYPE* Clear)(ID2D1DeviceContext*, const D2D1_COLOR_F*);             /* slot 47 */
+    void*   rsvd5[14];  /* 48..61: BeginDraw,EndDraw,GetPixelFormat,SetDpi,GetDpi,GetSize,GetPixelSize,
+                           GetMaximumBitmapSize,IsSupported,CreateBitmap,CreateBitmapFromWicBitmap,
+                           CreateColorContext(x3) */
+    HRESULT (STDMETHODCALLTYPE* CreateBitmapFromDxgiSurface)(ID2D1DeviceContext*, IDXGISurface*,
+            const D2D1_BITMAP_PROPERTIES1*, ID2D1Bitmap1**);                                  /* slot 62 */
 } ID2D1DeviceContextVtbl;
 struct ID2D1DeviceContext { const ID2D1DeviceContextVtbl* lpVtbl; };
 
@@ -239,6 +244,7 @@ typedef struct DWF_STATE
     IDWriteFactory*       pDWrite;
     IDWriteTextFormat*    pTextFormat;
     IDWriteTextFormat*    pIconFormat;
+    ID2D1Bitmap1*         pIconBmp;     /* cached high-res caption icon (D3D11 texture -> D2D bitmap) */
     UINT                  cxSurface;
     UINT                  cySurface;
     BOOL                  fActive;      /* pipeline alive (DwmFrameActive), NOT window-activation */
@@ -261,6 +267,8 @@ typedef struct DWF_STATE
 } DWF_STATE;
 
 static DWF_STATE g_dwf;
+static BOOL      g_dwfIconTried;       /* attempt the (high-res) caption icon build at most once */
+static BOOL      g_dwfFramePublished;  /* SWP_FRAMECHANGED reported once, on the first WM_ACTIVATE */
 
 /* ---- helpers ------------------------------------------------------------------------------------ */
 
@@ -631,7 +639,9 @@ BOOL WINAPI DwmFrameInit(HWND hwnd)
     }
     DwmFrameDestroy(hwnd);
     SecureZeroMemory(&g_dwf, sizeof(g_dwf));
-    g_dwf.hwnd = hwnd;
+    g_dwf.hwnd          = hwnd;
+    g_dwfIconTried      = FALSE;
+    g_dwfFramePublished = FALSE;
 
     /* Each COM creation call NULLs its out-pointer on failure, so we gate the next step on the pointer
        rather than on an HRESULT integer (which the Spectre analyzer treats as a range-checked index
@@ -730,6 +740,124 @@ static FORCEINLINE void DwfKickAnim(HWND hwnd)
 {
     (void)SetTimer(hwnd, DWF_ANIM_TIMER_ID, DWF_ANIM_INTERVAL, NULL);
     DwmFrameRender(hwnd, g_dwf.fDark);
+}
+
+/* Build the cached caption icon ONCE, high-res, via a D3D11 texture: take the window's big icon, rasterize
+   it at its native resolution into a premultiplied BGRA DIB, upload that as an ID3D11Texture2D, wrap the
+   texture's DXGI surface as an ID2D1Bitmap1, and let DrawBitmap downscale it to the caption with linear
+   filtering (crisp at any DPI, unlike the 16px small icon). Attempted at most once. */
+static DECLSPEC_NOINLINE void DwfEnsureIcon(HWND hwnd)
+{
+    HICON                   hIcon;
+    ICONINFO                ii;
+    BITMAP                  bm;
+    BITMAPINFO              biH;
+    HDC                     hdcScreen;
+    HDC                     hdcMem;
+    HBITMAP                 hDib;
+    HBITMAP                 hOld;
+    void*                   pBits;
+    BYTE*                   p;
+    int                     n;
+    int                     i;
+    ID3D11Texture2D*        pTex;
+    IDXGISurface*           pSurf;
+    D3D11_TEXTURE2D_DESC    td;
+    D3D11_SUBRESOURCE_DATA  sd;
+    D2D1_BITMAP_PROPERTIES1 bp;
+
+    if (g_dwf.pIconBmp || g_dwfIconTried || !g_dwf.pD3DDevice || !g_dwf.pD2DContext)
+    {
+        return;
+    }
+    g_dwfIconTried = TRUE;
+
+    hIcon = (HICON)SendMessageW(hwnd, WM_GETICON, ICON_BIG, 0);
+    if (!hIcon) { hIcon = (HICON)SendMessageW(hwnd, WM_GETICON, ICON_SMALL2, 0); }
+    if (!hIcon) { hIcon = (HICON)GetClassLongPtrW(hwnd, GCLP_HICON); }
+    if (!hIcon) { hIcon = (HICON)GetClassLongPtrW(hwnd, GCLP_HICONSM); }
+    if (!hIcon) { hIcon = LoadIconW(NULL, IDI_APPLICATION); }
+    if (!hIcon) { return; }
+
+    /* Native icon resolution (use the highest available frame -> high-res source). */
+    n = 32;
+    SecureZeroMemory(&ii, sizeof(ii));
+    if (GetIconInfo(hIcon, &ii))
+    {
+        if (ii.hbmColor && (0 != GetObjectW(ii.hbmColor, (int)sizeof(bm), &bm))) { n = bm.bmWidth; }
+        if (ii.hbmColor) { (void)DeleteObject(ii.hbmColor); }
+        if (ii.hbmMask)  { (void)DeleteObject(ii.hbmMask); }
+    }
+    if (n < 16)  { n = 16; }
+    if (n > 256) { n = 256; }
+
+    SecureZeroMemory(&biH, sizeof(biH));
+    biH.bmiHeader.biSize        = (DWORD)sizeof(BITMAPINFOHEADER);
+    biH.bmiHeader.biWidth       = n;
+    biH.bmiHeader.biHeight      = -n;            /* top-down */
+    biH.bmiHeader.biPlanes      = 1;
+    biH.bmiHeader.biBitCount    = 32;
+    biH.bmiHeader.biCompression = BI_RGB;
+
+    pBits     = NULL;
+    pTex      = NULL;
+    pSurf     = NULL;
+    hdcScreen = GetDC(NULL);
+    hdcMem    = CreateCompatibleDC(hdcScreen);
+    hDib      = CreateDIBSection(hdcScreen, &biH, DIB_RGB_COLORS, &pBits, NULL, 0u);
+    if (hdcScreen) { (void)ReleaseDC(NULL, hdcScreen); }
+
+    if (hdcMem && hDib && pBits)
+    {
+        hOld = (HBITMAP)SelectObject(hdcMem, hDib);
+        (void)DrawIconEx(hdcMem, 0, 0, hIcon, n, n, 0u, NULL, DI_NORMAL);
+        (void)GdiFlush();
+        (void)SelectObject(hdcMem, hOld);
+
+        /* DrawIconEx gives straight-alpha BGRA; premultiply for the premultiplied D2D bitmap. */
+        p = (BYTE*)pBits;
+        for (i = 0; i < n * n; ++i)
+        {
+            UINT a = p[3];
+            p[0] = (BYTE)(((UINT)p[0] * a) / 255u);
+            p[1] = (BYTE)(((UINT)p[1] * a) / 255u);
+            p[2] = (BYTE)(((UINT)p[2] * a) / 255u);
+            p += 4;
+        }
+
+        SecureZeroMemory(&td, sizeof(td));
+        td.Width            = (UINT)n;
+        td.Height           = (UINT)n;
+        td.MipLevels        = 1u;
+        td.ArraySize        = 1u;
+        td.Format           = DXGI_FORMAT_B8G8R8A8_UNORM;
+        td.SampleDesc.Count = 1u;
+        td.Usage            = D3D11_USAGE_DEFAULT;
+        td.BindFlags        = D3D11_BIND_SHADER_RESOURCE;
+        sd.pSysMem          = pBits;
+        sd.SysMemPitch      = (UINT)(n * 4);
+        sd.SysMemSlicePitch = 0u;
+        (void)CCALL(g_dwf.pD3DDevice, CreateTexture2D, &td, &sd, &pTex);
+        if (pTex)
+        {
+            (void)CCALL((IUnknown*)pTex, QueryInterface, &IID_IDXGISurface, (void**)&pSurf);
+        }
+        if (pSurf)
+        {
+            bp.pixelFormat.format    = DXGI_FORMAT_B8G8R8A8_UNORM;
+            bp.pixelFormat.alphaMode = D2D1_ALPHA_MODE_PREMULTIPLIED;
+            bp.dpiX                  = 96.0f;
+            bp.dpiY                  = 96.0f;
+            bp.bitmapOptions         = D2D1_BITMAP_OPTIONS_NONE;
+            bp.colorContext          = NULL;
+            (void)CCALL(g_dwf.pD2DContext, CreateBitmapFromDxgiSurface, pSurf, &bp, &g_dwf.pIconBmp);
+        }
+    }
+
+    DwfRelease((IUnknown**)&pSurf);
+    DwfRelease((IUnknown**)&pTex);
+    if (hDib)   { (void)DeleteObject(hDib); }
+    if (hdcMem) { (void)DeleteDC(hdcMem); }
 }
 
 void WINAPI DwmFrameRender(HWND hwnd, BOOL fDark)
@@ -837,6 +965,38 @@ void WINAPI DwmFrameRender(HWND hwnd, BOOL fDark)
         }
     }
 
+    /* High-res caption system icon, placed EXACTLY as win32kfull!DrawCaptionIcon does: the icon sits in a
+       caption-height square slot at the caption-left (rc.left = 0 here, no system frame), sized
+       SM_CXSMICON x SM_CYSMICON for the window DPI and centered in that slot --
+           X = rc.left + (capH - SM_CXSMICON)/2 + 1,   Y = rc.top + (capH - SM_CYSMICON)/2.
+       The title text then starts at rc.left + capH (xxxDrawCaptionTemp: rc.left += capH). The D3D11-texture
+       source is downscaled here with linear filtering for crispness. */
+    {
+        UINT dpi = GetDpiForWindow(hwnd);
+        int  iw;
+        int  ih;
+        int  ix;
+        int  iy;
+
+        if (0u == dpi) { dpi = 96u; }
+        iw = GetSystemMetricsForDpi(SM_CXSMICON, dpi);
+        ih = GetSystemMetricsForDpi(SM_CYSMICON, dpi);
+        ix = (capH - iw) / 2 + 1;
+        iy = (capH - ih) / 2;
+
+        DwfEnsureIcon(hwnd);
+        if (g_dwf.pIconBmp)
+        {
+            D2D1_RECT_F ri;
+            ri.left   = (FLOAT)ix;
+            ri.top    = (FLOAT)iy;
+            ri.right  = (FLOAT)(ix + iw);
+            ri.bottom = (FLOAT)(iy + ih);
+            CCALL(pDC, DrawBitmap, (ID2D1Bitmap*)g_dwf.pIconBmp, &ri, 1.0f,
+                  D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, NULL);
+        }
+    }
+
     /* Caption title (DWrite, caption font). cch is not range-checked before the draw (szTitle[0] gates),
        so no Spectre index reaches the DrawText call. */
     szTitle[0] = 0;
@@ -847,7 +1007,7 @@ void WINAPI DwmFrameRender(HWND hwnd, BOOL fDark)
         (void)CCALL(pDC, CreateSolidColorBrush, &colText, NULL, &pBrush);
         if (pBrush)
         {
-            leftPad       = GetSystemMetrics(SM_CXSMICON) + GetSystemMetrics(SM_CXFRAME) * 2;
+            leftPad       = capH;   /* xxxDrawCaptionTemp: title starts one caption-height in (icon slot) */
             rcText.left   = (FLOAT)leftPad;
             rcText.top    = 0.0f;
             rcText.right  = (FLOAT)g_dwf.cxSurface;
@@ -952,6 +1112,7 @@ DECLSPEC_NOINLINE void WINAPI DwmFrameDestroy(HWND hwnd)
     g_dwf.fAnim = FALSE;
     DwfRelease((IUnknown**)&g_dwf.pTextFormat);
     DwfRelease((IUnknown**)&g_dwf.pIconFormat);
+    DwfRelease((IUnknown**)&g_dwf.pIconBmp);
     DwfRelease((IUnknown**)&g_dwf.pDWrite);
     DwfRelease((IUnknown**)&g_dwf.pSurface);
     DwfRelease((IUnknown**)&g_dwf.pVisual);
@@ -1167,10 +1328,23 @@ BOOL WINAPI DwmFrameHandleMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
 
         case WM_NCACTIVATE:
             DwfBeginTransition(hwnd, g_dwf.fDark, (wParam != FALSE));
-            *plr = (LRESULT)TRUE;   /* we own the caption; suppress the standard NC repaint */
+            /* Propagate to DefWindowProc with lParam -1 (update the window's activation state, do NOT
+               repaint the standard NC -- we own the caption) so DWM TRACKS activation and renders the
+               correct active/inactive frame. Returning TRUE without this froze DWM's frame, which only
+               corrected when the real foreground changed (the "click the desktop to fix it" symptom). */
+            *plr = DefWindowProcW(hwnd, WM_NCACTIVATE, wParam, (LPARAM)-1);
             return TRUE;
 
         case WM_ACTIVATE:
+            /* Report the frame change on the FIRST activation during creation: SWP_FRAMECHANGED forces the
+               WM_NCCALCSIZE that establishes our NC and settles the DWM extended frame. (DWM's custom-frame
+               contract: do this from WM_ACTIVATE, not before the window is shown.) One-shot. */
+            if (!g_dwfFramePublished)
+            {
+                g_dwfFramePublished = TRUE;
+                (void)SetWindowPos(hwnd, NULL, 0, 0, 0, 0,
+                                   SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            }
             DwfBeginTransition(hwnd, g_dwf.fDark, (LOWORD(wParam) != WA_INACTIVE));
             return FALSE;
 

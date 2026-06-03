@@ -1,0 +1,10 @@
+
+Microsoft (R) Windows Debugger Version 10.0.19041.5738 AMD64
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+
+Loading Dump File [C:\dev\Win32X\WindowsSystem32uDWM.dll]
+Could not open dump file [C:WindowsSystem32uDWM.dll], Win32 error 0n2
+    "The system cannot find the file specified."
+Debuggee initialization failed, Win32 error 0n2
+The system cannot find the file specified.

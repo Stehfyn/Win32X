@@ -145,15 +145,11 @@ static FORCEINLINE BOOL InitInstance(HINSTANCE hInstance)
        and render. */
     if (pfnAppDwmFrameInit(hwnd))
     {
-        /* Publish the frame change ONCE at creation: SWP_FRAMECHANGED forces the WM_NCCALCSIZE that removes
-           the standard NC (so our DComp caption owns the whole window) and settles the DWM extended frame
-           set up in DwmFrameInit. Seed the caption shade first, then invalidate the whole window a single
-           time -- the WM_PAINT it raises (after ShowWindow) renders the caption at the right moment, in the
-           right theme. Rendering here, before the frame change is published and before the window is shown,
-           is the mistimed paint that left the caption stale until a resize. */
+        /* Seed the caption shade so the first paint is the right theme. The frame change (SWP_FRAMECHANGED
+           that forces WM_NCCALCSIZE + settles the DWM extended frame) is NOT published here -- it is reported
+           on the first WM_ACTIVATE during creation, inside DwmFrameHandleMessage (DWM's custom-frame
+           contract). Invalidate once so a clean WM_PAINT renders the caption after the window is shown. */
         DwmFrameSetDark(hwnd, g_fDark);
-        SetWindowPos(hwnd, NULL, 0, 0, 0, 0,
-                     SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         InvalidateRect(hwnd, NULL, TRUE);
     }
 
