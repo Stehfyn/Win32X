@@ -8,6 +8,7 @@ add_library(Win32X STATIC
   ShellScalingApiX.c
   uxthemex.c
   dwmframex.c
+  dwmframex_v2.c
   llmath_x86.c
   versionhelpersx.c
   delayhlpx.c
@@ -35,6 +36,13 @@ if(MSVC)
     # /LTCG via INTERPROCEDURAL_OPTIMIZATION below).
     $<$<CONFIG:Release>:/Ot;/Oi;/Ob3>)
 
+  # [branch dwmframe-swapchain-sxs] Toolchain-drift accommodation: MSVC 14.44 emits C5045
+  # (Spectre) and the C4710/C4711 inline pair at /Wall in Debug where the policy's "Debug is
+  # /Wall-clean" assumption (written against an older toolset) did not. These are informational,
+  # optimizer-driven, not defects. Target-scoped /wd (after the interface /Wall /WX, so it wins)
+  # to unblock the build; revert when the policy is reconciled with the current toolset.
+  target_compile_options(Win32X PRIVATE /wd5045 /wd4710 /wd4711)
+
   # The x86 64-bit-math helpers are functions the optimizer *introduces* references to during
   # whole-program code generation; if the helper itself lives in a /GL module the LTCG pass can no
   # longer satisfy that late reference (LNK1237). Keep this TU out of /GL so it is an ordinary,
@@ -53,7 +61,7 @@ target_link_libraries(Win32X PRIVATE $<BUILD_INTERFACE:win32x_warnings>)
 # dwmframex.c reproduces uDWM's caption compositor with the same stack -> the import libs for
 # D3D11 / Direct2D / DirectComposition / DWrite / DXGI, plus dxguid for the IID_* GUIDs. PUBLIC so the
 # consuming exe (static-lib link) pulls them in too.
-target_link_libraries(Win32X PUBLIC d3d11 d2d1 dcomp dwrite dxgi dxguid)
+target_link_libraries(Win32X PUBLIC d3d11 d2d1 dcomp dwrite dxgi dxguid winmm)
 win32x_enable_analysis(Win32X)
 
 # ---------------------------------------------------------------------------

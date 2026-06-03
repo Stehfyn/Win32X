@@ -63,3 +63,50 @@ add_custom_command(TARGET WindowsProject PRE_BUILD
           -File "${CMAKE_CURRENT_SOURCE_DIR}/prebuild.ps1"
   COMMENT "WindowsProject dev: kill running instance + unregister handler (free exe for link)"
   VERBATIM)
+
+# ---------------------------------------------------------------------------
+# WindowsProject_v2 -- side-by-side V2: identical app, driven by the V2 flip-swapchain
+# caption compositor (DwmFrame*2 symbols / dwmframex_v2.c). Runs concurrently with V1
+# (distinct window class + title). Build/run both to A/B the compositor implementations.
+# ---------------------------------------------------------------------------
+add_executable(WindowsProject_v2 WIN32
+  main_v2.c
+  WindowsProject.rc
+  framework.h
+  targetver.h
+  Resource.h
+  WindowsProject.h
+  app.manifest)
+
+target_precompile_headers(WindowsProject_v2 PRIVATE framework.h)
+
+target_link_libraries(WindowsProject_v2 PRIVATE
+  Win32X::Win32X
+  Win32X::warnings
+  kernel32 user32 gdi32 winspool comdlg32 advapi32
+  shell32 ole32 oleaut32 uuid odbc32 odbccp32)
+
+target_compile_definitions(WindowsProject_v2 PRIVATE WIN32 _WINDOWS)
+
+set_target_properties(WindowsProject_v2 PROPERTIES INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+
+if(MSVC)
+  target_compile_options(WindowsProject_v2 PRIVATE
+    /permissive-
+    $<$<CONFIG:Release>:/Gy;/Ot;/Oi;/Ob3>)
+  target_link_options(WindowsProject_v2 PRIVATE
+    /NODEFAULTLIB
+    /ENTRY:wWinMainCRTStartup
+    /DEBUG
+    /DELAYLOAD:user32.dll
+    /DELAYLOAD:ole32.dll
+    /DELAYLOAD:advapi32.dll
+    /DELAYLOAD:shell32.dll)
+  if(CMAKE_SIZEOF_VOID_P EQUAL 4)
+    target_link_options(WindowsProject_v2 PRIVATE /INCLUDE:___delayLoadHelper2@8)
+  else()
+    target_link_options(WindowsProject_v2 PRIVATE /INCLUDE:__delayLoadHelper2)
+  endif()
+endif()
+
+win32x_enable_analysis(WindowsProject_v2)

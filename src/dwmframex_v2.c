@@ -23,9 +23,12 @@
 
 #include <windows.h>
 #include <dxgi.h>
+#include <dxgi1_2.h>   /* V2: IDXGIFactory2::CreateSwapChainForComposition, DXGI_SWAP_CHAIN_DESC1 */
+#include <dxgi1_3.h>   /* V2: IDXGISwapChain2: GetFrameLatencyWaitableObject/SetSourceSize/SetMaximumFrameLatency */
 #include <d3d11.h>
 #include <d2d1.h>
 #include <d2d1_1.h>
+#include <timeapi.h>   /* V2: timeBeginPeriod/timeEndPeriod (WIN32_LEAN_AND_MEAN drops mmsystem) */
 /* NOT <dwrite.h>: it is C++-only (enum-class underlying-type ':' syntax, static_cast). We forward-declare
    IDWriteFactory/IDWriteTextFormat and pass its enums as plain UINT constants (defined below).
    NOT <dcomp.h>: its C ("CINTERFACE") path is broken -- IDCompositionVisual has overloaded methods
@@ -33,13 +36,11 @@
    expressed in a C struct. So we hand-declare exactly the DirectComposition interfaces we use, as C
    vtable structs, with slot indices read straight out of dcomp.h. */
 
-#include "Win32X/dwmframex.h"
+#include "Win32X/dwmframex2.h"
 
-/* CRT-free: the compiler emits a reference to _fltused as soon as a translation unit uses floating
-   point (the D2D colors / 3x2 matrix here). /NODEFAULTLIB drops the CRT that would define it, so we
-   supply it ourselves -- one definition for the whole image. */
+/* CRT-free: _fltused is defined once for the whole image by dwmframex.c (this V2 TU lives in the same
+   static lib, so it must NOT redefine it -- that is LNK4006). Just reference the shared definition. */
 extern int _fltused;
-int _fltused = 0x9875;
 
 /* ---- our own COBJMACROS: a COM call is a vtable deref. ------------------------------------------ */
 #define CCALL(p, m, ...)  ((p)->lpVtbl->m((p), __VA_ARGS__))
@@ -151,13 +152,18 @@ typedef struct ID2D1DeviceContextVtbl
     void    (STDMETHODCALLTYPE* DrawText)(ID2D1DeviceContext*, const WCHAR*, UINT32, IDWriteTextFormat*, const D2D1_RECT_F*, ID2D1Brush*, D2D1_DRAW_TEXT_OPTIONS, UINT /*DWRITE_MEASURING_MODE*/); /* 27 */
     void*   rsvd3[2];   /* slots 28..29: DrawTextLayout, DrawGlyphRun */
     void    (STDMETHODCALLTYPE* SetTransform)(ID2D1DeviceContext*, const D2D1_MATRIX_3X2_F*); /* slot 30 */
-    void*   rsvd4[16];  /* slots 31..46: GetTransform..PopAxisAlignedClip */
+    void*   rsvd4a[14]; /* slots 31..44: GetTransform..RestoreDrawingState */
+    void    (STDMETHODCALLTYPE* PushAxisAlignedClip)(ID2D1DeviceContext*, const D2D1_RECT_F*, D2D1_ANTIALIAS_MODE); /* 45 */
+    void    (STDMETHODCALLTYPE* PopAxisAlignedClip)(ID2D1DeviceContext*);                     /* slot 46 */
     void    (STDMETHODCALLTYPE* Clear)(ID2D1DeviceContext*, const D2D1_COLOR_F*);             /* slot 47 */
-    void*   rsvd5[14];  /* 48..61: BeginDraw,EndDraw,GetPixelFormat,SetDpi,GetDpi,GetSize,GetPixelSize,
-                           GetMaximumBitmapSize,IsSupported,CreateBitmap,CreateBitmapFromWicBitmap,
-                           CreateColorContext(x3) */
+    void    (STDMETHODCALLTYPE* BeginDraw)(ID2D1DeviceContext*);                              /* slot 48 */
+    HRESULT (STDMETHODCALLTYPE* EndDraw)(ID2D1DeviceContext*, void* /*D2D1_TAG**/, void*);    /* slot 49 */
+    void*   rsvd5[12];  /* 50..61: GetPixelFormat,SetDpi,GetDpi,GetSize,GetPixelSize,GetMaximumBitmapSize,
+                           IsSupported,CreateBitmap,CreateBitmapFromWicBitmap,CreateColorContext(x3) */
     HRESULT (STDMETHODCALLTYPE* CreateBitmapFromDxgiSurface)(ID2D1DeviceContext*, IDXGISurface*,
             const D2D1_BITMAP_PROPERTIES1*, ID2D1Bitmap1**);                                  /* slot 62 */
+    void*   rsvd6[11];  /* 63..73: CreateEffect..GetDevice */
+    void    (STDMETHODCALLTYPE* SetTarget)(ID2D1DeviceContext*, ID2D1Image*);                 /* slot 74 */
 } ID2D1DeviceContextVtbl;
 struct ID2D1DeviceContext { const ID2D1DeviceContextVtbl* lpVtbl; };
 
@@ -242,14 +248,20 @@ typedef struct DWF_STATE
     IDCompositionDesktopDevice* pDComp;
     IDCompositionTarget*  pTarget;
     IDCompositionVisual*  pVisual;
-    IDCompositionSurface* pSurface;
+    IDXGISwapChain2*      pSwapchain;   /* V2: visual content = flip-model composition swapchain */
+    ID2D1Bitmap1*         pTargetBmp;   /* persistent D2D target wrapping back buffer 0 (created once) */
+    HANDLE                hFrameWait;   /* GetFrameLatencyWaitableObject -- caller-owned; CloseHandle in destroy */
     IDWriteFactory*       pDWrite;
     IDWriteTextFormat*    pTextFormat;
     IDWriteTextFormat*    pIconFormat;
     ID2D1Bitmap1*         pIconBmp;     /* cached high-res caption icon (D3D11 texture -> D2D bitmap) */
-    UINT                  cxSurface;
-    UINT                  cySurface;
-    BOOL                  fActive;      /* pipeline alive (DwmFrameActive), NOT window-activation */
+    UINT                  cxBuffer;     /* back-buffer allocation (monitor px); regrown only on monitor change */
+    UINT                  cyBuffer;
+    UINT                  cxClient;     /* current client size (presented sub-rect via SetSourceSize, layout) */
+    UINT                  cyClient;
+    BOOL                  fInSizeMove;  /* inside WM_ENTERSIZEMOVE..EXITSIZEMOVE (main loop suspended) */
+    DWORD                 dwLastTick;   /* GetTickCount() at the previous frame (time-based opacity step) */
+    BOOL                  fActive;      /* pipeline alive (DwmFrameActive2), NOT window-activation */
     int                   idHot;        /* DWF_BTN under the cursor, or DWB_NONE */
     int                   idPressed;    /* DWF_BTN currently pressed (captured), or DWB_NONE */
     BOOL                  fTracking;    /* TME_NONCLIENT leave tracking armed */
@@ -298,7 +310,7 @@ static FORCEINLINE D2D1_COLOR_F DwfColor(COLORREF cr)
    0x3FC47AE140000000 = 0.16s; CTimeline<float> default/linear interpolation). The same clock drives the
    dark<->light theme change AND the active<->inactive transition. */
 #define DWF_ANIM_TIMER_ID  ((UINT_PTR)0x0DF00001u)
-#define DWF_ANIM_INTERVAL  8u    /* ~120 Hz tick (smooth on 60/120 Hz panels) */
+#define DWF_ANIM_INTERVAL  1u    /* V2: 1ms tick (timeBeginPeriod defeats coalescing); Present(1) throttles to vblank */
 #define DWF_ANIM_DURATION  160u  /* ms */
 
 static FORCEINLINE D2D1_COLOR_F DwfLerp(D2D1_COLOR_F a, D2D1_COLOR_F b, float t)
@@ -579,20 +591,102 @@ static DECLSPEC_NOINLINE void DwfDrawButton(ID2D1DeviceContext* pDC, const RECT*
     }
 }
 
-/* ---- surface (re)creation ----------------------------------------------------------------------- */
+/* ---- V2 swapchain (re)creation ------------------------------------------------------------------ */
 
-static DECLSPEC_NOINLINE BOOL DwfCreateSurface(UINT cx, UINT cy)
+/* Monitor pixel size of hwnd's monitor (physical px under per-monitor-DPI awareness). */
+static DECLSPEC_NOINLINE void DfwMonitorSize(HWND hwnd, UINT* pcx, UINT* pcy)
 {
-    DwfRelease((IUnknown**)&g_dwf.pSurface);
-    (void)CCALL(g_dwf.pDComp, CreateSurface, cx, cy,
-                DXGI_FORMAT_B8G8R8A8_UNORM, DWF_ALPHA_MODE_PREMULTIPLIED, &g_dwf.pSurface);
-    if (!g_dwf.pSurface)
+    HMONITOR    hMon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY);
+    MONITORINFO mi;
+
+    SecureZeroMemory(&mi, sizeof(mi));
+    mi.cbSize = (DWORD)sizeof(mi);
+    if (GetMonitorInfoW(hMon, &mi))
     {
-        return FALSE;
+        *pcx = (UINT)(mi.rcMonitor.right  - mi.rcMonitor.left);
+        *pcy = (UINT)(mi.rcMonitor.bottom - mi.rcMonitor.top);
     }
-    (void)CCALL(g_dwf.pVisual, SetContent, (IUnknown*)g_dwf.pSurface);
-    g_dwf.cxSurface = cx;
-    g_dwf.cySurface = cy;
+    else
+    {
+        *pcx = (UINT)GetSystemMetrics(SM_CXSCREEN);
+        *pcy = (UINT)GetSystemMetrics(SM_CYSCREEN);
+    }
+    if (*pcx < 1u)      { *pcx = 1u; }
+    if (*pcx > 16384u)  { *pcx = 16384u; }
+    if (*pcy < 1u)      { *pcy = 1u; }
+    if (*pcy > 16384u)  { *pcy = 16384u; }
+}
+
+/* Create (or regrow, on monitor-size growth) the composition swapchain at bufW x bufH, wrap back
+   buffer 0 as the persistent D2D target, and bind the swapchain to the visual. Does NOT Commit (the
+   caller commits once after SetRoot). SYSTEM-VERIFIED (tests/dxgi_probe.c): STRETCH/FLIP_SEQUENTIAL/
+   PREMULTIPLIED/WAITABLE all S_OK; SCALING_NONE returns INVALID_CALL so STRETCH is forced (exact 1:1
+   because the untransformed visual target == SetSourceSize == client size). Returns FALSE on failure. */
+static DECLSPEC_NOINLINE BOOL DfwCreateSwapchain(HWND hwnd, UINT bufW, UINT bufH)
+{
+    IDXGIAdapter*           pAdapter = NULL;
+    IDXGIFactory2*          pFactory = NULL;
+    IDXGISwapChain1*        pSC1     = NULL;
+    IDXGISurface*           pBB      = NULL;
+    DXGI_SWAP_CHAIN_DESC1   scd;
+    D2D1_BITMAP_PROPERTIES1 bp;
+
+    UNREFERENCED_PARAMETER(hwnd);
+
+    DwfRelease((IUnknown**)&g_dwf.pTargetBmp);
+    if (g_dwf.pD2DContext) { CCALL(g_dwf.pD2DContext, SetTarget, NULL); }
+    DwfRelease((IUnknown**)&g_dwf.pSwapchain);
+    g_dwf.hFrameWait = NULL;   /* handle is owned by the released swapchain object */
+
+    SecureZeroMemory(&scd, sizeof(scd));
+    scd.Width              = bufW;
+    scd.Height             = bufH;
+    scd.Format             = DXGI_FORMAT_B8G8R8A8_UNORM;
+    scd.Stereo             = FALSE;
+    scd.SampleDesc.Count   = 1u;
+    scd.SampleDesc.Quality = 0u;
+    scd.BufferUsage        = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    scd.BufferCount        = 3u + 1u + 1u;                     /* ImmersiveWindow TRIPLE_BUFFERED */
+    scd.Scaling            = DXGI_SCALING_STRETCH;             /* required by ForComposition (verified) */
+    scd.SwapEffect         = DXGI_SWAP_EFFECT_FLIP_DISCARD;    /* ImmersiveWindow spec: discard, not sequential */
+    scd.AlphaMode          = DXGI_ALPHA_MODE_PREMULTIPLIED;    /* Mica transparency + flip model */
+    /* EXACT ImmersiveWindow flags: ALLOW_TEARING enables the immediate (sync-interval-0) present that
+       pushes the just-drawn frame without blocking; the synced DO_NOT_SEQUENCE present then holds it at
+       the vblank. Without ALLOW_TEARING the immediate present returns DXGI_ERROR_INVALID_CALL. */
+    scd.Flags              = DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING
+                           | DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH
+                           | DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+
+    (void)CCALL(g_dwf.pDxgiDevice, GetAdapter, &pAdapter);
+    if (pAdapter) { (void)CCALL(pAdapter, GetParent, &IID_IDXGIFactory2, (void**)&pFactory); }
+    if (pFactory) { (void)CCALL(pFactory, CreateSwapChainForComposition, (IUnknown*)g_dwf.pD3DDevice, &scd, NULL, &pSC1); }
+    if (pSC1)     { (void)CCALL((IUnknown*)pSC1, QueryInterface, &IID_IDXGISwapChain2, (void**)&g_dwf.pSwapchain); }
+    DwfRelease((IUnknown**)&pSC1);
+    DwfRelease((IUnknown**)&pFactory);
+    DwfRelease((IUnknown**)&pAdapter);
+    if (!g_dwf.pSwapchain) { return FALSE; }
+
+    g_dwf.hFrameWait = (HANDLE)CCALL0(g_dwf.pSwapchain, GetFrameLatencyWaitableObject);
+    (void)CCALL(g_dwf.pSwapchain, SetMaximumFrameLatency, 1u);
+
+    (void)CCALL(g_dwf.pSwapchain, GetBuffer, 0u, &IID_IDXGISurface, (void**)&pBB);
+    if (pBB)
+    {
+        bp.pixelFormat.format    = DXGI_FORMAT_B8G8R8A8_UNORM;
+        bp.pixelFormat.alphaMode = D2D1_ALPHA_MODE_PREMULTIPLIED;
+        bp.dpiX                  = 96.0f;
+        bp.dpiY                  = 96.0f;
+        bp.bitmapOptions         = D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW;
+        bp.colorContext          = NULL;
+        (void)CCALL(g_dwf.pD2DContext, CreateBitmapFromDxgiSurface, pBB, &bp, &g_dwf.pTargetBmp);
+        DwfRelease((IUnknown**)&pBB);
+    }
+    if (!g_dwf.pTargetBmp) { DwfRelease((IUnknown**)&g_dwf.pSwapchain); g_dwf.hFrameWait = NULL; return FALSE; }
+
+    CCALL(g_dwf.pD2DContext, SetTarget, (ID2D1Image*)g_dwf.pTargetBmp);   /* bound once, never rebound */
+    (void)CCALL(g_dwf.pVisual, SetContent, (IUnknown*)g_dwf.pSwapchain);
+    g_dwf.cxBuffer = bufW;
+    g_dwf.cyBuffer = bufH;
     return TRUE;
 }
 
@@ -630,7 +724,7 @@ static DECLSPEC_NOINLINE void DwfApplyDwmFrame(HWND hwnd)
 
 /* ---- public API --------------------------------------------------------------------------------- */
 
-BOOL WINAPI DwmFrameInit(HWND hwnd)
+BOOL WINAPI DwmFrameInit2(HWND hwnd)
 {
     UINT flags;
     UINT cx;
@@ -640,7 +734,7 @@ BOOL WINAPI DwmFrameInit(HWND hwnd)
     {
         return TRUE;
     }
-    DwmFrameDestroy(hwnd);
+    DwmFrameDestroy2(hwnd);
     SecureZeroMemory(&g_dwf, sizeof(g_dwf));
     g_dwf.hwnd          = hwnd;
     g_dwfIconTried      = FALSE;
@@ -676,8 +770,10 @@ BOOL WINAPI DwmFrameInit(HWND hwnd)
     {
         (void)CCALL(g_dwf.pD2DDevice, CreateDeviceContext, D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
                     &g_dwf.pD2DContext);
-        /* DComp device built ON the D2D device, so its surfaces back BeginDraw(ID2D1DeviceContext). */
-        (void)DCompositionCreateDevice2((IUnknown*)g_dwf.pD2DDevice, &DWF_IID_IDCompositionDesktopDevice,
+        /* V2: DComp on the DXGI device (like ImmersiveWindow), NOT the D2D device. The swapchain -- not a
+           DComp surface -- is the visual content, so DComp must not share/recomposite through our D2D
+           render context (that coupling let DWM sample mid-draw state -> flicker). */
+        (void)DCompositionCreateDevice2((IUnknown*)g_dwf.pDxgiDevice, &DWF_IID_IDCompositionDesktopDevice,
                                         (void**)&g_dwf.pDComp);
     }
     if (g_dwf.pDComp)
@@ -687,16 +783,25 @@ BOOL WINAPI DwmFrameInit(HWND hwnd)
     }
     if (!g_dwf.pD2DContext || !g_dwf.pTarget || !g_dwf.pVisual)
     {
-        DwmFrameDestroy(hwnd);
+        DwmFrameDestroy2(hwnd);
         return FALSE;
     }
 
-    DwfClientSize(hwnd, &cx, &cy);
-    if (!DwfCreateSurface(cx, cy))
     {
-        DwmFrameDestroy(hwnd);
-        return FALSE;
+        UINT bw, bh;
+        DfwMonitorSize(hwnd, &bw, &bh);
+        if (!DfwCreateSwapchain(hwnd, bw, bh))
+        {
+            DwmFrameDestroy2(hwnd);
+            return FALSE;
+        }
     }
+    DwfClientSize(hwnd, &cx, &cy);
+    g_dwf.cxClient = cx;
+    g_dwf.cyClient = cy;
+    /* NO SetSourceSize: the full monitor-sized buffer presents 1:1; the window (hwnd target) clips to the
+       client rect. SetSourceSize+STRETCH would instead blow the client-sized source up to the buffer size. */
+    g_dwf.dwLastTick = GetTickCount();
 
     /* DWrite for the caption title (non-fatal if it fails -- the bar still composites). */
     (void)DWriteCreateFactory(DWF_FACTORY_TYPE_SHARED, &DWF_IID_IDWriteFactory, (IUnknown**)&g_dwf.pDWrite);
@@ -704,7 +809,7 @@ BOOL WINAPI DwmFrameInit(HWND hwnd)
     DwfCreateIconFormat();
 
     (void)CCALL(g_dwf.pTarget, SetRoot, g_dwf.pVisual);
-    (void)CCALL0(g_dwf.pDComp, Commit);
+    (void)CCALL0(g_dwf.pDComp, Commit);   /* the ONLY Commit for the lifetime of the static visual tree */
 
     /* Restore the DWM-drawn frame (shadow / rounded corners / border / extended bounds). */
     DwfApplyDwmFrame(hwnd);
@@ -733,16 +838,15 @@ static DECLSPEC_NOINLINE void DwfBeginTransition(HWND hwnd, BOOL fDarkTo, BOOL f
     g_dwf.dwAnimStart = GetTickCount();
     g_dwf.flAnimT     = 0.0f;
     g_dwf.fAnim       = TRUE;
-    (void)SetTimer(hwnd, DWF_ANIM_TIMER_ID, DWF_ANIM_INTERVAL, NULL);
-    DwmFrameRender(hwnd, fDarkTo);          /* frame 0 at t=0 shows the origin colors, then it animates */
+    g_dwf.dwLastTick  = GetTickCount();
+    DwmFrameRender2(hwnd, fDarkTo);          /* frame 0; the main render loop continues the timeline */
 }
 
 /* A button hover/press state changed: arm the 160ms timer (idempotent) so the per-button highlight
    opacities animate toward their new targets, and paint the current frame now. */
 static FORCEINLINE void DwfKickAnim(HWND hwnd)
 {
-    (void)SetTimer(hwnd, DWF_ANIM_TIMER_ID, DWF_ANIM_INTERVAL, NULL);
-    DwmFrameRender(hwnd, g_dwf.fDark);
+    DwmFrameRender2(hwnd, g_dwf.fDark);   /* immediate feedback; the loop animates the opacity to target */
 }
 
 /* Build the cached caption icon ONCE, high-res, via a D3D11 texture: take the window's big icon, rasterize
@@ -863,11 +967,41 @@ static DECLSPEC_NOINLINE void DwfEnsureIcon(HWND hwnd)
     if (hdcMem) { (void)DeleteDC(hdcMem); }
 }
 
-void WINAPI DwmFrameRender(HWND hwnd, BOOL fDark)
+/* V2: advance the crossfade + per-button opacities by wall-clock. The ImmersiveWindow-style render loop
+   calls DfwRenderEx every frame, so the animation timeline is driven here, not by a WM_TIMER. */
+static void DfwAdvance(void)
+{
+    DWORD now = GetTickCount();
+    float dt  = (float)(now - g_dwf.dwLastTick) / (float)DWF_ANIM_DURATION;
+    int   i;
+
+    g_dwf.dwLastTick = now;
+    if (g_dwf.fAnim)
+    {
+        float t = (float)(now - g_dwf.dwAnimStart) / (float)DWF_ANIM_DURATION;
+        if (t >= 1.0f) { t = 1.0f; g_dwf.fAnim = FALSE; }
+        g_dwf.flAnimT = t;
+    }
+    else
+    {
+        g_dwf.flAnimT = 1.0f;
+    }
+    for (i = DWB_LIGHTDARK; i <= DWB_CLOSE; ++i)
+    {
+        float tgt = DwfBtnTarget(i);
+        float cur = g_dwf.flBtnOpacity[i];
+        if (cur < tgt)      { cur += dt; if (cur > tgt) { cur = tgt; } }
+        else if (cur > tgt) { cur -= dt; if (cur < tgt) { cur = tgt; } }
+        g_dwf.flBtnOpacity[i] = cur;
+    }
+}
+
+static DECLSPEC_NOINLINE void DfwRenderEx(HWND hwnd, BOOL fDark, BOOL fRestart, BOOL fVsync);
+void WINAPI DwmFrameRender2(HWND hwnd, BOOL fDark) { DfwRenderEx(hwnd, fDark, TRUE, TRUE); }  /* ImmersiveWindow: EndImmersivePaint(1,1) */
+static DECLSPEC_NOINLINE void DfwRenderEx(HWND hwnd, BOOL fDark, BOOL fRestart, BOOL fVsync)
 {
     ID2D1DeviceContext*   pDC;
     ID2D1SolidColorBrush* pBrush;
-    POINT                 offset;
     D2D1_COLOR_F          col;
     D2D1_COLOR_F          colClient;
     D2D1_COLOR_F          colCap;
@@ -886,38 +1020,44 @@ void WINAPI DwmFrameRender(HWND hwnd, BOOL fDark)
         return;
     }
 
-    /* Keep the surface matched to the CURRENT client size every render -- otherwise an init/stale-size
-       surface renders the caption + button positions for the wrong size (the "applies only after resize"
-       symptom). */
+    DfwAdvance();   /* advance the animation timeline (loop-driven, not WM_TIMER) */
+
+    /* V2: monitor-sized buffer -- never ResizeBuffers. Regrow only if the client outgrew the buffer
+       (moved to a larger monitor); otherwise track the client size + presented sub-rect. */
     {
         UINT cx;
         UINT cy;
 
         DwfClientSize(hwnd, &cx, &cy);
-        if (!g_dwf.pSurface || (cx != g_dwf.cxSurface) || (cy != g_dwf.cySurface))
+        if ((cx > g_dwf.cxBuffer) || (cy > g_dwf.cyBuffer))
         {
-            if (!DwfCreateSurface(cx, cy))
-            {
-                return;
-            }
+            UINT bw, bh;
+            DfwMonitorSize(hwnd, &bw, &bh);
+            if (bw < cx) { bw = cx; }
+            if (bh < cy) { bh = cy; }
+            if (!DfwCreateSwapchain(hwnd, bw, bh)) { return; }
+            (void)CCALL0(g_dwf.pDComp, Commit);   /* re-publish SetContent(new swapchain) */
+        }
+        if ((cx != g_dwf.cxClient) || (cy != g_dwf.cyClient))
+        {
+            g_dwf.cxClient = cx;
+            g_dwf.cyClient = cy;
         }
     }
 
-    pDC = NULL;
-    offset.x = 0;
-    offset.y = 0;
-    (void)CCALL(g_dwf.pSurface, BeginDraw, NULL, &DWF_IID_ID2D1DeviceContext, (void**)&pDC, &offset);
-    if (!pDC)
-    {
-        return;
-    }
-
-    /* BeginDraw hands back a sub-rect of an atlas surface at 'offset'; translate so (0,0) is our origin. */
+    if (!g_dwf.pTargetBmp) { return; }
+    pDC = g_dwf.pD2DContext;                   /* persistent target context (not a per-frame surface DC) */
+    CCALL0(pDC, BeginDraw);
     xform._11 = 1.0f; xform._12 = 0.0f;
     xform._21 = 0.0f; xform._22 = 1.0f;
-    xform._31 = (FLOAT)offset.x;
-    xform._32 = (FLOAT)offset.y;
+    xform._31 = 0.0f; xform._32 = 0.0f;         /* fixed full-size target: origin (0,0), identity */
     CCALL(pDC, SetTransform, &xform);
+    {
+        D2D1_RECT_F rcClip;
+        rcClip.left = 0.0f; rcClip.top = 0.0f;
+        rcClip.right = (FLOAT)g_dwf.cxClient; rcClip.bottom = (FLOAT)g_dwf.cyClient;
+        CCALL(pDC, PushAxisAlignedClip, &rcClip, D2D1_ANTIALIAS_MODE_ALIASED);  /* bound Clear/draw to client */
+    }
 
     g_dwf.fDark  = fDark;              /* target shade (repaint contract for hover/size renders) */
     fActive      = g_dwf.fWndActive;   /* window-activation is owned by the activation messages */
@@ -960,7 +1100,7 @@ void WINAPI DwmFrameRender(HWND hwnd, BOOL fDark)
             {
                 rcCap.left   = 0.0f;
                 rcCap.top    = 0.0f;
-                rcCap.right  = (FLOAT)g_dwf.cxSurface;
+                rcCap.right  = (FLOAT)g_dwf.cxClient;
                 rcCap.bottom = (FLOAT)capH;
                 CCALL(pDC, FillRectangle, &rcCap, (ID2D1Brush*)pCap);
                 DwfRelease((IUnknown**)&pCap);
@@ -1013,7 +1153,7 @@ void WINAPI DwmFrameRender(HWND hwnd, BOOL fDark)
             leftPad       = capH;   /* xxxDrawCaptionTemp: title starts one caption-height in (icon slot) */
             rcText.left   = (FLOAT)leftPad;
             rcText.top    = 0.0f;
-            rcText.right  = (FLOAT)g_dwf.cxSurface;
+            rcText.right  = (FLOAT)g_dwf.cxClient;
             rcText.bottom = (FLOAT)capH;
             CCALL(pDC, DrawText, szTitle, (UINT32)cch, g_dwf.pTextFormat, &rcText,
                   (ID2D1Brush*)pBrush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWF_MEASURING_MODE_NATURAL);
@@ -1038,13 +1178,34 @@ void WINAPI DwmFrameRender(HWND hwnd, BOOL fDark)
         }
     }
 
-    (void)CCALL0(g_dwf.pSurface, EndDraw);
-    (void)CCALL0(g_dwf.pDComp, Commit);
+    CCALL0(pDC, PopAxisAlignedClip);
+    (void)CCALL(pDC, EndDraw, NULL, NULL);
+    /* ImmersiveWindow order: the GPU draw is now queued; wait for the vertical blank, THEN present so the
+       frame lands right at scanout (minimizes the wait-to-present gap). */
+    if (g_dwf.hFrameWait) { (void)WaitForSingleObjectEx(g_dwf.hFrameWait, 100u, FALSE); }
+    /* EXACT ImmersiveWindow double-present. (1) immediate, no-wait, tearing -- push this frame to the
+       compositor now, cancelling any queued frame on a restart. (2) sync to the next vblank with
+       DO_NOT_SEQUENCE so the CURRENT buffer is presented *instead of advancing* to the next back buffer
+       (this is what stops the buffer-alternation flicker a plain Present(1) produces). */
+    {
+        UINT p1 = (UINT)(DXGI_PRESENT_ALLOW_TEARING | DXGI_PRESENT_DO_NOT_WAIT)
+                | (fRestart ? (UINT)DXGI_PRESENT_RESTART : 0u);
+        (void)CCALL(g_dwf.pSwapchain, Present, 0u, p1);
+        if (fRestart || fVsync)
+        {
+            (void)CCALL(g_dwf.pSwapchain, Present, 1u, (UINT)DXGI_PRESENT_DO_NOT_SEQUENCE);
+        }
+        else
+        {
+            (void)CCALL(g_dwf.pSwapchain, Present, 0u,
+                        (UINT)(DXGI_PRESENT_ALLOW_TEARING | DXGI_PRESENT_DO_NOT_WAIT));
+        }
+    }
 }
 
 /* Public: crossfade the caption to a new theme shade (keeps the current activation state). Called on the
-   light/dark button toggle and on a system theme change, in place of an instant DwmFrameRender. */
-DECLSPEC_NOINLINE void WINAPI DwmFrameAnimateTheme(HWND hwnd, BOOL fDark)
+   light/dark button toggle and on a system theme change, in place of an instant DwmFrameRender2. */
+DECLSPEC_NOINLINE void WINAPI DwmFrameAnimateTheme2(HWND hwnd, BOOL fDark)
 {
     DwfBeginTransition(hwnd, fDark, g_dwf.fWndActive);
 }
@@ -1054,7 +1215,7 @@ DECLSPEC_NOINLINE void WINAPI DwmFrameAnimateTheme(HWND hwnd, BOOL fDark)
    clears the surface transparent and DWM composites the system backdrop beneath it (the app does not draw
    the blur/tint); the frame is extended fully so the backdrop spans the whole window. Both modes are fully
    supported and switchable at runtime. */
-DECLSPEC_NOINLINE void WINAPI DwmFrameSetBackdrop(HWND hwnd, int iType)
+DECLSPEC_NOINLINE void WINAPI DwmFrameSetBackdrop2(HWND hwnd, int iType)
 {
     DWF_MARGINS m;
     UINT        t;
@@ -1082,10 +1243,10 @@ DECLSPEC_NOINLINE void WINAPI DwmFrameSetBackdrop(HWND hwnd, int iType)
         }
         (void)g_dwfExtend(hwnd, &m);
     }
-    DwmFrameRender(hwnd, g_dwf.fDark);
+    DwmFrameRender2(hwnd, g_dwf.fDark);
 }
 
-void WINAPI DwmFrameResize(HWND hwnd)
+void WINAPI DwmFrameResize2(HWND hwnd)
 {
     UINT cx;
     UINT cy;
@@ -1095,29 +1256,38 @@ void WINAPI DwmFrameResize(HWND hwnd)
         return;
     }
     DwfClientSize(hwnd, &cx, &cy);
-    if ((cx == g_dwf.cxSurface) && (cy == g_dwf.cySurface))
+    if ((cx == g_dwf.cxClient) && (cy == g_dwf.cyClient))
     {
         return;
     }
-    if (DwfCreateSurface(cx, cy))
+    /* V2: no surface realloc, no ResizeBuffers -- regrow the monitor-sized buffer only if the client
+       outgrew it, then just move the presented sub-rect (SetSourceSize) and repaint atomically. */
+    if ((cx > g_dwf.cxBuffer) || (cy > g_dwf.cyBuffer))
     {
-        (void)CCALL0(g_dwf.pDComp, Commit);
+        UINT bw, bh;
+        DfwMonitorSize(hwnd, &bw, &bh);
+        if (bw < cx) { bw = cx; }
+        if (bh < cy) { bh = cy; }
+        if (DfwCreateSwapchain(hwnd, bw, bh)) { (void)CCALL0(g_dwf.pDComp, Commit); }
     }
+    g_dwf.cxClient = cx;
+    g_dwf.cyClient = cy;
+    DfwRenderEx(hwnd, g_dwf.fDark, TRUE, FALSE);   /* fRestart, no vsync: immediate during a resize */
 }
 
-DECLSPEC_NOINLINE void WINAPI DwmFrameDestroy(HWND hwnd)
+DECLSPEC_NOINLINE void WINAPI DwmFrameDestroy2(HWND hwnd)
 {
     UNREFERENCED_PARAMETER(hwnd);
-    if (g_dwf.hwnd && g_dwf.fAnim)
-    {
-        (void)KillTimer(g_dwf.hwnd, DWF_ANIM_TIMER_ID);
-    }
-    g_dwf.fAnim = FALSE;
+    g_dwf.fAnim       = FALSE;
+    g_dwf.fInSizeMove = FALSE;
     DwfRelease((IUnknown**)&g_dwf.pTextFormat);
     DwfRelease((IUnknown**)&g_dwf.pIconFormat);
     DwfRelease((IUnknown**)&g_dwf.pIconBmp);
     DwfRelease((IUnknown**)&g_dwf.pDWrite);
-    DwfRelease((IUnknown**)&g_dwf.pSurface);
+    if (g_dwf.pD2DContext) { CCALL(g_dwf.pD2DContext, SetTarget, NULL); }
+    DwfRelease((IUnknown**)&g_dwf.pTargetBmp);
+    DwfRelease((IUnknown**)&g_dwf.pSwapchain);
+    if (g_dwf.hFrameWait) { (void)CloseHandle(g_dwf.hFrameWait); g_dwf.hFrameWait = NULL; }  /* caller-owned (docs) */
     DwfRelease((IUnknown**)&g_dwf.pVisual);
     DwfRelease((IUnknown**)&g_dwf.pTarget);
     DwfRelease((IUnknown**)&g_dwf.pDComp);
@@ -1127,8 +1297,10 @@ DECLSPEC_NOINLINE void WINAPI DwmFrameDestroy(HWND hwnd)
     DwfRelease((IUnknown**)&g_dwf.pDxgiDevice);
     DwfRelease((IUnknown**)&g_dwf.pD3DDevice);
     g_dwf.fActive   = FALSE;
-    g_dwf.cxSurface = 0u;
-    g_dwf.cySurface = 0u;
+    g_dwf.cxClient  = 0u;
+    g_dwf.cyClient  = 0u;
+    g_dwf.cxBuffer  = 0u;
+    g_dwf.cyBuffer  = 0u;
     g_dwf.hwnd      = NULL;
 }
 
@@ -1279,7 +1451,7 @@ static FORCEINLINE LRESULT DwfHitScreen(HWND hwnd, int x, int y)
     return DwfHitTest(hwnd, lp);
 }
 
-BOOL WINAPI DwmFrameHandleMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam,
+BOOL WINAPI DwmFrameHandleMessage2(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam,
                                   void (WINAPI* pfnToggle)(HWND), LRESULT* plr)
 {
     int   id;
@@ -1291,7 +1463,7 @@ BOOL WINAPI DwmFrameHandleMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
     }
 
     /* Remove the standard non-client area on EVERY WM_NCCALCSIZE -- even before the DComp pipeline is up
-       (the first one arrives during CreateWindowEx, before DwmFrameInit). If we waited for DwmFrameActive,
+       (the first one arrives during CreateWindowEx, before DwmFrameInit2). If we waited for DwmFrameActive2,
        DefWindowProc would draw the standard caption (title + sysmenu icon) for that first frame; it then
        composited UNDER our DComp caption, producing the doubled/ghosted title at startup. Strip it from the
        very first message so the system never draws a caption. */
@@ -1299,17 +1471,33 @@ BOOL WINAPI DwmFrameHandleMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
     {
         if (wParam)
         {
+            NCCALCSIZE_PARAMS* p = (NCCALCSIZE_PARAMS*)lParam;
             if (IsZoomed(hwnd))
             {
-                NCCALCSIZE_PARAMS* p = (NCCALCSIZE_PARAMS*)lParam;
                 UINT dpi = DwfDpi(hwnd);
                 int  pad = DwfMetric(SM_CXPADDEDBORDER, dpi);
-                int  cx  = DwfMetric(SM_CXFRAME, dpi) + pad;
-                int  cy  = DwfMetric(SM_CYFRAME, dpi) + pad;
-                p->rgrc[0].left   += cx;
-                p->rgrc[0].top    += cy;
-                p->rgrc[0].right  -= cx;
-                p->rgrc[0].bottom -= cy;
+                int  fx  = DwfMetric(SM_CXFRAME, dpi) + pad;
+                int  fy  = DwfMetric(SM_CYFRAME, dpi) + pad;
+                p->rgrc[0].left   += fx;
+                p->rgrc[0].top    += fy;
+                p->rgrc[0].right  -= fx;
+                p->rgrc[0].bottom -= fy;
+            }
+            /* V2: fill the resized region synchronously, before DWM finalizes the geometry. The proposed
+               client is rgrc[0] (post maximize-inset). SetSourceSize + vblank-aligned restart present. */
+            if (g_dwf.fActive && (g_dwf.hwnd == hwnd) && g_dwf.pSwapchain)
+            {
+                UINT cx = (UINT)(p->rgrc[0].right - p->rgrc[0].left);
+                UINT cy = (UINT)(p->rgrc[0].bottom - p->rgrc[0].top);
+                if (cx < 1u) { cx = 1u; }
+                if (cy < 1u) { cy = 1u; }
+                if (((cx != g_dwf.cxClient) || (cy != g_dwf.cyClient)) &&
+                    (cx <= g_dwf.cxBuffer) && (cy <= g_dwf.cyBuffer))
+                {
+                    g_dwf.cxClient = cx;
+                    g_dwf.cyClient = cy;
+                    DfwRenderEx(hwnd, g_dwf.fDark, TRUE, FALSE);
+                }
             }
             *plr = 0;
             return TRUE;
@@ -1317,7 +1505,7 @@ BOOL WINAPI DwmFrameHandleMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
         return FALSE;
     }
 
-    if (!DwmFrameActive(hwnd))
+    if (!DwmFrameActive2(hwnd))
     {
         return FALSE;
     }
@@ -1331,7 +1519,7 @@ BOOL WINAPI DwmFrameHandleMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
         {
             PAINTSTRUCT ps;
             (void)BeginPaint(hwnd, &ps);
-            DwmFrameRender(hwnd, g_dwf.fDark);
+            DwmFrameRender2(hwnd, g_dwf.fDark);
             (void)EndPaint(hwnd, &ps);
             *plr = 0;
             return TRUE;
@@ -1341,7 +1529,7 @@ BOOL WINAPI DwmFrameHandleMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
             /* We own the whole window (NC removed); the caption lives in our composited surface, so an NC
                repaint must re-render it. Suppressing this (just *plr=0) left the caption stale at startup
                until a mouse-over the NC forced a render -- THIS is the non-client redraw that was missing. */
-            DwmFrameRender(hwnd, g_dwf.fDark);
+            DwmFrameRender2(hwnd, g_dwf.fDark);
             *plr = 0;
             return TRUE;
 
@@ -1356,53 +1544,33 @@ BOOL WINAPI DwmFrameHandleMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
 
         case WM_ACTIVATE:
             /* Report the frame change in RESPONSE TO WM_ACTIVATE -- the documented DWM custom-frame contract.
-               DwmExtendFrameIntoClientArea applied in DwmFrameInit (before the window was shown/activated)
+               DwmExtendFrameIntoClientArea applied in DwmFrameInit2 (before the window was shown/activated)
                does not take effect; it must be (re-)reported here, on activation, for the DWM frame to
                settle. THEN redraw the non-client area so the result shows immediately. */
             DwfApplyDwmFrame(hwnd);
             (void)SetWindowPos(hwnd, NULL, 0, 0, 0, 0,
                                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
             (void)RedrawWindow(hwnd, NULL, NULL, RDW_FRAME | RDW_INVALIDATE | RDW_UPDATENOW);
-            DwmFrameRender(hwnd, g_dwf.fDark);
+            DwmFrameRender2(hwnd, g_dwf.fDark);
             if (g_dwfFlush) { (void)g_dwfFlush(); }   /* force DWM to present the commit now */
             DwfBeginTransition(hwnd, g_dwf.fDark, (LOWORD(wParam) != WA_INACTIVE));
             return FALSE;
 
-        case WM_TIMER:
-            if (DWF_ANIM_TIMER_ID == wParam)
+        case WM_ENTERSIZEMOVE:
+            if (g_dwf.fActive && (g_dwf.hwnd == hwnd)) { g_dwf.fInSizeMove = TRUE; }
+            return FALSE;
+
+        case WM_EXITSIZEMOVE:
+            if (g_dwf.fActive && (g_dwf.hwnd == hwnd))
             {
-                BOOL  fMore = FALSE;
-                float step  = (float)DWF_ANIM_INTERVAL / (float)DWF_ANIM_DURATION;  /* linear, ~160ms */
-                int   i;
-
-                /* Caption theme/activation crossfade: time-based progress. */
-                if (g_dwf.fAnim)
-                {
-                    DWORD el = GetTickCount() - g_dwf.dwAnimStart;
-                    float t  = (float)el / (float)DWF_ANIM_DURATION;
-                    if (t >= 1.0f) { t = 1.0f; g_dwf.fAnim = FALSE; }
-                    g_dwf.flAnimT = t;
-                    if (g_dwf.fAnim) { fMore = TRUE; }
-                }
-
-                /* Per-button hover/press highlight: step each opacity toward its target (DWB_1..DWB_4). */
-                for (i = DWB_LIGHTDARK; i <= DWB_CLOSE; ++i)
-                {
-                    float tgt = DwfBtnTarget(i);
-                    float cur = g_dwf.flBtnOpacity[i];
-                    if (cur < tgt)      { cur += step; if (cur > tgt) { cur = tgt; } }
-                    else if (cur > tgt) { cur -= step; if (cur < tgt) { cur = tgt; } }
-                    g_dwf.flBtnOpacity[i] = cur;
-                    if (cur != tgt) { fMore = TRUE; }
-                }
-
-                g_dwf.flAnimT = g_dwf.fAnim ? g_dwf.flAnimT : 1.0f;
-                DwmFrameRender(hwnd, g_dwf.fDark);
-                if (!fMore) { (void)KillTimer(hwnd, DWF_ANIM_TIMER_ID); }
-                *plr = 0;
-                return TRUE;
+                g_dwf.fInSizeMove = FALSE;
+                DfwRenderEx(hwnd, g_dwf.fDark, FALSE, TRUE);
             }
             return FALSE;
+
+        /* No WM_TIMER: the ImmersiveWindow-style main render loop drives the animation timeline (DfwAdvance
+           inside every DfwRenderEx). Painting during the system modal size/move loop (when the main loop is
+           suspended) comes from WM_SIZE -> DwmFrameResize2 and the WM_NCCALCSIZE synchronous repaint. */
 
         case WM_NCMOUSEMOVE:
             id = DwfButtonFromHit(wParam);
@@ -1487,15 +1655,43 @@ BOOL WINAPI DwmFrameHandleMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
     }
 }
 
-DECLSPEC_NOINLINE BOOL WINAPI DwmFrameActive(HWND hwnd)
+DECLSPEC_NOINLINE BOOL WINAPI DwmFrameActive2(HWND hwnd)
 {
     return g_dwf.fActive && (g_dwf.hwnd == hwnd);
+}
+
+/* TRUE while the caption still has frames to produce (crossfade in flight, a button opacity not yet at its
+   target, or inside a size/move loop). The ImmersiveWindow-style render loop renders every iteration but
+   only blocks on WaitMessage when this is FALSE and there is no pending input -- so idle costs nothing. */
+DECLSPEC_NOINLINE BOOL WINAPI DwmFrameIsBusy2(HWND hwnd)
+{
+    int i;
+
+    if (!g_dwf.fActive || (g_dwf.hwnd != hwnd)) { return FALSE; }
+    if (g_dwf.fAnim || g_dwf.fInSizeMove)       { return TRUE; }
+    for (i = DWB_LIGHTDARK; i <= DWB_CLOSE; ++i)
+    {
+        if (g_dwf.flBtnOpacity[i] != DwfBtnTarget(i)) { return TRUE; }
+    }
+    return FALSE;
+}
+
+/* Block until the swapchain is ready to accept the next frame (frame-latency waitable, MaxFrameLatency=1
+   => roughly once per vertical blank). The render loop calls this BEFORE drawing, mirroring
+   ImmersiveWindow's WaitForVerticalBlank-before-paint: it paces the loop to native refresh and keeps the
+   present queue from backing up (which is what made a plain post-draw Present(1) judder). */
+DECLSPEC_NOINLINE void WINAPI DwmFrameWaitFrame2(HWND hwnd)
+{
+    if (g_dwf.fActive && (g_dwf.hwnd == hwnd) && g_dwf.hFrameWait)
+    {
+        (void)WaitForSingleObjectEx(g_dwf.hFrameWait, 100u, FALSE);
+    }
 }
 
 /* Seed the caption shade without painting. At creation we publish the frame change (SWP_FRAMECHANGED) and
    invalidate the whole window once; the resulting WM_PAINT renders with g_dwf.fDark, so it must already
    hold the app's theme -- otherwise the first paint is light in dark mode. */
-DECLSPEC_NOINLINE void WINAPI DwmFrameSetDark(HWND hwnd, BOOL fDark)
+DECLSPEC_NOINLINE void WINAPI DwmFrameSetDark2(HWND hwnd, BOOL fDark)
 {
     if (g_dwf.fActive && (g_dwf.hwnd == hwnd))
     {

@@ -10,12 +10,14 @@
 
 #include "framework.h"   /* sets up the CRT-free environment (RTC/GS off) before any code */
 #include "WindowsProject.h"
+#include "Win32X/dwmframex2.h"   /* V2: ImmersiveWindow-style flip-swapchain caption compositor */
 
 #define MAX_LOADSTRING 100
 #define WMAPP_THEMECHANGED (WM_APP + 1) /* private: deferred retheme, posted from WM_SETTINGCHANGE */
 
 /* Globals (file-scope; zero-initialized by the loader -- no CRT startup needed). */
 static HINSTANCE g_hInst;                          /* current instance                  */
+static HWND      g_hwnd;                            /* main window (V2: driven by the render loop) */
 static WCHAR     g_szTitle[MAX_LOADSTRING];        /* title bar text                    */
 static WCHAR     g_szWindowClass[MAX_LOADSTRING];  /* main window class name            */
 static BOOL      g_fDark;                           /* current system app theme is dark  */
@@ -36,11 +38,11 @@ static BOOL (WINAPI* volatile pfnAppThemeHandleWindowMessage)(
 static void (WINAPI* volatile pfnAppThemeEnableCustomFrame)(HWND hwnd, BOOL fEnable) = ThemeEnableCustomFrame;
 static BOOL (WINAPI* volatile pfnAppThemeCustomFrameHandleMessage)(
     HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, LRESULT* plr) = ThemeCustomFrameHandleMessage;
-static BOOL (WINAPI* volatile pfnAppDwmFrameInit)(HWND hwnd) = DwmFrameInit;
-static void (WINAPI* volatile pfnAppDwmFrameRender)(HWND hwnd, BOOL fDark) = DwmFrameRender;
-static void (WINAPI* volatile pfnAppDwmFrameResize)(HWND hwnd) = DwmFrameResize;
+static BOOL (WINAPI* volatile pfnAppDwmFrameInit)(HWND hwnd) = DwmFrameInit2;
+static void (WINAPI* volatile pfnAppDwmFrameRender)(HWND hwnd, BOOL fDark) = DwmFrameRender2;
+static void (WINAPI* volatile pfnAppDwmFrameResize)(HWND hwnd) = DwmFrameResize2;
 static BOOL (WINAPI* volatile pfnAppDwmFrameHandleMessage)(
-    HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, void (WINAPI* pfnToggle)(HWND), LRESULT* plr) = DwmFrameHandleMessage;
+    HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, void (WINAPI* pfnToggle)(HWND), LRESULT* plr) = DwmFrameHandleMessage2;
 static void (WINAPI* volatile pfnAppMenuBarPalette)(BOOL fDark, MENUBAR_PALETTE* pPalette) = MenuBarPalette;
 static void (WINAPI* volatile pfnAppMenuBarOnDrawMenu)(
     HWND hwnd, const UAHMENU* pUDM, const MENUBAR_PALETTE* pPalette) = MenuBarOnDrawMenu;
@@ -70,6 +72,8 @@ DECLSPEC_NOINLINE int WINAPI _tWinMainEx(_In_ HINSTANCE          hInstance,
 
     LoadString(hInstance, IDS_APP_TITLE, g_szTitle, MAX_LOADSTRING);
     LoadString(hInstance, IDC_WINDOWSPROJECT, g_szWindowClass, MAX_LOADSTRING);
+    lstrcatW(g_szTitle, L" [V2 Swapchain]");          /* distinguish from the V1 surface build */
+    lstrcatW(g_szWindowClass, L"_V2");                 /* distinct class so V1 + V2 can run together */
     MyRegisterClass(hInstance);
 
     if (!InitInstance(hInstance))
@@ -79,13 +83,34 @@ DECLSPEC_NOINLINE int WINAPI _tWinMainEx(_In_ HINSTANCE          hInstance,
 
     hAccelTable = LoadAccelerators(hInstance, MAKEINTRESOURCE(IDC_WINDOWSPROJECT));
 
-    while (0 < GetMessage(&msg, NULL, 0, 0))
+    /* V2: ImmersiveWindow-style render loop. The frame is driven by the loop (not WM_PAINT/WM_TIMER):
+       drain all pending messages, then -- if not minimized -- render one caption frame. DwmFrameRender2
+       ends in Present(SyncInterval=1), so the loop self-paces to the vertical blank = exactly native
+       refresh while there is anything to animate. When the caption is idle (no crossfade/hover in flight)
+       and no input is queued, block in WaitMessage so a static window costs zero CPU. */
+    msg.wParam = 0;
+    for (;;)
     {
-        if (!TranslateAccelerator(msg.hwnd, hAccelTable, &msg))
+        BOOL fQuit = FALSE;
+
+        while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE))
         {
-            TranslateMessage(&msg);
-            DispatchMessage(&msg);
+            if (WM_QUIT == msg.message) { fQuit = TRUE; break; }
+            if (!TranslateAccelerator(msg.hwnd, hAccelTable, &msg))
+            {
+                TranslateMessage(&msg);
+                DispatchMessage(&msg);
+            }
         }
+        if (fQuit) { break; }
+
+        if (IsIconic(g_hwnd))
+        {
+            WaitMessage();
+            continue;
+        }
+
+        DwmFrameRender2(g_hwnd, g_fDark);   /* BeginDraw+draw+EndDraw -> wait vblank -> double-present (continuous) */
     }
 
     return (int)msg.wParam;
@@ -112,29 +137,6 @@ static FORCEINLINE ATOM MyRegisterClass(HINSTANCE hInstance)
     return RegisterClassEx(&wcx);
 }
 
-/* SendInput an absolute left-click at a screen point (virtual-desktop normalized). */
-static void AppClickScreen(int x, int y)
-{
-    INPUT in[3];
-    int   vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
-    int   vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
-    int   vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-    int   vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-
-    if (vw < 2) { vw = 2; }
-    if (vh < 2) { vh = 2; }
-    SecureZeroMemory(in, sizeof(in));
-    in[0].type       = INPUT_MOUSE;
-    in[0].mi.dx      = (LONG)(((__int64)(x - vx) * 65535) / (vw - 1));
-    in[0].mi.dy      = (LONG)(((__int64)(y - vy) * 65535) / (vh - 1));
-    in[0].mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
-    in[1].type       = INPUT_MOUSE;
-    in[1].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
-    in[2].type       = INPUT_MOUSE;
-    in[2].mi.dwFlags = MOUSEEVENTF_LEFTUP;
-    (void)SendInput(3u, in, (int)sizeof(INPUT));
-}
-
 /* Creates and displays the main window. */
 static FORCEINLINE BOOL InitInstance(HINSTANCE hInstance)
 {
@@ -158,21 +160,22 @@ static FORCEINLINE BOOL InitInstance(HINSTANCE hInstance)
     {
         return FALSE;
     }
+    g_hwnd = hwnd;   /* V2: the render loop needs the handle */
 
     /* Register and theme the top-level window before the first show, so first paint is coherent. */
     ThemeApplyTopLevel(hwnd, g_fDark);
 
     /* Stand up the in-process DirectComposition caption compositor -- the same D3D11/D2D/DComp/DWrite
        stack uDWM uses, on a DCompositionTarget we own for this hwnd. Then force the WM_NCCALCSIZE that
-       removes the standard non-client area (handled in DwmFrameHandleMessage) so our caption owns it,
+       removes the standard non-client area (handled in DwmFrameHandleMessage2) so our caption owns it,
        and render. */
     if (pfnAppDwmFrameInit(hwnd))
     {
         /* Seed the caption shade so the first paint is the right theme. The frame change (SWP_FRAMECHANGED
            that forces WM_NCCALCSIZE + settles the DWM extended frame) is NOT published here -- it is reported
-           on the first WM_ACTIVATE during creation, inside DwmFrameHandleMessage (DWM's custom-frame
+           on the first WM_ACTIVATE during creation, inside DwmFrameHandleMessage2 (DWM's custom-frame
            contract). Invalidate once so a clean WM_PAINT renders the caption after the window is shown. */
-        DwmFrameSetDark(hwnd, g_fDark);
+        DwmFrameSetDark2(hwnd, g_fDark);
         InvalidateRect(hwnd, NULL, TRUE);
     }
 
@@ -181,22 +184,12 @@ static FORCEINLINE BOOL InitInstance(HINSTANCE hInstance)
     ShowWindowEx(hwnd, SWX_SHOWSTARTUP);
     UpdateWindow(hwnd);
 
-    /* Startup frame-settle: synthesize a real activation cycle with SendInput -- click OFF the window
-       (deactivate), then click our window (reactivate). This is the activate->deactivate->activate the
-       caption frame needs at startup; any earlier in-proc redraw committed before the window was
-       compositable, so the frame stayed stale until a manual click. */
-    {
-        RECT  wr;
-        POINT save;
-        int   dx;
-
-        GetWindowRect(hwnd, &wr);
-        GetCursorPos(&save);
-        dx = (wr.left > 60) ? (wr.left - 30) : (wr.right + 30);   /* a point just off the window edge */
-        AppClickScreen(dx, wr.top + 8);                            /* deactivate our window */
-        AppClickScreen((wr.left + wr.right) / 2, wr.bottom - 24);  /* reactivate it (click our client) */
-        SetCursorPos(save.x, save.y);
-    }
+    /* The window is now fully realized/visible. Redraw the NON-CLIENT frame here (RDW_FRAME) and re-render
+       the composited caption: doing it earlier (during WM_ACTIVATE, mid-ShowWindow) committed before the
+       window was compositable, so the caption stayed stale until a mouse-over the NC forced this exact
+       redraw. This is that redraw, at the first moment it actually presents. */
+    RedrawWindow(hwnd, NULL, NULL, RDW_FRAME | RDW_INVALIDATE | RDW_UPDATENOW);
+    pfnAppDwmFrameRender(hwnd, g_fDark);
     return TRUE;
 }
 
@@ -256,13 +249,13 @@ static FORCEINLINE void OnDestroy(HWND hwnd)
 
 /* Light/dark caption-button click handler. ThemeToggleDarkMode flips the app theme state and invalidates
    the registered windows, but it does NOT touch g_fDark or re-render the DComp caption -- so without this
-   the caption keeps the old shade until the next event that calls DwmFrameRender (a resize). Refresh the
+   the caption keeps the old shade until the next event that calls DwmFrameRender2 (a resize). Refresh the
    truth (g_fDark) from the now-effective theme and recolor the DComp caption immediately. */
 static void WINAPI AppToggleDark(HWND hwnd)
 {
     ThemeToggleDarkMode(hwnd);
     g_fDark = pfnAppThemeIsDarkMode();
-    DwmFrameAnimateTheme(hwnd, g_fDark);   /* 160ms crossfade to the new shade (vs. an instant recolor) */
+    DwmFrameAnimateTheme2(hwnd, g_fDark);   /* 160ms crossfade to the new shade (vs. an instant recolor) */
 }
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
@@ -303,7 +296,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             if (pfnAppThemeHandleWindowMessage(hwnd, uMsg, wParam, lParam, WMAPP_THEMECHANGED, &lr))
             {
                 g_fDark = pfnAppThemeIsDarkMode();
-                DwmFrameAnimateTheme(hwnd, g_fDark);   /* crossfade the DComp caption to the new theme */
+                DwmFrameAnimateTheme2(hwnd, g_fDark);   /* crossfade the DComp caption to the new theme */
                 return lr;
             }
             break;
@@ -315,7 +308,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             {
                 g_iBackdrop = (g_iBackdrop >= DWMFRAME_BACKDROP_ACRYLIC) ? DWMFRAME_BACKDROP_SOLID
                                                                          : (g_iBackdrop + 1);
-                DwmFrameSetBackdrop(hwnd, g_iBackdrop);
+                DwmFrameSetBackdrop2(hwnd, g_iBackdrop);
             }
             break;
 
