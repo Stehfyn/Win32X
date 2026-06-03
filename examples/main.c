@@ -225,7 +225,7 @@ static void WINAPI AppToggleDark(HWND hwnd)
 {
     ThemeToggleDarkMode(hwnd);
     g_fDark = pfnAppThemeIsDarkMode();
-    pfnAppDwmFrameRender(hwnd, g_fDark);
+    DwmFrameAnimateTheme(hwnd, g_fDark);   /* 160ms crossfade to the new shade (vs. an instant recolor) */
 }
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
@@ -266,7 +266,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             if (pfnAppThemeHandleWindowMessage(hwnd, uMsg, wParam, lParam, WMAPP_THEMECHANGED, &lr))
             {
                 g_fDark = pfnAppThemeIsDarkMode();
-                pfnAppDwmFrameRender(hwnd, g_fDark);   /* recolor the DComp caption for the new theme */
+                DwmFrameAnimateTheme(hwnd, g_fDark);   /* crossfade the DComp caption to the new theme */
                 return lr;
             }
             break;

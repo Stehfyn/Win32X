@@ -236,12 +236,19 @@ typedef struct DWF_STATE
     IDWriteTextFormat*    pIconFormat;
     UINT                  cxSurface;
     UINT                  cySurface;
-    BOOL                  fActive;
+    BOOL                  fActive;      /* pipeline alive (DwmFrameActive), NOT window-activation */
     int                   idHot;        /* DWF_BTN under the cursor, or DWB_NONE */
     int                   idPressed;    /* DWF_BTN currently pressed (captured), or DWB_NONE */
     BOOL                  fTracking;    /* TME_NONCLIENT leave tracking armed */
     BOOL                  fCapturing;   /* a button press holds the mouse capture */
-    BOOL                  fDark;        /* last rendered dark state (for re-render on hover/press) */
+    BOOL                  fDark;        /* current (target) dark state */
+    BOOL                  fWndActive;   /* current (target) window-activation state */
+    /* Color crossfade (uDWM's 160ms linear timeline, reused for theme AND activation transitions). */
+    BOOL                  fAnim;        /* a crossfade is in progress */
+    DWORD                 dwAnimStart;  /* GetTickCount() at crossfade start */
+    BOOL                  fDarkFrom;    /* dark state at crossfade start (the "from" color set) */
+    BOOL                  fActiveFrom;  /* window-active state at crossfade start */
+    float                 flAnimT;      /* current progress 0..1 (advanced by WM_TIMER) */
 } DWF_STATE;
 
 static DWF_STATE g_dwf;
@@ -266,6 +273,44 @@ static FORCEINLINE D2D1_COLOR_F DwfColor(COLORREF cr)
     c.b = (FLOAT)GetBValue(cr) / 255.0f;
     c.a = 1.0f;
     return c;
+}
+
+/* uDWM caption crossfade: a 160ms LINEAR timeline (spec_input_anim.md: duration const 0x1801072b0 =
+   0x3FC47AE140000000 = 0.16s; CTimeline<float> default/linear interpolation). The same clock drives the
+   dark<->light theme change AND the active<->inactive transition. */
+#define DWF_ANIM_TIMER_ID  ((UINT_PTR)0x0DF00001u)
+#define DWF_ANIM_INTERVAL  8u    /* ~120 Hz tick (smooth on 60/120 Hz panels) */
+#define DWF_ANIM_DURATION  160u  /* ms */
+
+static FORCEINLINE D2D1_COLOR_F DwfLerp(D2D1_COLOR_F a, D2D1_COLOR_F b, float t)
+{
+    D2D1_COLOR_F c;
+
+    c.r = a.r + (b.r - a.r) * t;
+    c.g = a.g + (b.g - a.g) * t;
+    c.b = a.b + (b.b - a.b) * t;
+    c.a = a.a + (b.a - a.a) * t;
+    return c;
+}
+
+/* Caption title text color for a (dark, active) state. Inactive dims to 60% alpha, like the shell. */
+static FORCEINLINE D2D1_COLOR_F DwfTextColor(BOOL fDark, BOOL fActive)
+{
+    D2D1_COLOR_F c;
+
+    c = DwfColor(fDark ? RGB(255, 255, 255) : RGB(0, 0, 0));
+    if (!fActive)
+    {
+        c.a = 0.60f;
+    }
+    return c;
+}
+
+/* Caption-button glyph color for a (dark, active) state (matches DwfDrawButton's normal-state tint). */
+static FORCEINLINE D2D1_COLOR_F DwfGlyphColor(BOOL fDark, BOOL fActive)
+{
+    return DwfColor(fActive ? (fDark ? RGB(255, 255, 255) : RGB(0, 0, 0))
+                            : (fDark ? RGB(0xAA, 0xAA, 0xAA) : RGB(0x64, 0x64, 0x64)));
 }
 
 /* Caption band height in client pixels -- the system's own number (GetTitleBarInfoEx close.bottom),
@@ -449,29 +494,28 @@ static FORCEINLINE void DwfDrawGlyph(ID2D1DeviceContext* pDC, ID2D1Brush* pBrush
 }
 
 /* One caption button: hover/press flat fill (Close goes red, like the shell) + the glyph. State comes
-   from g_dwf.idHot/idPressed. */
+   from g_dwf.idHot/idPressed. cfGlyph is the normal-state glyph color the caller computed (interpolated
+   during a crossfade); hover/press on Close overrides it to white. fDark selects the neutral hover/press
+   fill shade. */
 static DECLSPEC_NOINLINE void DwfDrawButton(ID2D1DeviceContext* pDC, const RECT* prc, int id, WCHAR glyph,
-                                            BOOL fDark, BOOL fActive)
+                                            BOOL fDark, D2D1_COLOR_F cfGlyph)
 {
     BOOL                  fHot;
     BOOL                  fPressed;
     BOOL                  fFill;
     COLORREF              crFill;
-    COLORREF              crGlyph;
     D2D1_COLOR_F          cf;
     D2D1_RECT_F           rf;
     ID2D1SolidColorBrush* pb;
 
     fHot     = (g_dwf.idHot == id) && (g_dwf.idPressed == DWB_NONE);
     fPressed = (g_dwf.idPressed == id) && (g_dwf.idHot == id);
-    crGlyph  = fActive ? (fDark ? RGB(255, 255, 255) : RGB(0, 0, 0))
-                       : (fDark ? RGB(0xAA, 0xAA, 0xAA) : RGB(0x64, 0x64, 0x64));
     crFill   = 0;
     fFill    = FALSE;
     if (DWB_CLOSE == id)
     {
-        if (fPressed) { crFill = RGB(0xC8, 0x3C, 0x2F); crGlyph = RGB(255, 255, 255); fFill = TRUE; }
-        else if (fHot) { crFill = RGB(0xC4, 0x2B, 0x1C); crGlyph = RGB(255, 255, 255); fFill = TRUE; }
+        if (fPressed) { crFill = RGB(0xC8, 0x3C, 0x2F); cfGlyph = DwfColor(RGB(255, 255, 255)); fFill = TRUE; }
+        else if (fHot) { crFill = RGB(0xC4, 0x2B, 0x1C); cfGlyph = DwfColor(RGB(255, 255, 255)); fFill = TRUE; }
     }
     else
     {
@@ -494,7 +538,7 @@ static DECLSPEC_NOINLINE void DwfDrawButton(ID2D1DeviceContext* pDC, const RECT*
             DwfRelease((IUnknown**)&pb);
         }
     }
-    cf = DwfColor(crGlyph);
+    cf = cfGlyph;
     pb = NULL;
     (void)CCALL(pDC, CreateSolidColorBrush, &cf, NULL, &pb);
     if (pb)
@@ -631,8 +675,32 @@ BOOL WINAPI DwmFrameInit(HWND hwnd)
     /* Restore the DWM-drawn frame (shadow / rounded corners / border / extended bounds). */
     DwfApplyDwmFrame(hwnd);
 
-    g_dwf.fActive = TRUE;
+    g_dwf.fWndActive = TRUE;   /* window becomes foreground on the first show; WM_*ACTIVATE corrects it */
+    g_dwf.fActive    = TRUE;
     return TRUE;
+}
+
+/* Start a color crossfade toward (fDarkTo, fActiveTo). Captures the current shown state as the origin,
+   arms the 160ms timer, and renders frame 0. No-op if the target already matches the current state.
+   Drives both the theme (dark<->light) and the activation (active<->inactive) transitions. */
+static DECLSPEC_NOINLINE void DwfBeginTransition(HWND hwnd, BOOL fDarkTo, BOOL fActiveTo)
+{
+    if (!g_dwf.fActive || (g_dwf.hwnd != hwnd))
+    {
+        return;
+    }
+    if ((g_dwf.fDark == fDarkTo) && (g_dwf.fWndActive == fActiveTo))
+    {
+        return;   /* already at / heading to this state -- ignore the duplicate (e.g. NCACTIVATE+ACTIVATE) */
+    }
+    g_dwf.fDarkFrom   = g_dwf.fDark;        /* current shown colors become the crossfade origin */
+    g_dwf.fActiveFrom = g_dwf.fWndActive;
+    g_dwf.fWndActive  = fActiveTo;
+    g_dwf.dwAnimStart = GetTickCount();
+    g_dwf.flAnimT     = 0.0f;
+    g_dwf.fAnim       = TRUE;
+    (void)SetTimer(hwnd, DWF_ANIM_TIMER_ID, DWF_ANIM_INTERVAL, NULL);
+    DwmFrameRender(hwnd, fDarkTo);          /* frame 0 at t=0 shows the origin colors, then it animates */
 }
 
 void WINAPI DwmFrameRender(HWND hwnd, BOOL fDark)
@@ -641,7 +709,10 @@ void WINAPI DwmFrameRender(HWND hwnd, BOOL fDark)
     ID2D1SolidColorBrush* pBrush;
     POINT                 offset;
     D2D1_COLOR_F          col;
-    D2D1_COLOR_F          crText;
+    D2D1_COLOR_F          colClient;
+    D2D1_COLOR_F          colCap;
+    D2D1_COLOR_F          colText;
+    D2D1_COLOR_F          colGlyph;
     D2D1_MATRIX_3X2_F     xform;
     D2D1_RECT_F           rcText;
     WCHAR                 szTitle[256];
@@ -688,20 +759,33 @@ void WINAPI DwmFrameRender(HWND hwnd, BOOL fDark)
     xform._32 = (FLOAT)offset.y;
     CCALL(pDC, SetTransform, &xform);
 
-    fActive      = (GetActiveWindow() == hwnd);
-    g_dwf.fDark  = fDark;   /* remembered so hover/press re-renders use the same shade */
+    g_dwf.fDark  = fDark;              /* target shade (repaint contract for hover/size renders) */
+    fActive      = g_dwf.fWndActive;   /* window-activation is owned by the activation messages */
     capH         = (int)DwfCaptionHeight(hwnd);
 
+    /* Effective colors. During a crossfade, lerp between the (from) state captured at transition start and
+       the (to = current) state by flAnimT; otherwise just the current state. One path serves the theme
+       (dark<->light) AND the activation (active<->inactive) transitions -- uDWM's shared 160ms timeline. */
+    {
+        BOOL  fDk1 = g_dwf.fAnim ? g_dwf.fDarkFrom   : fDark;
+        BOOL  fAc1 = g_dwf.fAnim ? g_dwf.fActiveFrom : fActive;
+        float t    = g_dwf.fAnim ? g_dwf.flAnimT     : 1.0f;
+
+        colClient = DwfLerp(DwfClientColor(fDk1),         DwfClientColor(fDark),          t);
+        colCap    = DwfLerp(DwfCaptionColor(fDk1, fAc1),  DwfCaptionColor(fDark, fActive), t);
+        colText   = DwfLerp(DwfTextColor(fDk1, fAc1),     DwfTextColor(fDark, fActive),    t);
+        colGlyph  = DwfLerp(DwfGlyphColor(fDk1, fAc1),    DwfGlyphColor(fDark, fActive),   t);
+    }
+
     /* Whole window = client color; caption band painted on top. */
-    col = DwfClientColor(fDark);
+    col = colClient;
     CCALL(pDC, Clear, &col);
     {
         ID2D1SolidColorBrush* pCap;
         D2D1_RECT_F           rcCap;
 
-        col  = DwfCaptionColor(fDark, fActive);
         pCap = NULL;
-        (void)CCALL(pDC, CreateSolidColorBrush, &col, NULL, &pCap);
+        (void)CCALL(pDC, CreateSolidColorBrush, &colCap, NULL, &pCap);
         if (pCap)
         {
             rcCap.left   = 0.0f;
@@ -719,13 +803,8 @@ void WINAPI DwmFrameRender(HWND hwnd, BOOL fDark)
     cch = GetWindowTextW(hwnd, szTitle, ARRAYSIZE(szTitle));
     if (g_dwf.pTextFormat && szTitle[0])
     {
-        crText = DwfColor(fDark ? RGB(255, 255, 255) : RGB(0, 0, 0));
-        if (!fActive)
-        {
-            crText.a = 0.60f;
-        }
         pBrush = NULL;
-        (void)CCALL(pDC, CreateSolidColorBrush, &crText, NULL, &pBrush);
+        (void)CCALL(pDC, CreateSolidColorBrush, &colText, NULL, &pBrush);
         if (pBrush)
         {
             leftPad       = GetSystemMetrics(SM_CXSMICON) + GetSystemMetrics(SM_CXFRAME) * 2;
@@ -739,7 +818,8 @@ void WINAPI DwmFrameRender(HWND hwnd, BOOL fDark)
         }
     }
 
-    /* Caption buttons: light/dark (sun/moon), Minimize, Maximize/Restore, Close. */
+    /* Caption buttons: light/dark (sun/moon), Minimize, Maximize/Restore, Close. Glyph tint is the
+       crossfaded colGlyph; DwfDrawButton overrides it only for Close hover/press (red bg, white glyph). */
     {
         RECT rcClose;
         RECT rcMax;
@@ -748,15 +828,22 @@ void WINAPI DwmFrameRender(HWND hwnd, BOOL fDark)
 
         if (DwfButtonRects(hwnd, &rcClose, &rcMax, &rcMin, &rcLD))
         {
-            DwfDrawButton(pDC, &rcLD,    DWB_LIGHTDARK, (WCHAR)(fDark ? 0xE706 : 0xE708), fDark, fActive);
-            DwfDrawButton(pDC, &rcMin,   DWB_MIN,       (WCHAR)0xE921,                    fDark, fActive);
-            DwfDrawButton(pDC, &rcMax,   DWB_MAX,       (WCHAR)(IsZoomed(hwnd) ? 0xE923 : 0xE922), fDark, fActive);
-            DwfDrawButton(pDC, &rcClose, DWB_CLOSE,     (WCHAR)0xE8BB,                    fDark, fActive);
+            DwfDrawButton(pDC, &rcLD,    DWB_LIGHTDARK, (WCHAR)(fDark ? 0xE706 : 0xE708), fDark, colGlyph);
+            DwfDrawButton(pDC, &rcMin,   DWB_MIN,       (WCHAR)0xE921,                    fDark, colGlyph);
+            DwfDrawButton(pDC, &rcMax,   DWB_MAX,       (WCHAR)(IsZoomed(hwnd) ? 0xE923 : 0xE922), fDark, colGlyph);
+            DwfDrawButton(pDC, &rcClose, DWB_CLOSE,     (WCHAR)0xE8BB,                    fDark, colGlyph);
         }
     }
 
     (void)CCALL0(g_dwf.pSurface, EndDraw);
     (void)CCALL0(g_dwf.pDComp, Commit);
+}
+
+/* Public: crossfade the caption to a new theme shade (keeps the current activation state). Called on the
+   light/dark button toggle and on a system theme change, in place of an instant DwmFrameRender. */
+DECLSPEC_NOINLINE void WINAPI DwmFrameAnimateTheme(HWND hwnd, BOOL fDark)
+{
+    DwfBeginTransition(hwnd, fDark, g_dwf.fWndActive);
 }
 
 void WINAPI DwmFrameResize(HWND hwnd)
@@ -782,6 +869,11 @@ void WINAPI DwmFrameResize(HWND hwnd)
 DECLSPEC_NOINLINE void WINAPI DwmFrameDestroy(HWND hwnd)
 {
     UNREFERENCED_PARAMETER(hwnd);
+    if (g_dwf.hwnd && g_dwf.fAnim)
+    {
+        (void)KillTimer(g_dwf.hwnd, DWF_ANIM_TIMER_ID);
+    }
+    g_dwf.fAnim = FALSE;
     DwfRelease((IUnknown**)&g_dwf.pTextFormat);
     DwfRelease((IUnknown**)&g_dwf.pIconFormat);
     DwfRelease((IUnknown**)&g_dwf.pDWrite);
@@ -998,12 +1090,30 @@ BOOL WINAPI DwmFrameHandleMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
             return TRUE;
 
         case WM_NCACTIVATE:
-            DwmFrameRender(hwnd, g_dwf.fDark);
-            *plr = (LRESULT)TRUE;
+            DwfBeginTransition(hwnd, g_dwf.fDark, (wParam != FALSE));
+            *plr = (LRESULT)TRUE;   /* we own the caption; suppress the standard NC repaint */
             return TRUE;
 
         case WM_ACTIVATE:
-            DwmFrameRender(hwnd, g_dwf.fDark);
+            DwfBeginTransition(hwnd, g_dwf.fDark, (LOWORD(wParam) != WA_INACTIVE));
+            return FALSE;
+
+        case WM_TIMER:
+            if (DWF_ANIM_TIMER_ID == wParam)
+            {
+                DWORD el = GetTickCount() - g_dwf.dwAnimStart;
+                float t  = (float)el / (float)DWF_ANIM_DURATION;
+                if (t >= 1.0f)
+                {
+                    t = 1.0f;
+                    g_dwf.fAnim = FALSE;
+                    (void)KillTimer(hwnd, DWF_ANIM_TIMER_ID);
+                }
+                g_dwf.flAnimT = t;
+                DwmFrameRender(hwnd, g_dwf.fDark);
+                *plr = 0;
+                return TRUE;
+            }
             return FALSE;
 
         case WM_NCMOUSEMOVE:

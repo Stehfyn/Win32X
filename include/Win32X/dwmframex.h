@@ -41,6 +41,10 @@ BOOL WINAPI DwmFrameActive(HWND hwnd);
    invalidate at creation, so the first WM_PAINT renders in the correct theme. */
 void WINAPI DwmFrameSetDark(HWND hwnd, BOOL fDark);
 
+/* Crossfade the caption to a new theme shade over uDWM's 160ms linear timeline (keeps current activation).
+   Use in place of DwmFrameRender on the light/dark toggle and on a system theme change. */
+void WINAPI DwmFrameAnimateTheme(HWND hwnd, BOOL fDark);
+
 /* Non-client message handler reproducing DefWindowProc's frame: WM_NCCALCSIZE removes the standard NC so
    our DComp caption owns it; WM_NCHITTEST follows win32kfull!FindNCHit's region order; button hover/press
    + click (cancel-on-drag-off, SC_MINIMIZE/MAXIMIZE/RESTORE/CLOSE per xxxTrackCaptionButton; the light/
