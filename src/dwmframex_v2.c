@@ -1201,6 +1201,9 @@ static DECLSPEC_NOINLINE void DfwRenderEx(HWND hwnd, BOOL fDark, BOOL fRestart, 
                         (UINT)(DXGI_PRESENT_ALLOW_TEARING | DXGI_PRESENT_DO_NOT_WAIT));
         }
     }
+    /* ImmersiveWindow: DwmFlush() after the present -- block until DWM has composited this frame so the
+       render loop cannot race ahead and queue presents (that backlog is the "DWM fighting us" flicker). */
+    if (g_dwfFlush) { (void)g_dwfFlush(); }
 }
 
 /* Public: crossfade the caption to a new theme shade (keeps the current activation state). Called on the
