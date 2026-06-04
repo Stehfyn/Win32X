@@ -1617,7 +1617,16 @@ BOOL WINAPI DwmFrameHandleMessage2(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM l
                 {
                     g_dwf.cxClient = cx;
                     g_dwf.cyClient = cy;
-                    if (g_dwf.fInSizeMove) { DfwRenderEx(hwnd, g_dwf.fDark, TRUE, FALSE); }
+                    if (g_dwf.fInSizeMove)
+                    {
+                        /* Drain the frame-latency waitable (non-blocking, timeout 0) before the render, exactly
+                           as ImmersiveWindow's WaitForNextFrameResource does at the top of the modal NCCALCSIZE
+                           paint. MaxFrameLatency=1 + the waitable flag mean the previous synced present(1) holds
+                           the latency gate; resetting it here keeps THIS present from landing a frame late --
+                           which was the fills' ~1-frame trail behind the geometry. */
+                        if (g_dwf.hFrameWait) { (void)WaitForSingleObjectEx(g_dwf.hFrameWait, 0u, FALSE); }
+                        DfwRenderEx(hwnd, g_dwf.fDark, TRUE, FALSE);
+                    }
                 }
             }
             *plr = 0;
