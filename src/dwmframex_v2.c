@@ -448,21 +448,6 @@ static DECLSPEC_NOINLINE UINT DwfCaptionHeight(HWND hwnd)
     return (UINT)cy;
 }
 
-/* SINGLE SOURCE of the window size for the whole pipeline. GetWindowRect -- NOT GetClientRect: during a
-   resize GetClientRect lags the real window bounds (it is only updated after WM_NCCALCSIZE settles), which
-   makes the surface trail the window edge. The window rect is current immediately, every query. Since NC is
-   removed (WM_NCCALCSIZE -> 0), client == window, so window width/height ARE the client size. */
-static DECLSPEC_NOINLINE void DwfClientSize(HWND hwnd, UINT* pcx, UINT* pcy)
-{
-    RECT rc;
-
-    GetWindowRect(hwnd, &rc);
-    *pcx = (UINT)(rc.right - rc.left);
-    *pcy = (UINT)(rc.bottom - rc.top);
-    if (*pcx == 0u) { *pcx = 1u; }
-    if (*pcy == 0u) { *pcy = 1u; }
-}
-
 /* Recompute the CACHED metrics (caption height, DPI, button width, title). Called ONLY on the relevant
    events -- init, WM_DPICHANGED, WM_SETTEXT, theme/metrics change -- never on the per-frame render path.
    These are the synchronous queries (GetDpiForWindow, WM_GETTITLEBARINFOEX, WM_GETTEXT) that must NOT
@@ -853,8 +838,6 @@ static DECLSPEC_NOINLINE void DwfEnsureIcon(HWND hwnd);   /* defined below; buil
 BOOL WINAPI DwmFrameInit2(HWND hwnd)
 {
     UINT flags;
-    UINT cx;
-    UINT cy;
 
     if (g_dwf.fActive && (g_dwf.hwnd == hwnd))
     {
@@ -930,9 +913,11 @@ BOOL WINAPI DwmFrameInit2(HWND hwnd)
             return FALSE;
         }
     }
-    DwfClientSize(hwnd, &cx, &cy);
-    g_dwf.cxClient = cx;
-    g_dwf.cyClient = cy;
+    /* Seed the authoritative client size WITHOUT querying the window: force one WM_NCCALCSIZE (SWP_FRAMECHANGED).
+       Our handler stores rgrc[0] -- the size WE dictate -- into cxClient/cyClient. The swapchain (and thus
+       cxBuffer) already exists above, so the store takes. Single source; no GetWindowRect anywhere. */
+    (void)SetWindowPos(hwnd, NULL, 0, 0, 0, 0,
+                       SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
     /* NO SetSourceSize: the full monitor-sized buffer presents 1:1; the window (hwnd target) clips to the
        client rect. SetSourceSize+STRETCH would instead blow the client-sized source up to the buffer size. */
     g_dwf.dwLastTick = GetTickCount();
@@ -1356,31 +1341,10 @@ DECLSPEC_NOINLINE void WINAPI DwmFrameSetBackdrop2(HWND hwnd, int iType)
 
 void WINAPI DwmFrameResize2(HWND hwnd)
 {
-    UINT cx;
-    UINT cy;
-
-    if (!g_dwf.fActive || (g_dwf.hwnd != hwnd))
-    {
-        return;
-    }
-    DwfClientSize(hwnd, &cx, &cy);
-    if ((cx == g_dwf.cxClient) && (cy == g_dwf.cyClient))
-    {
-        return;
-    }
-    /* V2: no surface realloc, no ResizeBuffers -- regrow the monitor-sized buffer only if the client
-       outgrew it, then just move the presented sub-rect (SetSourceSize) and repaint atomically. */
-    if ((cx > g_dwf.cxBuffer) || (cy > g_dwf.cyBuffer))
-    {
-        UINT bw, bh;
-        DfwMonitorSize(hwnd, &bw, &bh);
-        if (bw < cx) { bw = cx; }
-        if (bh < cy) { bh = cy; }
-        if (DfwCreateSwapchain(hwnd, bw, bh)) { (void)CCALL0(g_dwf.pDComp, Commit); }
-    }
-    g_dwf.cxClient = cx;
-    g_dwf.cyClient = cy;
-    DfwRenderEx(hwnd, g_dwf.fDark, TRUE, FALSE);   /* fRestart, no vsync: immediate during a resize */
+    /* Dead path, kept for ABI/header compatibility. Resize is driven authoritatively by WM_NCCALCSIZE (the
+       client size WE dictate to the system) plus the continuous render loop -- never by querying the window.
+       The monitor-sized buffer is allocated once and never resized for an on-screen resize. */
+    UNREFERENCED_PARAMETER(hwnd);
 }
 
 DECLSPEC_NOINLINE void WINAPI DwmFrameDestroy2(HWND hwnd)
@@ -1607,23 +1571,25 @@ BOOL WINAPI DwmFrameHandleMessage2(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM l
             /* This is where we DRIVE the client size: rgrc[0] (post maximize-inset) is the authoritative
                client. Always store it. Render synchronously HERE only while in the modal size loop (main
                loop suspended); otherwise the continuous loop is the sole presenter. */
-            if (g_dwf.fActive && (g_dwf.hwnd == hwnd) && g_dwf.pSwapchain)
+            if (g_dwf.hwnd == hwnd)
             {
                 UINT cx = (UINT)(p->rgrc[0].right - p->rgrc[0].left);
                 UINT cy = (UINT)(p->rgrc[0].bottom - p->rgrc[0].top);
                 if (cx < 1u) { cx = 1u; }
                 if (cy < 1u) { cy = 1u; }
-                if ((cx <= g_dwf.cxBuffer) && (cy <= g_dwf.cyBuffer))
+                /* AUTHORITATIVE store. rgrc[0] is the client size WE just dictated to the system -- it MUST
+                   honor it. This is the single source for the whole pipeline; the render never queries the
+                   window. (cxBuffer>0 only after the swapchain exists, so a pre-swapchain NCCALCSIZE no-ops
+                   here; the post-init SWP_FRAMECHANGED seeds the first authoritative value.) */
+                if ((g_dwf.cxBuffer > 0u) && (cx <= g_dwf.cxBuffer) && (cy <= g_dwf.cyBuffer))
                 {
                     g_dwf.cxClient = cx;
                     g_dwf.cyClient = cy;
-                    if (g_dwf.fInSizeMove)
+                    if (g_dwf.fActive && g_dwf.pSwapchain && g_dwf.fInSizeMove)
                     {
-                        /* Drain the frame-latency waitable (non-blocking, timeout 0) before the render, exactly
-                           as ImmersiveWindow's WaitForNextFrameResource does at the top of the modal NCCALCSIZE
-                           paint. MaxFrameLatency=1 + the waitable flag mean the previous synced present(1) holds
-                           the latency gate; resetting it here keeps THIS present from landing a frame late --
-                           which was the fills' ~1-frame trail behind the geometry. */
+                        /* Drain the frame-latency waitable (non-blocking, timeout 0) before the render --
+                           ImmersiveWindow's WaitForNextFrameResource -- so the synced present doesn't land a
+                           frame late (the trail). */
                         if (g_dwf.hFrameWait) { (void)WaitForSingleObjectEx(g_dwf.hFrameWait, 0u, FALSE); }
                         DfwRenderEx(hwnd, g_dwf.fDark, TRUE, FALSE);
                     }
@@ -1746,6 +1712,8 @@ BOOL WINAPI DwmFrameHandleMessage2(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM l
             return FALSE;   /* let DefWindowProc apply it */
 
         case WM_WINDOWPOSCHANGED:
+                    DfwRenderEx(hwnd, g_dwf.fDark, FALSE, TRUE);   /* EndImmersivePaint(0,1) */
+            
             /* No render: during a modal RESIZE the synchronous WM_NCCALCSIZE paint already drew the new size
                (pre-geometry); during a MOVE the content is unchanged (DWM just repositions the visual);
                non-modal -> the loop presents. Rendering here is a redundant/racing present. */
