@@ -23,7 +23,8 @@ void WINAPI DwmFrameDestroy2(HWND hwnd);
 BOOL WINAPI DwmFrameActive2(HWND hwnd);
 /* V2 single surface: the app draws its CLIENT into the swapchain's D2D context (cast void* ->
    ID2D1DeviceContext*) each frame, between the background and the caption. Same surface, app owns bytes. */
-void WINAPI DwmFrameSetClientDraw2(HWND hwnd, void (WINAPI* pfn)(HWND hwnd, void* pD2DDeviceContext));
+void WINAPI DwmFrameSetClientDraw2(HWND hwnd,
+        void (WINAPI* pfn)(HWND hwnd, void* pD2DDeviceContext, UINT cx, UINT cy));
 /* Fill a rect into the swapchain D2D context (the void* passed to the client-draw callback). RGBA 0..1.
    Lets the app paint its client into the single surface without its own D2D bindings. */
 void WINAPI DwmFrameFillRect2(void* pD2DDeviceContext, float l, float t, float r, float b,

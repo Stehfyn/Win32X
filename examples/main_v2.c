@@ -15,16 +15,14 @@
 /* The app's CLIENT render, invoked by dwmframex every frame with the ONE swapchain D2D context -- proves
    the client lives on the SAME surface as the caption. Uses the lib's DwmFrameFillRect2 helper so the app
    needs no D2D bindings of its own (D2D's C headers don't expose lpVtbl). */
-static void WINAPI AppClientDraw(HWND hwnd, void* pCtx)
+static void WINAPI AppClientDraw(HWND hwnd, void* pCtx, UINT cx, UINT cy)
 {
-    RECT wr;
-    int  w;
-    int  h;
+    int  w = (int)cx;   /* size is PASSED from dwmframex (the single source it drew the caption at this
+                           frame) -- do NOT call GetWindowRect here, that second query desyncs mid-drag */
+    int  h = (int)cy;
     int  capH;
 
-    GetWindowRect(hwnd, &wr);   /* single-source window rect, NOT GetClientRect (it lags on resize) */
-    w = wr.right - wr.left;
-    h = wr.bottom - wr.top;
+    (void)hwnd;
     capH = GetSystemMetrics(SM_CYCAPTION) + GetSystemMetrics(SM_CYFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
 
     /* app client background (distinct blue-grey), filled into the swapchain surface below the caption */

@@ -53,6 +53,7 @@ typedef struct IDCompositionVisual  IDCompositionVisual;
 typedef struct IDCompositionSurface IDCompositionSurface;
 typedef struct IDWriteFactory       IDWriteFactory;
 typedef struct IDWriteTextFormat    IDWriteTextFormat;
+typedef struct IDWriteTextLayout    IDWriteTextLayout;
 
 /* DWrite enum values we pass (dwrite.h is unavailable in C). */
 #define DWF_FACTORY_TYPE_SHARED         0u
@@ -152,7 +153,8 @@ typedef struct ID2D1DeviceContextVtbl
     void*   rsvd2[8];   /* slots 18..25: Draw/FillRoundedRect, Draw/FillEllipse, Draw/FillGeometry, FillMesh, FillOpacityMask */
     void    (STDMETHODCALLTYPE* DrawBitmap)(ID2D1DeviceContext*, ID2D1Bitmap*, const D2D1_RECT_F*, FLOAT, D2D1_BITMAP_INTERPOLATION_MODE, const D2D1_RECT_F*); /* 26 */
     void    (STDMETHODCALLTYPE* DrawText)(ID2D1DeviceContext*, const WCHAR*, UINT32, IDWriteTextFormat*, const D2D1_RECT_F*, ID2D1Brush*, D2D1_DRAW_TEXT_OPTIONS, UINT /*DWRITE_MEASURING_MODE*/); /* 27 */
-    void*   rsvd3[2];   /* slots 28..29: DrawTextLayout, DrawGlyphRun */
+    void    (STDMETHODCALLTYPE* DrawTextLayout)(ID2D1DeviceContext*, D2D1_POINT_2F, IDWriteTextLayout*, ID2D1Brush*, D2D1_DRAW_TEXT_OPTIONS); /* slot 28 -- CACHED layout, no per-frame alloc */
+    void*   rsvd3;      /* slot 29: DrawGlyphRun */
     void    (STDMETHODCALLTYPE* SetTransform)(ID2D1DeviceContext*, const D2D1_MATRIX_3X2_F*); /* slot 30 */
     void*   rsvd4a[14]; /* slots 31..44: GetTransform..RestoreDrawingState */
     void    (STDMETHODCALLTYPE* PushAxisAlignedClip)(ID2D1DeviceContext*, const D2D1_RECT_F*, D2D1_ANTIALIAS_MODE); /* 45 */
@@ -191,6 +193,9 @@ typedef struct IDWriteFactoryVtbl
     void*   rsvd[12];   /* slots 3..14 */
     HRESULT (STDMETHODCALLTYPE* CreateTextFormat)(IDWriteFactory*, const WCHAR*, void* /*fontCollection*/,
             UINT /*weight*/, UINT /*style*/, UINT /*stretch*/, FLOAT, const WCHAR*, IDWriteTextFormat**); /* 15 */
+    void*   rsvd16[2];  /* 16,17: CreateTypography, GetGdiInterop */
+    HRESULT (STDMETHODCALLTYPE* CreateTextLayout)(IDWriteFactory*, const WCHAR*, UINT32, IDWriteTextFormat*,
+            FLOAT /*maxWidth*/, FLOAT /*maxHeight*/, IDWriteTextLayout**);                  /* slot 18 */
 } IDWriteFactoryVtbl;
 struct IDWriteFactory { const IDWriteFactoryVtbl* lpVtbl; };
 
@@ -225,6 +230,11 @@ static const GUID DWF_IID_IDWriteFactory =                                      
 
 /* Caption buttons, left-to-right adjacency: the light/dark toggle sits immediately left of Minimize. */
 enum DWF_BTN { DWB_NONE = 0, DWB_LIGHTDARK, DWB_MIN, DWB_MAX, DWB_CLOSE };
+
+/* Cached caption-glyph layouts: one IDWriteTextLayout per Segoe Fluent / MDL2 codepoint, built once per
+   DPI/theme change, drawn with DrawTextLayout (no per-frame DrawText layout allocation). */
+enum DWF_GLYPH { GL_SUN = 0, GL_MOON, GL_MIN, GL_MAX, GL_RESTORE, GL_CLOSE, GL_COUNT };
+static const WCHAR g_dwfGlyphCp[GL_COUNT] = { 0xE708, 0xE706, 0xE921, 0xE922, 0xE923, 0xE8BB };
 
 EXTERN_C HRESULT WINAPI DCompositionCreateDevice2(IUnknown* /*renderingDevice (the D2D device)*/, REFIID, void**);
 EXTERN_C HRESULT WINAPI DWriteCreateFactory(UINT /*DWRITE_FACTORY_TYPE*/, REFIID, IUnknown**);
@@ -294,12 +304,23 @@ typedef struct DWF_STATE
     IDWriteFactory*       pDWrite;
     IDWriteTextFormat*    pTextFormat;
     IDWriteTextFormat*    pIconFormat;
-    void                  (WINAPI* pfnClientDraw)(HWND, void*);  /* app draws client INTO this single surface */
+    IDWriteTextLayout*    pTitleLayout;    /* CACHED title layout (rebuilt on title/size change) -- DrawTextLayout, not DrawText */
+    IDWriteTextLayout*    pGlyphLayout[6]; /* CACHED button-glyph layouts (sun,moon,min,max,restore,close) */
+    void                  (WINAPI* pfnClientDraw)(HWND, void*, UINT, UINT);  /* app draws client INTO this single surface; size is PASSED (single source), not re-queried */
     ID2D1Bitmap1*         pIconBmp;     /* cached high-res caption icon (D3D11 texture -> D2D bitmap) */
     UINT                  cxBuffer;     /* back-buffer allocation (monitor px); regrown only on monitor change */
     UINT                  cyBuffer;
-    UINT                  cxClient;     /* current client size (presented sub-rect via SetSourceSize, layout) */
+    UINT                  cxClient;     /* current client size (DRIVEN from WM_WINDOWPOSCHANGING/NCCALCSIZE) */
     UINT                  cyClient;
+    /* CACHED metrics -- computed ONCE / on the relevant event, NEVER per frame. The hot path must not do
+       synchronous queries (WM_GETTEXT/WM_GETTITLEBARINFOEX SendMessage, GetDpiForWindow, GetSystemMetrics). */
+    UINT                  capH;         /* caption height (refresh on DPI/theme/metrics change) */
+    UINT                  dpi;          /* window DPI (refresh on WM_DPICHANGED) */
+    UINT                  btnW;         /* caption-button cell width (derived from dpi) */
+    UINT                  iconW;        /* small-icon width  for the window DPI (cached) */
+    UINT                  iconH;        /* small-icon height for the window DPI (cached) */
+    int                   cchTitle;     /* cached title length (refresh on WM_SETTEXT) */
+    WCHAR                 szTitle[256]; /* cached title text */
     BOOL                  fInSizeMove;  /* inside WM_ENTERSIZEMOVE..EXITSIZEMOVE (main loop suspended) */
     BOOL                  fMoving;      /* WM_MOVING seen this modal loop (move, not resize) */
     BOOL                  fResizing;    /* WM_SIZING seen this modal loop */
@@ -442,6 +463,46 @@ static DECLSPEC_NOINLINE void DwfClientSize(HWND hwnd, UINT* pcx, UINT* pcy)
     if (*pcy == 0u) { *pcy = 1u; }
 }
 
+/* Recompute the CACHED metrics (caption height, DPI, button width, title). Called ONLY on the relevant
+   events -- init, WM_DPICHANGED, WM_SETTEXT, theme/metrics change -- never on the per-frame render path.
+   These are the synchronous queries (GetDpiForWindow, WM_GETTITLEBARINFOEX, WM_GETTEXT) that must NOT
+   run every frame. */
+static DECLSPEC_NOINLINE void DfwRefreshMetrics(HWND hwnd)
+{
+    UINT dpi = GetDpiForWindow(hwnd);
+    if (0u == dpi) { dpi = 96u; }
+    g_dwf.dpi      = dpi;
+    g_dwf.capH     = DwfCaptionHeight(hwnd);
+    g_dwf.btnW     = (UINT)MulDiv(47, (int)dpi, 96);
+    g_dwf.iconW    = (UINT)GetSystemMetricsForDpi(SM_CXSMICON, dpi);
+    g_dwf.iconH    = (UINT)GetSystemMetricsForDpi(SM_CYSMICON, dpi);
+    g_dwf.szTitle[0] = 0;
+    g_dwf.cchTitle = GetWindowTextW(hwnd, g_dwf.szTitle, ARRAYSIZE(g_dwf.szTitle));
+    if (g_dwf.cchTitle < 0) { g_dwf.cchTitle = 0; }
+
+    /* (Re)build the CACHED text layouts -- this is where the DWrite layout work happens, ONCE per change,
+       so the hot path only does DrawTextLayout on a ready-made layout. */
+    if (g_dwf.pDWrite)
+    {
+        int i;
+        DwfRelease((IUnknown**)&g_dwf.pTitleLayout);
+        if (g_dwf.pTextFormat && (g_dwf.cchTitle > 0))
+        {
+            (void)CCALL(g_dwf.pDWrite, CreateTextLayout, g_dwf.szTitle, (UINT32)g_dwf.cchTitle,
+                        g_dwf.pTextFormat, 8192.0f, (FLOAT)g_dwf.capH, &g_dwf.pTitleLayout);
+        }
+        for (i = 0; i < GL_COUNT; ++i)
+        {
+            DwfRelease((IUnknown**)&g_dwf.pGlyphLayout[i]);
+            if (g_dwf.pIconFormat)
+            {
+                (void)CCALL(g_dwf.pDWrite, CreateTextLayout, &g_dwfGlyphCp[i], 1u, g_dwf.pIconFormat,
+                            (FLOAT)g_dwf.btnW, (FLOAT)g_dwf.capH, &g_dwf.pGlyphLayout[i]);
+            }
+        }
+    }
+}
+
 /* Caption bar fill color. Phase 2 approximation of uDWM's colorization pipeline (active/inactive,
    dark/light); the exact accent path is refined in a later pass. */
 static FORCEINLINE D2D1_COLOR_F DwfCaptionColor(BOOL fDark, BOOL fActive)
@@ -540,22 +601,15 @@ static DECLSPEC_NOINLINE void DwfCreateIconFormat(void)
    the system reported no caption buttons. */
 static DECLSPEC_NOINLINE int DwfButtonRects(HWND hwnd, RECT* prcClose, RECT* prcMax, RECT* prcMin, RECT* prcLD)
 {
-    UINT cx;
-    UINT cy;
-    UINT dpi;
     int  capH;
     int  btnW;
     int  r;
 
-    /* Right-align the cluster to the SINGLE-SOURCE window width (GetWindowRect via DwfClientSize), never
-       GetClientRect. Each cell is the native caption-button width (~47 DIP) scaled by DPI. */
-    DwfClientSize(hwnd, &cx, &cy);
-    dpi  = GetDpiForWindow(hwnd);
-    if (0u == dpi) { dpi = 96u; }
-    capH = (int)DwfCaptionHeight(hwnd);
-    btnW = MulDiv(47, (int)dpi, 96);
-
-    r = (int)cx;
+    UNREFERENCED_PARAMETER(hwnd);
+    /* All CACHED -- no per-call queries. Driven client width + cached caption height + cached button width. */
+    capH = (int)g_dwf.capH;
+    btnW = (int)g_dwf.btnW;
+    r    = (int)g_dwf.cxClient;
     prcClose->right = r; prcClose->left = r - btnW; r -= btnW;
     prcMax->right   = r; prcMax->left   = r - btnW; r -= btnW;
     prcMin->right   = r; prcMin->left   = r - btnW; r -= btnW;
@@ -567,24 +621,16 @@ static DECLSPEC_NOINLINE int DwfButtonRects(HWND hwnd, RECT* prcClose, RECT* prc
     return 1;
 }
 
-static FORCEINLINE void DwfDrawGlyph(ID2D1DeviceContext* pDC, ID2D1Brush* pBrush, const RECT* prc, WCHAR glyph)
+/* Draw a CACHED glyph layout (gi = GL_*) centered in its button cell. DrawTextLayout on a ready-made
+   layout -- NO DrawText, no per-frame DWrite layout allocation. */
+static FORCEINLINE void DwfDrawGlyph(ID2D1DeviceContext* pDC, ID2D1Brush* pBrush, const RECT* prc, int gi)
 {
-    IDWriteTextFormat* pf;
-    D2D1_RECT_F        rc;
-    WCHAR              s[1];
+    D2D1_POINT_2F p;
 
-    pf = g_dwf.pIconFormat ? g_dwf.pIconFormat : g_dwf.pTextFormat;
-    if (!pf)
-    {
-        return;
-    }
-    s[0]      = glyph;
-    rc.left   = (FLOAT)prc->left;
-    rc.top    = (FLOAT)prc->top;
-    rc.right  = (FLOAT)prc->right;
-    rc.bottom = (FLOAT)prc->bottom;
-    CCALL(pDC, DrawText, s, 1u, pf, &rc, pBrush,
-          D2D1_DRAW_TEXT_OPTIONS_NONE, DWF_MEASURING_MODE_NATURAL);
+    if (gi < 0 || gi >= GL_COUNT || !g_dwf.pGlyphLayout[gi]) { return; }
+    p.x = (FLOAT)prc->left;
+    p.y = (FLOAT)prc->top;   /* layout is btnW x capH, centered both ways -> glyph centers in the cell */
+    CCALL(pDC, DrawTextLayout, p, g_dwf.pGlyphLayout[gi], pBrush, D2D1_DRAW_TEXT_OPTIONS_NONE);
 }
 
 /* The ONE cached brush, recolored. Returns it for Fill/DrawText/DrawGlyph -- never allocates a brush. */
@@ -599,7 +645,7 @@ static FORCEINLINE ID2D1Brush* DwfBrush(const D2D1_COLOR_F* c)
    uDWM's CButton glyph-state crossfade. cfGlyph is the caller's normal-state glyph color (itself crossfaded
    during a theme/activation change); Close's glyph cross-fades to white as its red highlight fades in.
    fDark selects the neutral hover/press fill shade; the shade switches by press state, the alpha animates. */
-static DECLSPEC_NOINLINE void DwfDrawButton(ID2D1DeviceContext* pDC, const RECT* prc, int id, WCHAR glyph,
+static DECLSPEC_NOINLINE void DwfDrawButton(ID2D1DeviceContext* pDC, const RECT* prc, int id, int gi,
                                             BOOL fDark, D2D1_COLOR_F cfGlyph, float flHover)
 {
     BOOL                  fPressed;
@@ -630,7 +676,7 @@ static DECLSPEC_NOINLINE void DwfDrawButton(ID2D1DeviceContext* pDC, const RECT*
         CCALL(pDC, FillRectangle, &rf, DwfBrush(&cf));
     }
     cf = cfGlyph;
-    DwfDrawGlyph(pDC, DwfBrush(&cf), prc, glyph);
+    DwfDrawGlyph(pDC, DwfBrush(&cf), prc, gi);
 }
 
 /* ---- V2 swapchain (re)creation ------------------------------------------------------------------ */
@@ -707,7 +753,11 @@ static DECLSPEC_NOINLINE BOOL DfwCreateSwapchain(HWND hwnd, UINT bufW, UINT bufH
     scd.SampleDesc.Count   = 1u;
     scd.SampleDesc.Quality = 0u;
     scd.BufferUsage        = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    scd.BufferCount        = 3u;                              /* triple buffer (spec) */
+    scd.BufferCount        = 3u + 1u + 1u;                    /* source-of-truth: TRIPLE_BUFFERED = 3+1+1.
+                                                                The +1+1 is headroom so the immediate present
+                                                                and the synced DO_NOT_SEQUENCE present never
+                                                                land on an in-flight/discarded buffer (the
+                                                                "incorrect frame"). */
     scd.Scaling            = DXGI_SCALING_STRETCH;             /* required by ForComposition (verified) */
     /* FLIP_DISCARD: in the flip model the backbuffer INDEX (GetBuffer(0)) is not a stable physical buffer
        ID -- SEQUENTIAL persists the rotating buffers, so a stale persisted/queued frame can surface
@@ -797,6 +847,8 @@ static DECLSPEC_NOINLINE void DwfApplyDwmFrame(HWND hwnd)
 }
 
 /* ---- public API --------------------------------------------------------------------------------- */
+
+static DECLSPEC_NOINLINE void DwfEnsureIcon(HWND hwnd);   /* defined below; built ONCE from init */
 
 BOOL WINAPI DwmFrameInit2(HWND hwnd)
 {
@@ -890,6 +942,9 @@ BOOL WINAPI DwmFrameInit2(HWND hwnd)
     DwfCreateTextFormat();
     DwfCreateIconFormat();
 
+    DfwRefreshMetrics(hwnd);   /* compute cached capH/dpi/title + build the cached text layouts ONCE */
+    DwfEnsureIcon(hwnd);       /* build the caption icon ONCE here -- never on the render hot path */
+
     (void)CCALL(g_dwf.pTarget, SetRoot, g_dwf.pVisual);
     (void)CCALL0(g_dwf.pDComp, Commit);   /* the ONLY Commit for the lifetime of the static visual tree */
 
@@ -921,14 +976,14 @@ static DECLSPEC_NOINLINE void DwfBeginTransition(HWND hwnd, BOOL fDarkTo, BOOL f
     g_dwf.flAnimT     = 0.0f;
     g_dwf.fAnim       = TRUE;
     g_dwf.dwLastTick  = GetTickCount();
-    DwmFrameRender2(hwnd, fDarkTo);          /* frame 0; the main render loop continues the timeline */
+    UNREFERENCED_PARAMETER(fDarkTo);   /* the continuous loop renders the crossfade -- no present here */
 }
 
 /* A button hover/press state changed: arm the 160ms timer (idempotent) so the per-button highlight
    opacities animate toward their new targets, and paint the current frame now. */
 static FORCEINLINE void DwfKickAnim(HWND hwnd)
 {
-    DwmFrameRender2(hwnd, g_dwf.fDark);   /* immediate feedback; the loop animates the opacity to target */
+    UNREFERENCED_PARAMETER(hwnd);   /* state already set; the continuous render loop is the SOLE presenter */
 }
 
 /* Build the cached caption icon ONCE, high-res, via a D3D11 texture: take the window's big icon, rasterize
@@ -1089,9 +1144,6 @@ static DECLSPEC_NOINLINE void DfwRenderEx(HWND hwnd, BOOL fDark, BOOL fRestart, 
     D2D1_COLOR_F          colText;
     D2D1_COLOR_F          colGlyph;
     D2D1_MATRIX_3X2_F     xform;
-    D2D1_RECT_F           rcText;
-    WCHAR                 szTitle[256];
-    int                   cch;
     int                   leftPad;
     int                   capH;
     BOOL                  fActive;
@@ -1108,27 +1160,19 @@ static DECLSPEC_NOINLINE void DfwRenderEx(HWND hwnd, BOOL fDark, BOOL fRestart, 
 
     DfwAdvance();   /* advance the animation timeline (loop-driven, not WM_TIMER) */
 
-    /* V2: monitor-sized buffer -- never ResizeBuffers. Regrow only if the client outgrew the buffer
-       (moved to a larger monitor); otherwise track the client size + presented sub-rect. */
+    /* NO size query. g_dwf.cxClient/cyClient is the size WE drive -- set from WM_WINDOWPOSCHANGING (the
+       authoritative new size, before the system applies it) and at init. The render, caption layout, hit-
+       test and client callback ALL read this one driven value, so nothing is re-derived from a queried
+       rect that can wobble between frames (the activate-crossfade text jitter). Regrow the monitor-sized
+       buffer only if the driven client outgrew it (a larger monitor). */
+    if ((g_dwf.cxClient > g_dwf.cxBuffer) || (g_dwf.cyClient > g_dwf.cyBuffer))
     {
-        UINT cx;
-        UINT cy;
-
-        DwfClientSize(hwnd, &cx, &cy);
-        if ((cx > g_dwf.cxBuffer) || (cy > g_dwf.cyBuffer))
-        {
-            UINT bw, bh;
-            DfwMonitorSize(hwnd, &bw, &bh);
-            if (bw < cx) { bw = cx; }
-            if (bh < cy) { bh = cy; }
-            if (!DfwCreateSwapchain(hwnd, bw, bh)) { return; }
-            (void)CCALL0(g_dwf.pDComp, Commit);   /* re-publish SetContent(new swapchain) */
-        }
-        if ((cx != g_dwf.cxClient) || (cy != g_dwf.cyClient))
-        {
-            g_dwf.cxClient = cx;
-            g_dwf.cyClient = cy;
-        }
+        UINT bw, bh;
+        DfwMonitorSize(hwnd, &bw, &bh);
+        if (bw < g_dwf.cxClient) { bw = g_dwf.cxClient; }
+        if (bh < g_dwf.cyClient) { bh = g_dwf.cyClient; }
+        if (!DfwCreateSwapchain(hwnd, bw, bh)) { return; }
+        (void)CCALL0(g_dwf.pDComp, Commit);   /* re-publish SetContent(new swapchain) */
     }
 
     if (!g_dwf.pTargetBmp) { return; }
@@ -1144,7 +1188,7 @@ static DECLSPEC_NOINLINE void DfwRenderEx(HWND hwnd, BOOL fDark, BOOL fRestart, 
 
     g_dwf.fDark  = fDark;              /* target shade (repaint contract for hover/size renders) */
     fActive      = g_dwf.fWndActive;   /* window-activation is owned by the activation messages */
-    capH         = (int)DwfCaptionHeight(hwnd);
+    capH         = (int)g_dwf.capH;    /* CACHED -- no WM_GETTITLEBARINFOEX on the hot path */
 
     /* Effective colors. During a crossfade, lerp between the (from) state captured at transition start and
        the (to = current) state by flAnimT; otherwise just the current state. One path serves the theme
@@ -1184,10 +1228,12 @@ static DECLSPEC_NOINLINE void DfwRenderEx(HWND hwnd, BOOL fDark, BOOL fRestart, 
     }
 
     /* Single surface: the app draws its CLIENT content into THIS same D2D context (the one swapchain
-       backbuffer), between the background clear and the caption glyphs. No separate client surface. */
+       backbuffer), between the background clear and the caption glyphs. The window size is PASSED -- the
+       SAME cxClient/cyClient the caption used this frame -- so the app must NOT re-query GetWindowRect
+       (a second source desyncs from the caption mid-drag). No separate client surface. */
     if (g_dwf.pfnClientDraw)
     {
-        g_dwf.pfnClientDraw(hwnd, (void*)pDC);
+        g_dwf.pfnClientDraw(hwnd, (void*)pDC, g_dwf.cxClient, g_dwf.cyClient);
     }
 
     /* High-res caption system icon, placed EXACTLY as win32kfull!DrawCaptionIcon does: the icon sits in a
@@ -1197,20 +1243,12 @@ static DECLSPEC_NOINLINE void DfwRenderEx(HWND hwnd, BOOL fDark, BOOL fRestart, 
        The title text then starts at rc.left + capH (xxxDrawCaptionTemp: rc.left += capH). The D3D11-texture
        source is downscaled here with linear filtering for crispness. */
     {
-        UINT dpi = GetDpiForWindow(hwnd);
-        int  iw;
-        int  ih;
-        int  ix;
-        int  iy;
+        int  iw = (int)g_dwf.iconW;   /* CACHED -- no GetDpiForWindow/GetSystemMetricsForDpi per frame */
+        int  ih = (int)g_dwf.iconH;
+        int  ix = (capH - iw) / 2 + 1;
+        int  iy = (capH - ih) / 2;
 
-        if (0u == dpi) { dpi = 96u; }
-        iw = GetSystemMetricsForDpi(SM_CXSMICON, dpi);
-        ih = GetSystemMetricsForDpi(SM_CYSMICON, dpi);
-        ix = (capH - iw) / 2 + 1;
-        iy = (capH - ih) / 2;
-
-        DwfEnsureIcon(hwnd);
-        if (g_dwf.pIconBmp)
+        if (g_dwf.pIconBmp)           /* icon built ONCE at init -- NOT DwfEnsureIcon'd per frame */
         {
             D2D1_RECT_F ri;
             ri.left   = (FLOAT)ix;
@@ -1222,19 +1260,15 @@ static DECLSPEC_NOINLINE void DfwRenderEx(HWND hwnd, BOOL fDark, BOOL fRestart, 
         }
     }
 
-    /* Caption title (DWrite, caption font). cch is not range-checked before the draw (szTitle[0] gates),
-       so no Spectre index reaches the DrawText call. */
-    szTitle[0] = 0;
-    cch = GetWindowTextW(hwnd, szTitle, ARRAYSIZE(szTitle));
-    if (g_dwf.pTextFormat && szTitle[0])
+    /* Caption title -- CACHED layout (built on title/DPI change). DrawTextLayout, NOT DrawText: no per-frame
+       DWrite layout allocation on the hot path. */
+    if (g_dwf.pTitleLayout)
     {
-        leftPad       = capH;   /* xxxDrawCaptionTemp: title starts one caption-height in (icon slot) */
-        rcText.left   = (FLOAT)leftPad;
-        rcText.top    = 0.0f;
-        rcText.right  = (FLOAT)g_dwf.cxClient;
-        rcText.bottom = (FLOAT)capH;
-        CCALL(pDC, DrawText, szTitle, (UINT32)cch, g_dwf.pTextFormat, &rcText,
-              DwfBrush(&colText), D2D1_DRAW_TEXT_OPTIONS_NONE, DWF_MEASURING_MODE_NATURAL);  /* cached brush */
+        D2D1_POINT_2F tp;
+        leftPad = capH;          /* xxxDrawCaptionTemp: title starts one caption-height in (icon slot) */
+        tp.x    = (FLOAT)leftPad;
+        tp.y    = 0.0f;
+        CCALL(pDC, DrawTextLayout, tp, g_dwf.pTitleLayout, DwfBrush(&colText), D2D1_DRAW_TEXT_OPTIONS_NONE);
     }
 
     /* Caption buttons: light/dark (sun/moon), Minimize, Maximize/Restore, Close. Glyph tint is the
@@ -1247,10 +1281,10 @@ static DECLSPEC_NOINLINE void DfwRenderEx(HWND hwnd, BOOL fDark, BOOL fRestart, 
 
         if (DwfButtonRects(hwnd, &rcClose, &rcMax, &rcMin, &rcLD))
         {
-            DwfDrawButton(pDC, &rcLD,    DWB_LIGHTDARK, (WCHAR)(fDark ? 0xE706 : 0xE708), fDark, colGlyph, g_dwf.flBtnOpacity[DWB_LIGHTDARK]);
-            DwfDrawButton(pDC, &rcMin,   DWB_MIN,       (WCHAR)0xE921,                    fDark, colGlyph, g_dwf.flBtnOpacity[DWB_MIN]);
-            DwfDrawButton(pDC, &rcMax,   DWB_MAX,       (WCHAR)(IsZoomed(hwnd) ? 0xE923 : 0xE922), fDark, colGlyph, g_dwf.flBtnOpacity[DWB_MAX]);
-            DwfDrawButton(pDC, &rcClose, DWB_CLOSE,     (WCHAR)0xE8BB,                    fDark, colGlyph, g_dwf.flBtnOpacity[DWB_CLOSE]);
+            DwfDrawButton(pDC, &rcLD,    DWB_LIGHTDARK, fDark ? GL_MOON : GL_SUN,          fDark, colGlyph, g_dwf.flBtnOpacity[DWB_LIGHTDARK]);
+            DwfDrawButton(pDC, &rcMin,   DWB_MIN,       GL_MIN,                           fDark, colGlyph, g_dwf.flBtnOpacity[DWB_MIN]);
+            DwfDrawButton(pDC, &rcMax,   DWB_MAX,       IsZoomed(hwnd) ? GL_RESTORE : GL_MAX, fDark, colGlyph, g_dwf.flBtnOpacity[DWB_MAX]);
+            DwfDrawButton(pDC, &rcClose, DWB_CLOSE,     GL_CLOSE,                         fDark, colGlyph, g_dwf.flBtnOpacity[DWB_CLOSE]);
         }
     }
 
@@ -1317,7 +1351,7 @@ DECLSPEC_NOINLINE void WINAPI DwmFrameSetBackdrop2(HWND hwnd, int iType)
         }
         (void)g_dwfExtend(hwnd, &m);
     }
-    DwmFrameRender2(hwnd, g_dwf.fDark);
+    /* no present here -- the continuous render loop picks up the new backdrop next frame */
 }
 
 void WINAPI DwmFrameResize2(HWND hwnd)
@@ -1354,6 +1388,11 @@ DECLSPEC_NOINLINE void WINAPI DwmFrameDestroy2(HWND hwnd)
     UNREFERENCED_PARAMETER(hwnd);
     g_dwf.fAnim       = FALSE;
     g_dwf.fInSizeMove = FALSE;
+    {
+        int gi;
+        DwfRelease((IUnknown**)&g_dwf.pTitleLayout);
+        for (gi = 0; gi < GL_COUNT; ++gi) { DwfRelease((IUnknown**)&g_dwf.pGlyphLayout[gi]); }
+    }
     DwfRelease((IUnknown**)&g_dwf.pTextFormat);
     DwfRelease((IUnknown**)&g_dwf.pIconFormat);
     DwfRelease((IUnknown**)&g_dwf.pIconBmp);
@@ -1467,12 +1506,9 @@ static DECLSPEC_NOINLINE LRESULT DwfHitTest(HWND hwnd, LPARAM lParam)
     ptScreen.y = (int)(short)HIWORD(lParam);
     ptClient   = ptScreen;
     ScreenToClient(hwnd, &ptClient);
-    {   /* single-source window size (GetWindowRect via DwfClientSize), NOT GetClientRect */
-        UINT cx;
-        UINT cy;
-        DwfClientSize(hwnd, &cx, &cy);
-        rc.left = 0; rc.top = 0; rc.right = (LONG)cx; rc.bottom = (LONG)cy;
-    }
+    rc.left = 0; rc.top = 0;             /* driven client size, not a queried rect */
+    rc.right  = (LONG)g_dwf.cxClient;
+    rc.bottom = (LONG)g_dwf.cyClient;
     dpi      = DwfDpi(hwnd);
     pad      = DwfMetric(SM_CXPADDEDBORDER, dpi);
     cxF      = DwfMetric(SM_CXFRAME, dpi) + pad;
@@ -1568,20 +1604,20 @@ BOOL WINAPI DwmFrameHandleMessage2(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM l
                 p->rgrc[0].right  -= fx;
                 p->rgrc[0].bottom -= fy;
             }
-            /* V2: fill the resized region synchronously, before DWM finalizes the geometry. The proposed
-               client is rgrc[0] (post maximize-inset). SetSourceSize + vblank-aligned restart present. */
+            /* This is where we DRIVE the client size: rgrc[0] (post maximize-inset) is the authoritative
+               client. Always store it. Render synchronously HERE only while in the modal size loop (main
+               loop suspended); otherwise the continuous loop is the sole presenter. */
             if (g_dwf.fActive && (g_dwf.hwnd == hwnd) && g_dwf.pSwapchain)
             {
                 UINT cx = (UINT)(p->rgrc[0].right - p->rgrc[0].left);
                 UINT cy = (UINT)(p->rgrc[0].bottom - p->rgrc[0].top);
                 if (cx < 1u) { cx = 1u; }
                 if (cy < 1u) { cy = 1u; }
-                if (((cx != g_dwf.cxClient) || (cy != g_dwf.cyClient)) &&
-                    (cx <= g_dwf.cxBuffer) && (cy <= g_dwf.cyBuffer))
+                if ((cx <= g_dwf.cxBuffer) && (cy <= g_dwf.cyBuffer))
                 {
                     g_dwf.cxClient = cx;
                     g_dwf.cyClient = cy;
-                    DfwRenderEx(hwnd, g_dwf.fDark, TRUE, FALSE);
+                    if (g_dwf.fInSizeMove) { DfwRenderEx(hwnd, g_dwf.fDark, TRUE, FALSE); }
                 }
             }
             *plr = 0;
@@ -1601,20 +1637,35 @@ BOOL WINAPI DwmFrameHandleMessage2(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM l
             return TRUE;
 
         case WM_PAINT:
-        {
-            PAINTSTRUCT ps;
-            (void)BeginPaint(hwnd, &ps);
-            DwmFrameRender2(hwnd, g_dwf.fDark);
-            (void)EndPaint(hwnd, &ps);
+            /* WS_EX_NOREDIRECTIONBITMAP: we should never get this, and there is no GDI surface to paint.
+               Validate and return -- the continuous render loop owns the swapchain. (ImmersiveWindow OnPaint.) */
+            (void)ValidateRect(hwnd, NULL);
             *plr = 0;
             return TRUE;
-        }
+
+        case WM_SETTEXT:
+            /* Let DefWindowProc store the new title, THEN rebuild the cached title layout (off the hot path). */
+            *plr = DefWindowProcW(hwnd, WM_SETTEXT, wParam, lParam);
+            if (g_dwf.fActive && (g_dwf.hwnd == hwnd)) { DfwRefreshMetrics(hwnd); }
+            return TRUE;
+
+        case WM_DPICHANGED:
+            if (g_dwf.fActive && (g_dwf.hwnd == hwnd))
+            {
+                RECT* prc = (RECT*)lParam;
+                if (prc) { (void)SetWindowPos(hwnd, NULL, prc->left, prc->top, prc->right - prc->left,
+                           prc->bottom - prc->top, SWP_NOZORDER | SWP_NOACTIVATE); }
+                DwfCreateTextFormat();    /* caption font size is DPI-dependent */
+                DwfCreateIconFormat();
+                DfwRefreshMetrics(hwnd);  /* rebuild cached metrics + layouts at the new DPI */
+            }
+            *plr = 0;
+            return TRUE;
 
         case WM_NCPAINT:
-            /* We own the whole window (NC removed); the caption lives in our composited surface, so an NC
-               repaint must re-render it. Suppressing this (just *plr=0) left the caption stale at startup
-               until a mouse-over the NC forced a render -- THIS is the non-client redraw that was missing. */
-            DwmFrameRender2(hwnd, g_dwf.fDark);
+            /* NC removed; nothing to paint. The continuous render loop (steady state) and the modal 0x69
+               timer (during move/size) keep the caption current -- no present here (avoids a racing frame). */
+            UNREFERENCED_PARAMETER(hwnd);
             *plr = 0;
             return TRUE;
 
@@ -1635,9 +1686,7 @@ BOOL WINAPI DwmFrameHandleMessage2(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM l
             DwfApplyDwmFrame(hwnd);
             (void)SetWindowPos(hwnd, NULL, 0, 0, 0, 0,
                                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-            (void)RedrawWindow(hwnd, NULL, NULL, RDW_FRAME | RDW_INVALIDATE | RDW_UPDATENOW);
-            DwmFrameRender2(hwnd, g_dwf.fDark);
-            if (g_dwfFlush) { (void)g_dwfFlush(); }   /* force DWM to present the commit now */
+            /* NO render/DwmFlush here -- the continuous loop presents the activation crossfade. */
             DwfBeginTransition(hwnd, g_dwf.fDark, (LOWORD(wParam) != WA_INACTIVE));
             return FALSE;
 
@@ -1660,7 +1709,7 @@ BOOL WINAPI DwmFrameHandleMessage2(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM l
             {
                 (void)KillTimer(hwnd, DWF_SIZEMOVE_TIMER);
                 g_dwf.fInSizeMove = FALSE;
-                DfwRenderEx(hwnd, g_dwf.fDark, TRUE, TRUE);   /* final settle frame */
+                /* no render -- the main loop resumes now and presents the final frame */
             }
             return FALSE;
 
@@ -1672,20 +1721,36 @@ BOOL WINAPI DwmFrameHandleMessage2(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM l
             if (g_dwf.fActive && (g_dwf.hwnd == hwnd)) { g_dwf.fResizing = TRUE; }
             return FALSE;   /* let DefWindowProc size it */
 
-        case WM_WINDOWPOSCHANGED:
+        case WM_WINDOWPOSCHANGING:
+            /* The authoritative NEW window size, handed to us BEFORE the system applies it. NC is removed
+               (client == window), so this IS our client size. Store it -- this is the ONLY place the size
+               is set on resize; the render never queries. */
             if (g_dwf.fActive && (g_dwf.hwnd == hwnd))
             {
-                DfwRenderEx(hwnd, g_dwf.fDark, TRUE, TRUE);   /* ImmersiveWindow OnWindowPosChanged: EndImmersivePaint(1,1) */
+                const WINDOWPOS* wp = (const WINDOWPOS*)lParam;
+                if (wp && !(wp->flags & SWP_NOSIZE))
+                {
+                    if (wp->cx > 0) { g_dwf.cxClient = (UINT)wp->cx; }
+                    if (wp->cy > 0) { g_dwf.cyClient = (UINT)wp->cy; }
+                }
             }
-            return FALSE;   /* fall through to DefWindowProc */
+            return FALSE;   /* let DefWindowProc apply it */
+
+        case WM_WINDOWPOSCHANGED:
+            /* No render: during a modal RESIZE the synchronous WM_NCCALCSIZE paint already drew the new size
+               (pre-geometry); during a MOVE the content is unchanged (DWM just repositions the visual);
+               non-modal -> the loop presents. Rendering here is a redundant/racing present. */
+            return FALSE;
 
         case WM_TIMER:
             if (DWF_SIZEMOVE_TIMER == wParam)   /* modal size/move loop tick -- the main loop is suspended */
             {
-                if (g_dwf.fActive && (g_dwf.hwnd == hwnd))
+                /* Paint ONLY while RESIZING (content changes). During a MOVE the content is unchanged --
+                   DWM repositions the visual -- so presenting would just race that reposition. */
+                if (g_dwf.fActive && (g_dwf.hwnd == hwnd) && g_dwf.fResizing)
                 {
                     DfwRenderEx(hwnd, g_dwf.fDark, FALSE, TRUE);   /* EndImmersivePaint(0,1) */
-                    if (!g_dwf.fMoving && g_dwfFlush) { (void)g_dwfFlush(); }
+                    if (g_dwfFlush) { (void)g_dwfFlush(); }
                 }
                 *plr = 0;
                 return TRUE;
@@ -1783,7 +1848,7 @@ DECLSPEC_NOINLINE BOOL WINAPI DwmFrameActive2(HWND hwnd)
 /* Register the app's client-draw callback. It is invoked every frame with the ONE swapchain D2D context
    (cast its void* to ID2D1DeviceContext*) so the app renders its client into the SAME surface as the
    caption -- one surface, the swapchain owns every pixel. */
-DECLSPEC_NOINLINE void WINAPI DwmFrameSetClientDraw2(HWND hwnd, void (WINAPI* pfn)(HWND, void*))
+DECLSPEC_NOINLINE void WINAPI DwmFrameSetClientDraw2(HWND hwnd, void (WINAPI* pfn)(HWND, void*, UINT, UINT))
 {
     if (g_dwf.fActive && (g_dwf.hwnd == hwnd)) { g_dwf.pfnClientDraw = pfn; }
 }
