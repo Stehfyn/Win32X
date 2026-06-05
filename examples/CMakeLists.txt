@@ -84,7 +84,7 @@ target_link_libraries(WindowsProject_v2 PRIVATE
   Win32X::Win32X
   Win32X::warnings
   kernel32 user32 gdi32 winspool comdlg32 advapi32
-  shell32 ole32 oleaut32 uuid odbc32 odbccp32)
+  shell32 ole32 oleaut32 uuid odbc32 odbccp32 uxtheme)
 
 target_compile_definitions(WindowsProject_v2 PRIVATE WIN32 _WINDOWS)
 

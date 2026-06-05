@@ -11,6 +11,7 @@
 #include "framework.h"   /* sets up the CRT-free environment (RTC/GS off) before any code */
 #include "WindowsProject.h"
 #include "Win32X/dwmframex2.h"   /* V2: ImmersiveWindow-style flip-swapchain caption compositor */
+#include <uxtheme.h>             /* SetWindowTheme */
 
 /* The app's CLIENT render, invoked by dwmframex every frame with the ONE swapchain D2D context -- proves
    the client lives on the SAME surface as the caption. Uses the lib's DwmFrameFillRect2 helper so the app
@@ -58,7 +59,7 @@ static void (WINAPI* volatile pfnAppThemeEnableCustomFrame)(HWND hwnd, BOOL fEna
 static BOOL (WINAPI* volatile pfnAppThemeCustomFrameHandleMessage)(
     HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, LRESULT* plr) = ThemeCustomFrameHandleMessage;
 static BOOL (WINAPI* volatile pfnAppDwmFrameInit)(HWND hwnd) = DwmFrameInit2;
-static void (WINAPI* volatile pfnAppDwmFrameRender)(HWND hwnd, BOOL fDark) = DwmFrameRender2;
+static void (WINAPI* volatile pfnAppDwmFrameRender)(HWND hwnd, BOOL fVSync, BOOL fDark) = DwmFrameRender2;
 static void (WINAPI* volatile pfnAppDwmFrameResize)(HWND hwnd) = DwmFrameResize2;
 static BOOL (WINAPI* volatile pfnAppDwmFrameHandleMessage)(
     HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, void (WINAPI* pfnToggle)(HWND), LRESULT* plr) = DwmFrameHandleMessage2;
@@ -100,6 +101,10 @@ DECLSPEC_NOINLINE int WINAPI _tWinMainEx(_In_ HINSTANCE          hInstance,
         return 0;
     }
 
+    /* Opt the window's themed bits into the dark Explorer theme (dark scrollbars/controls on any child). */
+    //(void)SetWindowTheme(g_hwnd, L"DarkMode_Explorer", NULL);
+    (void)SetWindowTheme(g_hwnd, L" ", L" ");
+
     hAccelTable = LoadAccelerators(hInstance, MAKEINTRESOURCE(IDC_WINDOWSPROJECT));
 
     /* V2: ImmersiveWindow-style render loop. The frame is driven by the loop (not WM_PAINT/WM_TIMER):
@@ -129,7 +134,7 @@ DECLSPEC_NOINLINE int WINAPI _tWinMainEx(_In_ HINSTANCE          hInstance,
             continue;
         }
 
-        DwmFrameRender2(g_hwnd, g_fDark);   /* BeginDraw+draw+EndDraw -> wait vblank -> double-present (continuous) */
+        DwmFrameRender2(g_hwnd, TRUE, g_fDark);   /* BeginDraw+draw+EndDraw -> wait vblank -> double-present (continuous) */
     }
 
     return (int)msg.wParam;
@@ -146,11 +151,12 @@ static FORCEINLINE ATOM MyRegisterClass(HINSTANCE hInstance)
     /* V2 = pure ImmersiveWindow: the swapchain owns EVERY pixel of the window (caption + client). So NO
        GDI conflicts -- no CS_HREDRAW/VREDRAW (no resize erase/redraw storms), NO background brush (no
        WM_ERASEBKGND GDI fill that would fight the swapchain), NO menu (a menu bar is a second, GDI surface). */
-    wcx.style         = CS_DBLCLKS;
+    wcx.style         = CS_DBLCLKS | CS_BYTEALIGNWINDOW | CS_BYTEALIGNCLIENT;
     wcx.lpfnWndProc   = WndProc;
     wcx.hInstance     = hInstance;
     wcx.hIcon         = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_WINDOWSPROJECT));
     wcx.hCursor       = LoadCursor(NULL, IDC_ARROW);
+    //wcx.hbrBackground = GetStockBrush(BLACK_BRUSH);
     wcx.hbrBackground = NULL;
     wcx.lpszMenuName  = NULL;
     wcx.lpszClassName = g_szWindowClass;
@@ -201,7 +207,7 @@ static FORCEINLINE BOOL InitInstance(HINSTANCE hInstance)
         DwmFrameSetClientDraw2(hwnd, AppClientDraw);   /* app's client renders into the single swapchain surface */
         InvalidateRect(hwnd, NULL, TRUE);
     }
-
+    
     /* Win32X's DPI-aware first show: size to three-quarters of the launch monitor's work area and
        position per STARTUPINFO -- the successor's upgrade over the template's ShowWindow(nCmdShow). */
     ShowWindowEx(hwnd, SWX_SHOWSTARTUP);
@@ -212,7 +218,7 @@ static FORCEINLINE BOOL InitInstance(HINSTANCE hInstance)
        window was compositable, so the caption stayed stale until a mouse-over the NC forced this exact
        redraw. This is that redraw, at the first moment it actually presents. */
     RedrawWindow(hwnd, NULL, NULL, RDW_FRAME | RDW_INVALIDATE | RDW_UPDATENOW);
-    pfnAppDwmFrameRender(hwnd, g_fDark);
+    pfnAppDwmFrameRender(hwnd, TRUE, g_fDark);
     return TRUE;
 }
 

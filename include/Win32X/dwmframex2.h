@@ -17,7 +17,7 @@ extern "C" {
 #endif
 
 BOOL WINAPI DwmFrameInit2(HWND hwnd);
-void WINAPI DwmFrameRender2(HWND hwnd, BOOL fDark);
+void WINAPI DwmFrameRender2(HWND hwnd, BOOL fVSync,BOOL fDark);
 void WINAPI DwmFrameResize2(HWND hwnd);
 void WINAPI DwmFrameDestroy2(HWND hwnd);
 BOOL WINAPI DwmFrameActive2(HWND hwnd);

@@ -35,11 +35,9 @@
 
 #include "Win32X/dwmframex.h"
 
-/* CRT-free: the compiler emits a reference to _fltused as soon as a translation unit uses floating
-   point (the D2D colors / 3x2 matrix here). /NODEFAULTLIB drops the CRT that would define it, so we
-   supply it ourselves -- one definition for the whole image. */
+/* CRT-free: _fltused is referenced here (this TU uses floating point) but DEFINED in llmath_x86.c -- the
+   one module kept out of /GL -- so Release LTCG can satisfy the optimizer's late reference (else LNK1237). */
 extern int _fltused;
-int _fltused = 0x9875;
 
 /* ---- our own COBJMACROS: a COM call is a vtable deref. ------------------------------------------ */
 #define CCALL(p, m, ...)  ((p)->lpVtbl->m((p), __VA_ARGS__))

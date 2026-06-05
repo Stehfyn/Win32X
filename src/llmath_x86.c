@@ -13,6 +13,14 @@
 #pragma check_stack(off)
 #pragma strict_gs_check(off)
 
+/* CRT-free: the compiler emits a reference to _fltused the moment any TU uses floating point (the D2D
+   colors / matrices in dwmframex*.c). /NODEFAULTLIB drops the CRT that would define it, so we supply it --
+   ONE definition for the whole image. It MUST live in this TU: llmath_x86.c is the one module kept out of
+   /GL (see src/CMakeLists.txt), so in Release the optimizer's *late*, code-gen-introduced reference to
+   _fltused resolves to an ordinary always-present object. Defining it in a /GL TU (dwmframex.c) instead
+   makes LTCG unable to satisfy that late reference -> LNK1237. Defined on every arch (not just x86). */
+int _fltused = 0x9875;
+
 #if defined(_M_IX86)
 
 /* 64x64 -> low 64 multiply. Same result for signed and unsigned. */

@@ -2024,8 +2024,8 @@ FORCEINLINE void WINAPI ThemeApplyTopLevel(HWND hwnd, BOOL fDark)
     /* Clip child windows out of the parent's paint: the per-tick crossfade fills the whole client, and
        without WS_CLIPCHILDREN that fill lands under child controls and fights their own paint -- the
        flicker. Clipped, the parent fill never touches child pixels; each child crossfades itself. */
-    SetWindowLongPtr(hwnd, GWL_STYLE, GetWindowLongPtr(hwnd, GWL_STYLE) | WS_CLIPCHILDREN);
-    SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)ThemeBackgroundBrush(fEffective));
+    //SetWindowLongPtr(hwnd, GWL_STYLE, GetWindowLongPtr(hwnd, GWL_STYLE) | WS_CLIPCHILDREN);
+    //SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)ThemeBackgroundBrush(fEffective));
     ThemeApplyWindow(hwnd, fEffective);
 }
 

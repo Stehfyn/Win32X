@@ -37,7 +37,7 @@ static void (WINAPI* volatile pfnAppThemeEnableCustomFrame)(HWND hwnd, BOOL fEna
 static BOOL (WINAPI* volatile pfnAppThemeCustomFrameHandleMessage)(
     HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, LRESULT* plr) = ThemeCustomFrameHandleMessage;
 static BOOL (WINAPI* volatile pfnAppDwmFrameInit)(HWND hwnd) = DwmFrameInit;
-static void (WINAPI* volatile pfnAppDwmFrameRender)(HWND hwnd, BOOL fDark) = DwmFrameRender;
+static void (WINAPI* volatile pfnAppDwmFrameRender)(HWND hwnd, BOOL fVSync, BOOL fDark) = DwmFrameRender;
 static void (WINAPI* volatile pfnAppDwmFrameResize)(HWND hwnd) = DwmFrameResize;
 static BOOL (WINAPI* volatile pfnAppDwmFrameHandleMessage)(
     HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, void (WINAPI* pfnToggle)(HWND), LRESULT* plr) = DwmFrameHandleMessage;
